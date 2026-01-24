@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="ghcr.io/nsg/claude-sandbox:latest"
+
+if ! podman image exists "$IMAGE"; then
+    echo "Pulling $IMAGE..."
+    podman pull "$IMAGE"
+fi
+
+run_args=(
+    --rm -it
+    -v "$(pwd):/workspace"
+    -v "$HOME/.claude:/root/.claude"
+    -e CLAUDE_CONFIG_DIR=/root/.claude
+    -e TERM=xterm-256color
+    -e COLORTERM=truecolor
+    -v /etc/localtime:/etc/localtime:ro
+    -v /etc/timezone:/etc/timezone:ro
+    -w /workspace
+    "$IMAGE"
+)
+
+if [[ "${1:-}" == "shell" ]]; then
+    podman run "${run_args[@]}" bash -l
+else
+    podman run "${run_args[@]}" bash -lc "claude $*"
+fi

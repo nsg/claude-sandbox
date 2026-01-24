@@ -1,0 +1,51 @@
+"$schema" = 'https://starship.rs/config-schema.json'
+
+add_newline = false
+
+format = """$sudo$username$hostname$directory$git_branch$git_state$jobs$status$character"""
+
+[sudo]
+disabled = false
+format = "[$symbol]($style)"
+symbol = "# "
+style = "bold yellow"
+
+[status]
+disabled = false
+format = " [$symbol$status]($style)"
+symbol = "x"
+style = "bold red"
+
+[username]
+style_user = "bold #E07A2D"
+style_root = "bold red"
+format = "[$user@]($style)"
+show_always = true
+
+[hostname]
+ssh_only = false
+format = "[$hostname ]($style)"
+style = "bold #E07A2D"
+
+[directory]
+style = "bold #F5A86E"
+truncation_length = 1
+truncate_to_repo = false
+format = "[$path]($style)"
+
+[git_branch]
+format = " [$branch]($style)"
+style = "#D97036"
+
+[git_state]
+format = "[$state( $progress_current/$progress_total)]($style) "
+style = "bold #D97036"
+
+[jobs]
+format = "[$symbol$number]($style)"
+symbol = "j:"
+style = "white"
+
+[character]
+success_symbol = " [\\$](#E07A2D)"
+error_symbol = " [\\$](bold red)"
