@@ -1,6 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_URL="https://github.com/nsg/claude-sandbox/releases/latest/download/claude-sandbox"
+
+update_check() {
+    local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sandbox-lastmod"
+    mkdir -p "$(dirname "$cache_file")"
+
+    # Get remote Last-Modified via HEAD request with redirects (skip silently if offline)
+    remote_lastmod=$(curl -fsSIL "$SCRIPT_URL" 2>/dev/null | grep -i '^last-modified:' | tail -1 | tr -d '\r') || return
+    local_lastmod=$(cat "$cache_file" 2>/dev/null || echo "")
+
+    # First run: save baseline without prompting
+    if [[ -z "$local_lastmod" ]]; then
+        echo "$remote_lastmod" > "$cache_file"
+        return
+    fi
+
+    if [[ "$remote_lastmod" != "$local_lastmod" ]]; then
+        while true; do
+            read -p "Update available. Update now? [y/N] " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                curl -fsSL "$SCRIPT_URL" -o "$0"
+                echo "$remote_lastmod" > "$cache_file"
+                exec "$0" "$@"
+            elif [[ -z "$REPLY" || $REPLY =~ ^[Nn]$ ]]; then
+                break
+            fi
+        done
+    fi
+}
+
+update_check "$@"
+
 IMAGE="ghcr.io/nsg/claude-sandbox:latest"
 
 if ! podman image exists "$IMAGE"; then
