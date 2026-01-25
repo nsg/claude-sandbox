@@ -38,14 +38,14 @@ enum Commands {
     },
 }
 
+fn home_dir() -> PathBuf {
+    PathBuf::from(env::var("HOME").expect("HOME environment variable not set"))
+}
+
 fn cache_dir() -> PathBuf {
     env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .expect("Could not find home directory")
-                .join(".cache")
-        })
+        .unwrap_or_else(|_| home_dir().join(".cache"))
 }
 
 fn get_last_modified(client: &Client, url: &str) -> Option<String> {
@@ -127,9 +127,7 @@ fn update_check(client: &Client) {
 }
 
 fn install_skills(client: &Client) {
-    let target_dir = dirs::home_dir()
-        .expect("Could not find home directory")
-        .join(".claude/skills");
+    let target_dir = home_dir().join(".claude/skills");
     let cache_file = cache_dir().join("claude-sandbox-skills-lastmod");
 
     println!("Installing skills to {}...", target_dir.display());
@@ -208,7 +206,7 @@ fn git_config(key: &str) -> String {
 
 fn run_container(extra_args: &[&str]) {
     let cwd = env::current_dir().expect("Could not get current directory");
-    let home = dirs::home_dir().expect("Could not find home directory");
+    let home = home_dir();
     let claude_dir = home.join(".claude");
 
     let git_user_name = git_config("user.name");
