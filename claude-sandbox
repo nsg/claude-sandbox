@@ -36,13 +36,9 @@ update_check "$@"
 
 IMAGE="ghcr.io/nsg/claude-sandbox:latest"
 
-if ! podman image exists "$IMAGE"; then
-    echo "Pulling $IMAGE..."
-    podman pull "$IMAGE"
-fi
-
 run_args=(
     --rm -it
+    --pull=newer
     -v "$(pwd):/workspace"
     -v "$HOME/.claude:/root/.claude"
     -e CLAUDE_CONFIG_DIR=/root/.claude
