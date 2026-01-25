@@ -81,14 +81,34 @@ This is fragile but sometimes the only way to split intertwined changes. To make
 
 ## Workflow
 
-1. Run `git diff HEAD` to see all uncommitted changes
-2. Run `git status` to see the current state
-3. Analyze changes and identify logical groupings
-4. For each logical group:
+**Use subagents and parallel execution for efficiency.**
+
+1. **Initial review** - Run these in parallel using multiple Bash tool calls in a single message:
+   - `git status`
+   - `git diff HEAD`
+   - `git log --oneline -5`
+
+2. **Run formatters/linters** - If code changes exist, run in parallel:
+   - Rust: `cargo fmt` and `cargo clippy` in parallel
+   - Other languages: appropriate formatters/linters
+
+3. **Analyze changes** and identify logical groupings
+
+4. **For each logical group**:
    a. Stage the relevant files/lines
    b. Verify staged content with `git diff --cached`
    c. Commit with a properly formatted message
-5. Verify final state with `git log --oneline -3` and `git status`
+
+5. **Verify final state** - Run in parallel:
+   - `git log --oneline -3`
+   - `git status`
+
+## Subagent Usage
+
+When multiple unrelated commits are needed, use the Task tool to spawn subagents:
+- Each subagent handles one atomic commit
+- Subagents can analyze their portion of changes independently
+- Coordinate staging order to avoid conflicts (sequential commits, parallel analysis)
 
 ## Critical Rules
 
