@@ -63,7 +63,7 @@ jobs:
             echo "## Container Image"
             echo ""
             echo '```bash'
-            echo 'podman pull ghcr.io/nsg/claude-sandbox:master'
+            echo 'podman pull ghcr.io/nsg/claude-sandbox:latest'
             echo '```'
             echo ""
             echo "## Recent Changes"
