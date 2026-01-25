@@ -45,6 +45,9 @@ jobs:
           tags: "${{ steps.meta.outputs.tags }}"
           labels: "${{ steps.meta.outputs.labels }}"
 
+      - name: Build skills archives
+        run: make dist
+
       - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,6 +63,12 @@ jobs:
             echo 'chmod +x ~/bin/claude-sandbox'
             echo '```'
             echo ""
+            echo "## Install Skills"
+            echo ""
+            echo '```bash'
+            echo 'claude-sandbox install skills'
+            echo '```'
+            echo ""
             echo "## Container Image"
             echo ""
             echo '```bash'
@@ -71,4 +80,4 @@ jobs:
             echo '```'
             git log --oneline -20
             echo '```'
-          } | gh release create latest --title "Latest" --notes-file - claude-sandbox
+          } | gh release create latest --title "Latest" --notes-file - claude-sandbox dist/skills.zip dist/skills.tar.gz

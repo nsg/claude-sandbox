@@ -52,8 +52,30 @@ run_args=(
     "$IMAGE"
 )
 
-if [[ "${1:-}" == "shell" ]]; then
-    podman run "${run_args[@]}" bash -l
-else
-    podman run "${run_args[@]}" bash -lc "claude $*"
-fi
+install_skills() {
+    local skills_url="https://github.com/nsg/claude-sandbox/releases/latest/download/skills.tar.gz"
+    local target_dir="$HOME/.claude/skills"
+
+    echo "Installing skills to $target_dir..."
+    mkdir -p "$target_dir"
+    curl -fsSL "$skills_url" | tar -xz -C "$target_dir"
+    echo "Skills installed successfully."
+}
+
+case "${1:-}" in
+    shell)
+        podman run "${run_args[@]}" bash -l
+        ;;
+    install)
+        if [[ "${2:-}" == "skills" ]]; then
+            install_skills
+        else
+            echo "Unknown install target: ${2:-}"
+            echo "Usage: claude-sandbox install skills"
+            exit 1
+        fi
+        ;;
+    *)
+        podman run "${run_args[@]}" bash -lc "claude $*"
+        ;;
+esac

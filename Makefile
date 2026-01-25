@@ -1,4 +1,4 @@
-.PHONY: shell claude build ensure-running clean install uninstall
+.PHONY: shell claude build ensure-running clean install uninstall skills dist
 
 CONTAINER_NAME ?= claude
 IMAGE = localhost/claude:latest
@@ -48,3 +48,14 @@ install:
 uninstall:
 	@rm -f $(HOME)/bin/claude-sandbox
 	@echo "Removed claude-sandbox from $(HOME)/bin"
+
+skills:
+	@mkdir -p $(CLAUDE_DIR)/skills
+	@cp -r skills/* $(CLAUDE_DIR)/skills/
+	@echo "Installed skills to $(CLAUDE_DIR)/skills/"
+
+dist:
+	@mkdir -p dist
+	@cd skills && zip -r ../dist/skills.zip .
+	@cd skills && tar -czf ../dist/skills.tar.gz .
+	@echo "Created dist/skills.zip and dist/skills.tar.gz"
