@@ -3,8 +3,9 @@ use dialoguer::Confirm;
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use std::env;
-use std::fs::{self, File};
+use std::fs::{self, File, Permissions};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -111,8 +112,30 @@ fn update_check(client: &Client) {
                 }
             };
 
-            if let Err(e) = fs::write(&exe_path, &bytes) {
+            // Write to a temp file first, then rename (can't write to running binary)
+            let temp_path = exe_path.with_extension("new");
+            if let Err(e) = fs::write(&temp_path, &bytes) {
                 eprintln!("Failed to write update: {}", e);
+                return;
+            }
+
+            // Set executable permissions
+            if let Err(e) = fs::set_permissions(&temp_path, Permissions::from_mode(0o755)) {
+                eprintln!("Failed to set permissions: {}", e);
+                let _ = fs::remove_file(&temp_path);
+                return;
+            }
+
+            // Remove old binary (allowed on Linux even while running)
+            if let Err(e) = fs::remove_file(&exe_path) {
+                eprintln!("Failed to remove old binary: {}", e);
+                let _ = fs::remove_file(&temp_path);
+                return;
+            }
+
+            // Rename new binary into place
+            if let Err(e) = fs::rename(&temp_path, &exe_path) {
+                eprintln!("Failed to rename new binary: {}", e);
                 return;
             }
 
