@@ -48,5 +48,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create latest --title "Latest" --notes "Latest build from master" 2>/dev/null || true
-          gh release upload latest claude-sandbox --clobber
+          gh release delete latest --yes 2>/dev/null || true
+          {
+            echo "Run Claude CLI in a containerized environment."
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo '```bash'
+            echo 'curl -fsSL https://github.com/nsg/claude-sandbox/releases/latest/download/claude-sandbox -o ~/bin/claude-sandbox'
+            echo 'chmod +x ~/bin/claude-sandbox'
+            echo '```'
+            echo ""
+            echo "## Container Image"
+            echo ""
+            echo '```bash'
+            echo 'podman pull ghcr.io/nsg/claude-sandbox:master'
+            echo '```'
+            echo ""
+            echo "## Recent Changes"
+            echo ""
+            echo '```'
+            git log --oneline -20
+            echo '```'
+          } | gh release create latest --title "Latest" --notes-file - claude-sandbox
