@@ -13,9 +13,6 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 
 FROM docker.io/ubuntu:24.04
 
-ARG GIT_USER_NAME="No Name"
-ARG GIT_USER_EMAIL="no.name@local.dev"
-
 # Base packages
 RUN apt-get update && apt-get upgrade -y && \
     apt-get install -y \
@@ -31,10 +28,6 @@ RUN apt-get update && apt-get upgrade -y && \
         npm \
         rustup \
     && rm -rf /var/lib/apt/lists/*
-
-# Git config
-RUN git config --global user.name "$GIT_USER_NAME" && \
-    git config --global user.email "$GIT_USER_EMAIL"
 
 # Rust toolchain
 RUN rustup default stable
@@ -54,8 +47,13 @@ RUN echo 'eval "$(starship init bash)"' >> /root/.bashrc
 RUN mkdir -p /root/.config
 COPY config/starship.toml /root/.config/starship.toml
 
+# Entrypoint script for runtime configuration
+COPY config/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 WORKDIR /workspace
 
 EXPOSE 3456
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["/bin/bash"]

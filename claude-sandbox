@@ -48,6 +48,8 @@ run_args=(
     -e CLAUDE_CONFIG_DIR=/root/.claude
     -e TERM=xterm-256color
     -e COLORTERM=truecolor
+    -e GIT_USER_NAME="$(git config user.name)"
+    -e GIT_USER_EMAIL="$(git config user.email)"
     -v /etc/localtime:/etc/localtime:ro
     -v /etc/timezone:/etc/timezone:ro
     -w /workspace
