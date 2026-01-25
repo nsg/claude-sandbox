@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="header.png" alt="Claude Sandbox" width="600">
+</p>
+
 # claude-sandbox
 
 Run [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) in a containerized environment using Podman.
