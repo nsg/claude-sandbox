@@ -6,7 +6,7 @@ This is mainly written for my own needs, but I try to keep it somewhat generic s
 
 ## Installation
 
-Download the `claude-sandbox` script and place it in your PATH:
+Download the `claude-sandbox` binary and place it in your PATH:
 
 ```bash
 curl -fsSL https://github.com/nsg/claude-sandbox/releases/latest/download/claude-sandbox -o ~/bin/claude-sandbox
@@ -34,7 +34,7 @@ claude-sandbox shell
 claude-sandbox install skills
 ```
 
-The script mounts your current directory to `/workspace` and your `~/.claude` config directory into the container.
+It mounts your current directory to `/workspace` and your `~/.claude` config directory into the container.
 
 ## Skills
 

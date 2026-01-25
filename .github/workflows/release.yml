@@ -45,6 +45,11 @@ jobs:
           tags: "${{ steps.meta.outputs.tags }}"
           labels: "${{ steps.meta.outputs.labels }}"
 
+      - name: Build claude-sandbox binary
+        run: |
+          rustup default stable
+          cd claude-sandbox && cargo build --release
+
       - name: Build skills archives
         run: make dist
 
@@ -80,4 +85,4 @@ jobs:
             echo '```'
             git log --oneline -20
             echo '```'
-          } | gh release create latest --title "Latest" --notes-file - claude-sandbox dist/skills.zip dist/skills.tar.gz
+          } | gh release create latest --title "Latest" --notes-file - claude-sandbox/target/release/claude-sandbox dist/skills.zip dist/skills.tar.gz

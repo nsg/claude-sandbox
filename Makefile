@@ -39,9 +39,9 @@ clean:
 	-podman rmi $(IMAGE)
 
 install:
+	@cd claude-sandbox && cargo build --release
 	@mkdir -p $(HOME)/bin
-	@cp claude-sandbox $(HOME)/bin/claude-sandbox
-	@chmod +x $(HOME)/bin/claude-sandbox
+	@cp claude-sandbox/target/release/claude-sandbox $(HOME)/bin/claude-sandbox
 	@echo "Installed claude-sandbox to $(HOME)/bin/claude-sandbox"
 	@echo "Make sure $(HOME)/bin is in your PATH"
 
