@@ -2,6 +2,8 @@
 
 Run [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) in a containerized environment using Podman.
 
+This is mainly written for my own needs, but I try to keep it somewhat generic so it may be useful for others.
+
 ## Installation
 
 Download the `claude-sandbox` script and place it in your PATH:
