@@ -34,6 +34,32 @@ update_check() {
 
 update_check "$@"
 
+skills_update_check() {
+    local skills_url="https://github.com/nsg/claude-sandbox/releases/latest/download/skills.tar.gz"
+    local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sandbox-skills-lastmod"
+
+    # Only check if skills were previously installed
+    [[ -f "$cache_file" ]] || return
+
+    local_lastmod=$(cat "$cache_file")
+
+    # Get remote Last-Modified via HEAD request (skip silently if offline)
+    remote_lastmod=$(curl -fsSIL "$skills_url" 2>/dev/null | grep -i '^last-modified:' | tail -1 | tr -d '\r') || return
+
+    if [[ "$remote_lastmod" != "$local_lastmod" ]]; then
+        while true; do
+            read -p "Skills update available. Update now? [y/N] " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                install_skills
+                break
+            elif [[ -z "$REPLY" || $REPLY =~ ^[Nn]$ ]]; then
+                break
+            fi
+        done
+    fi
+}
+
 IMAGE="ghcr.io/nsg/claude-sandbox:latest"
 
 run_args=(
@@ -55,12 +81,23 @@ run_args=(
 install_skills() {
     local skills_url="https://github.com/nsg/claude-sandbox/releases/latest/download/skills.tar.gz"
     local target_dir="$HOME/.claude/skills"
+    local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sandbox-skills-lastmod"
 
     echo "Installing skills to $target_dir..."
     mkdir -p "$target_dir"
     curl -fsSL "$skills_url" | tar -xz -C "$target_dir"
+
+    # Save the Last-Modified header for future update checks
+    mkdir -p "$(dirname "$cache_file")"
+    remote_lastmod=$(curl -fsSIL "$skills_url" 2>/dev/null | grep -i '^last-modified:' | tail -1 | tr -d '\r') || true
+    if [[ -n "$remote_lastmod" ]]; then
+        echo "$remote_lastmod" > "$cache_file"
+    fi
+
     echo "Skills installed successfully."
 }
+
+skills_update_check
 
 case "${1:-}" in
     shell)

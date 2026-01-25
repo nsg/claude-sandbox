@@ -30,7 +30,7 @@ claude-sandbox "explain this code"
 # Open an interactive shell
 claude-sandbox shell
 
-# Install global skills
+# Install global skills (updates are checked automatically on launch)
 claude-sandbox install skills
 ```
 
@@ -38,7 +38,7 @@ The script mounts your current directory to `/workspace` and your `~/.claude` co
 
 ## Skills
 
-Install optional Claude Code skills to `~/.claude/skills/`:
+Install optional Claude Code skills to `~/.claude/skills/`. Updates are checked automatically on each launch.
 
 ```bash
 claude-sandbox install skills
