@@ -29,9 +29,29 @@ claude-sandbox "explain this code"
 
 # Open an interactive shell
 claude-sandbox shell
+
+# Install global skills
+claude-sandbox install skills
 ```
 
 The script mounts your current directory to `/workspace` and your `~/.claude` config directory into the container.
+
+## Skills
+
+Install optional Claude Code skills to `~/.claude/skills/`:
+
+```bash
+claude-sandbox install skills
+```
+
+Included skills:
+
+| Skill | Auto | Description |
+|-------|------|-------------|
+| `/rust` | Yes | Rust development guidelines and workflow |
+| `/git` | Yes | Git operations with atomic commits following conventional commit standards |
+
+Skills can be invoked manually with `/skill-name`. Skills marked "Auto" can also be invoked automatically by Claude when relevant.
 
 ## What's Included
 
