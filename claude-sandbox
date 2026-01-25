@@ -58,7 +58,9 @@ skills_update_check() {
     local cache_file="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sandbox-skills-lastmod"
 
     # Only check if skills were previously installed
-    [[ -f "$cache_file" ]] || return
+    if [[ ! -f "$cache_file" ]]; then
+        return 0
+    fi
 
     local_lastmod=$(cat "$cache_file")
 
