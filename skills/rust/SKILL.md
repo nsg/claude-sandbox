@@ -15,7 +15,10 @@ description: Rust development guidelines and workflow
 ## Dependencies
 
 - Use cargo commands only
-- Use trusted crates only, ask before adding new ones
+- **ALWAYS ask the user for approval before adding any new dependency**
+- Only suggest well-known, widely-used crates with good maintenance records
+- Prefer crates from the Rust ecosystem's trusted maintainers (e.g., tokio-rs, serde-rs, rust-lang)
+- Check crate download counts and recent activity as indicators of reliability
 - Run `cargo audit` to check for vulnerabilities
 
 ## Toolchain
