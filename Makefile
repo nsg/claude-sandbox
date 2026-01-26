@@ -23,7 +23,7 @@ ensure-running:
 			-e COLORTERM=truecolor \
 			-v /etc/localtime:/etc/localtime:ro \
 			-v /etc/timezone:/etc/timezone:ro \
-			-p 3456:3456 \
+			-p 8080:8080 \
 			-it $(IMAGE) /bin/bash)
 	@[ "$$(podman inspect -f '{{.State.Running}}' $(CONTAINER_NAME))" = "true" ] || \
 		podman start $(CONTAINER_NAME)

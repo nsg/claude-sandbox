@@ -31,11 +31,21 @@ claude-sandbox
 claude-sandbox --help
 claude-sandbox "explain this code"
 
+# Expose ports from the container
+claude-sandbox -p 8080
+claude-sandbox -p 8080 -p 3000 -p 5173
+
 # Open an interactive shell
 claude-sandbox shell
 
 # Install global skills (updates are checked automatically on launch)
 claude-sandbox install skills
+```
+
+Use `--` to pass arguments to claude instead of claude-sandbox:
+
+```bash
+claude-sandbox -p 8080 -- -p
 ```
 
 It mounts your current directory to `/workspace` and your `~/.claude` config directory into the container.

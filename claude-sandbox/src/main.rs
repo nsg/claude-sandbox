@@ -20,9 +20,14 @@ const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
 #[derive(Parser)]
 #[command(name = "claude-sandbox")]
 #[command(about = "Run Claude in a sandboxed container")]
+#[command(after_help = "Use -- to pass arguments to claude, e.g.: claude-sandbox -p 8080 -- -p")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Expose port(s) from container (can be repeated, e.g., -p 8080 -p 3000)
+    #[arg(short = 'p', long = "port", action = clap::ArgAction::Append)]
+    ports: Vec<u16>,
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -243,7 +248,7 @@ fn git_config(key: &str) -> String {
         .unwrap_or_default()
 }
 
-fn run_container(extra_args: &[&str], pull_image: bool) {
+fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16]) {
     let cwd = env::current_dir().expect("Could not get current directory");
     let home = home_dir();
     let claude_dir = home.join(".claude");
@@ -268,8 +273,13 @@ fn run_container(extra_args: &[&str], pull_image: bool) {
         .arg("-e")
         .arg(format!("GIT_USER_EMAIL={}", git_user_email))
         .args(["-v", "/etc/localtime:/etc/localtime:ro"])
-        .args(["-v", "/etc/timezone:/etc/timezone:ro"])
-        .args(["-w", "/workspace"])
+        .args(["-v", "/etc/timezone:/etc/timezone:ro"]);
+
+    for port in ports {
+        cmd.args(["-p", &format!("{}:{}", port, port)]);
+    }
+
+    cmd.args(["-w", "/workspace"])
         .arg(IMAGE)
         .args(extra_args);
 
@@ -287,7 +297,7 @@ fn main() {
 
     match cli.command {
         Some(Commands::Shell) => {
-            run_container(&["bash", "-l"], should_pull);
+            run_container(&["bash", "-l"], should_pull, &cli.ports);
         }
         Some(Commands::Install { target }) => {
             if target == "skills" {
@@ -300,10 +310,10 @@ fn main() {
         }
         None => {
             if cli.args.is_empty() {
-                run_container(&["bash", "-lc", "claude"], should_pull);
+                run_container(&["bash", "-lc", "claude"], should_pull, &cli.ports);
             } else {
                 let claude_cmd = format!("claude {}", cli.args.join(" "));
-                run_container(&["bash", "-lc", &claude_cmd], should_pull);
+                run_container(&["bash", "-lc", &claude_cmd], should_pull, &cli.ports);
             }
         }
     }

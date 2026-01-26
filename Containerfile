@@ -53,7 +53,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /workspace
 
-EXPOSE 3456
+EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["/bin/bash"]
