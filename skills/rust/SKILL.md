@@ -14,12 +14,13 @@ description: Rust development guidelines and workflow
 
 ## Dependencies
 
-- Use cargo commands only
+- **MUST use `cargo add <crate>` to add dependencies** - never manually edit Cargo.toml for dependencies
 - **ALWAYS ask the user for approval before adding any new dependency**
 - Only suggest well-known, widely-used crates with good maintenance records
 - Prefer crates from the Rust ecosystem's trusted maintainers (e.g., tokio-rs, serde-rs, rust-lang)
 - Check crate download counts and recent activity as indicators of reliability
-- Run `cargo audit` to check for vulnerabilities
+- **ALWAYS run `cargo audit` after adding a new dependency**
+- **ALWAYS report any vulnerabilities or issues from `cargo audit` to the user** - never silently ignore audit results
 
 ## Toolchain
 
