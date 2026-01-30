@@ -1,25 +1,30 @@
-<p align="center">
+<div align="center">
   <img src="header.png" alt="Claude Sandbox" width="600">
-</p>
+  <p>Run Claude CLI in a containerized environment using Podman.</p>
+</div>
 
-# claude-sandbox
+## About
 
-Run [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) in a containerized environment using Podman.
+claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude` config into the container, keeping your host system clean while giving Claude access to everything it needs.
 
-This is mainly written for my own needs, but I try to keep it somewhat generic so it may be useful for others.
+The binary handles container image pulls, self-updates, and skill updates automatically.
 
-## Installation
+## Quick Start
 
-Download the `claude-sandbox` binary and place it in your PATH:
+Requires [Podman](https://podman.io/getting-started/installation).
+
+Download the binary and place it in your PATH:
 
 ```bash
 curl -fsSL https://github.com/nsg/claude-sandbox/releases/latest/download/claude-sandbox -o ~/bin/claude-sandbox
 chmod +x ~/bin/claude-sandbox
 ```
 
-## Prerequisites
+Run it:
 
-- [Podman](https://podman.io/getting-started/installation)
+```bash
+claude-sandbox
+```
 
 ## Usage
 
@@ -27,8 +32,7 @@ chmod +x ~/bin/claude-sandbox
 # Run Claude CLI (image is pulled automatically on first run)
 claude-sandbox
 
-# Run with arguments
-claude-sandbox --help
+# Pass a prompt directly
 claude-sandbox "explain this code"
 
 # Expose ports from the container
@@ -38,7 +42,7 @@ claude-sandbox -p 8080 -p 3000 -p 5173
 # Open an interactive shell
 claude-sandbox shell
 
-# Install global skills (updates are checked automatically on launch)
+# Install skills
 claude-sandbox install skills
 ```
 
@@ -48,8 +52,6 @@ Use `--` to pass arguments to claude instead of claude-sandbox:
 claude-sandbox -p 8080 -- -p
 ```
 
-It mounts your current directory to `/workspace` and your `~/.claude` config directory into the container.
-
 ## Skills
 
 Install optional Claude Code skills to `~/.claude/skills/`. Updates are checked automatically on each launch.
@@ -58,14 +60,14 @@ Install optional Claude Code skills to `~/.claude/skills/`. Updates are checked 
 claude-sandbox install skills
 ```
 
-Included skills:
+| Skill | Description |
+|-------|-------------|
+| `/rust` | Rust development guidelines and workflow |
+| `/git` | Git operations with atomic commits following conventional commit standards |
+| `/github-actions` | GitHub Actions workflow development with official actions preference |
+| `/readme` | README writing and maintenance guidelines |
 
-| Skill | Auto | Description |
-|-------|------|-------------|
-| `/rust` | Yes | Rust development guidelines and workflow |
-| `/git` | Yes | Git operations with atomic commits following conventional commit standards |
-
-Skills can be invoked manually with `/skill-name`. Skills marked "Auto" can also be invoked automatically by Claude when relevant.
+Invoke skills manually with `/skill-name` inside Claude.
 
 ## What's Included
 
@@ -73,18 +75,25 @@ The container includes:
 
 - Claude CLI
 - Node.js & npm
-- Rust (via rustup)
+- Rust (via rustup) + cargo-audit
 - Zola
-- Git, curl, jq, tree, build-essential
+- Starship prompt
+- Git, curl, jq, tree, build-essential, patchutils
 
 ## Building Locally
 
-To build the container image yourself:
+Build the container image:
 
 ```bash
 make build
 ```
 
+Build and install the binary:
+
+```bash
+make install
+```
+
 ## License
 
-See [LICENSE](LICENSE) for details.
+MIT — see [LICENSE.md](LICENSE.md) for details.
