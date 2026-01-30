@@ -272,6 +272,7 @@ fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16]) {
         .arg(format!("GIT_USER_NAME={}", git_user_name))
         .arg("-e")
         .arg(format!("GIT_USER_EMAIL={}", git_user_email))
+        .args(["-e", "IS_SANDBOX=1"])
         .args(["-v", "/etc/localtime:/etc/localtime:ro"])
         .args(["-v", "/etc/timezone:/etc/timezone:ro"]);
 
