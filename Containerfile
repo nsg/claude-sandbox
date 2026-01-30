@@ -31,6 +31,7 @@ RUN apt-get update && apt-get upgrade -y && \
 
 # Rust toolchain
 RUN rustup default stable
+RUN cargo install cargo-audit
 
 # Copy binaries from builder
 COPY --from=builder /usr/local/bin/starship /usr/local/bin/
