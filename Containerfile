@@ -24,6 +24,7 @@ RUN apt-get update && apt-get upgrade -y && \
         tree \
         patchutils \
         jq \
+        ffmpeg \
         nodejs \
         npm \
         rustup \
