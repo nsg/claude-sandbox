@@ -38,6 +38,10 @@ COPY --from=builder /usr/local/bin/starship /usr/local/bin/
 COPY --from=builder /usr/local/bin/zola /usr/local/bin/
 COPY --from=builder /root/.local/bin/claude /root/.local/bin/
 
+# Install Playwright MCP server and Chromium with OS dependencies
+RUN npm install -g @playwright/mcp && \
+    npx playwright install --with-deps chromium
+
 # Set PATH for all shells
 ENV PATH="/root/.local/bin:$PATH"
 
@@ -47,6 +51,9 @@ RUN echo 'eval "$(starship init bash)"' >> /root/.bashrc
 # Starship config
 RUN mkdir -p /root/.config
 COPY config/starship.toml /root/.config/starship.toml
+
+# MCP server config (merged into project .mcp.json at runtime by entrypoint)
+COPY config/mcp.json /etc/claude/mcp.json
 
 # Entrypoint script for runtime configuration
 COPY config/entrypoint.sh /usr/local/bin/entrypoint.sh
