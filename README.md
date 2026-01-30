@@ -69,6 +69,18 @@ claude-sandbox install skills
 
 Invoke skills manually with `/skill-name` inside Claude.
 
+## MCP Servers
+
+The container ships with pre-configured [MCP](https://modelcontextprotocol.io/) servers that extend Claude's capabilities.
+
+### Playwright
+
+[Playwright MCP](https://github.com/anthropics/playwright-mcp) gives Claude a headless Chromium browser. Claude can navigate websites, take screenshots, fill forms, and interact with web pages.
+
+Browser sessions are recorded to `.playwright-output/videos/` as `.webm` files at 1280x720.
+
+The MCP config is stored at `/etc/claude/mcp.json` in the container image and merged into the project's `.mcp.json` at startup. Project-level MCP config is preserved — image defaults take precedence for shared server names.
+
 ## What's Included
 
 The container includes:
@@ -76,6 +88,7 @@ The container includes:
 - Claude CLI
 - Node.js & npm
 - Rust (via rustup) + cargo-audit
+- Playwright MCP with Chromium and ffmpeg
 - Zola
 - Starship prompt
 - Git, curl, jq, tree, build-essential, patchutils
