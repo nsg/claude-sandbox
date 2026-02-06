@@ -9,6 +9,7 @@ on:
   schedule:
     # Run twice a week to keep the image fresh (Tuesday and Friday at 18:00 UTC)
     - cron: '0 18 * * 2,5'
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
