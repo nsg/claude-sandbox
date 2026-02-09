@@ -343,7 +343,7 @@ const EXT_COMMANDS: &[ExtCommandDef] = &[ExtCommandDef {
     description: "Download workflow run logs",
     help_text: "gh ext run-logs <run-id> (workspace repo only)\n\n\
                     Download workflow run logs for the current repository.\n\
-                    Translates to: gh api /repos/{owner}/{repo}/actions/runs/{run-id}/logs\n",
+                    Saves zip to .claude-sandbox/run-<run-id>.zip and prints the path.\n",
     handler: handle_run_logs,
 }];
 
@@ -462,13 +462,25 @@ fn handle_run_logs(args: &[String]) -> Response {
     };
 
     let api_path = format!("/repos/{}/actions/runs/{}/logs", repo, run_id);
+    let out_path = format!(".claude-sandbox/run-{}.zip", run_id);
 
-    match Command::new("gh").args(["api", &api_path]).output() {
-        Ok(output) => Response {
-            exit_code: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        },
+    match Command::new("gh")
+        .args(["api", &api_path, "-o", &out_path])
+        .output()
+    {
+        Ok(output) => {
+            let exit_code = output.status.code().unwrap_or(1);
+            let stdout = if exit_code == 0 {
+                out_path
+            } else {
+                String::new()
+            };
+            Response {
+                exit_code,
+                stdout,
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }
+        }
         Err(e) => Response {
             exit_code: 1,
             stdout: String::new(),

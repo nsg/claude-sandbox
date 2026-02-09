@@ -21,6 +21,7 @@ RUN apt-get update && apt-get upgrade -y && \
         build-essential \
         pkg-config \
         libssl-dev \
+        unzip \
         tree \
         patchutils \
         jq \
