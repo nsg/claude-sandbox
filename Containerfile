@@ -53,6 +53,10 @@ RUN echo 'eval "$(starship init bash)"' >> /root/.bashrc
 RUN mkdir -p /root/.config
 COPY config/starship.toml /root/.config/starship.toml
 
+# gh CLI proxy client (talks to host-side proxy via Unix socket)
+COPY config/gh-proxy-client.js /usr/local/bin/gh
+RUN chmod +x /usr/local/bin/gh
+
 # MCP server config (merged into project .mcp.json at runtime by entrypoint)
 COPY config/mcp.json /etc/claude/mcp.json
 

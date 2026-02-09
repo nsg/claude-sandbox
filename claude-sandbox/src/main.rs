@@ -1,3 +1,5 @@
+mod gh_proxy;
+
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
 use flate2::read::GzDecoder;
@@ -9,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::{thread, time::Duration};
 use tar::Archive;
 
 const SCRIPT_URL: &str =
@@ -16,6 +19,8 @@ const SCRIPT_URL: &str =
 const SKILLS_URL: &str =
     "https://github.com/nsg/claude-sandbox/releases/latest/download/skills.tar.gz";
 const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
+const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
+const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
 
 #[derive(Parser)]
 #[command(name = "claude-sandbox")]
@@ -41,6 +46,12 @@ enum Commands {
     Install {
         /// Component to install (e.g., "skills")
         target: String,
+    },
+    /// Start the gh CLI proxy (internal, spawned automatically)
+    GhProxy {
+        /// Socket path (absolute)
+        #[arg(long)]
+        socket: String,
     },
 }
 
@@ -248,7 +259,55 @@ fn git_config(key: &str) -> String {
         .unwrap_or_default()
 }
 
+fn gh_proxy_socket_path() -> PathBuf {
+    env::current_dir()
+        .expect("Could not get current directory")
+        .join(GH_PROXY_SUBDIR)
+        .join(GH_PROXY_SOCKET_NAME)
+}
+
+fn ensure_gh_proxy() {
+    let socket_path = gh_proxy_socket_path();
+
+    // If socket already exists and is connectable, proxy is running
+    if socket_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            return;
+        }
+        // Stale socket, will be cleaned up by the proxy on start
+    }
+
+    // Spawn proxy as a background process
+    let exe = env::current_exe().expect("Could not get executable path");
+    let socket_str = socket_path.to_str().expect("Invalid socket path");
+    match Command::new(&exe)
+        .args(["gh-proxy", "--socket", socket_str])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Warning: failed to start gh-proxy: {}", e);
+            return;
+        }
+    }
+
+    // Poll for socket to appear (100ms intervals, 3s timeout)
+    for _ in 0..30 {
+        thread::sleep(Duration::from_millis(100));
+        if socket_path.exists() {
+            return;
+        }
+    }
+
+    eprintln!("Warning: gh-proxy did not start in time");
+}
+
 fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16]) {
+    ensure_gh_proxy();
+
     let cwd = env::current_dir().expect("Could not get current directory");
     let home = home_dir();
     let claude_dir = home.join(".claude");
@@ -308,6 +367,9 @@ fn main() {
                 eprintln!("Usage: claude-sandbox install skills");
                 std::process::exit(1);
             }
+        }
+        Some(Commands::GhProxy { socket }) => {
+            gh_proxy::run(&socket);
         }
         None => {
             if cli.args.is_empty() {
