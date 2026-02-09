@@ -339,9 +339,7 @@ fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16]) {
         cmd.args(["-p", &format!("{}:{}", port, port)]);
     }
 
-    cmd.args(["-w", "/workspace"])
-        .arg(IMAGE)
-        .args(extra_args);
+    cmd.args(["-w", "/workspace"]).arg(IMAGE).args(extra_args);
 
     let err = cmd.exec();
     eprintln!("Failed to exec podman: {}", err);

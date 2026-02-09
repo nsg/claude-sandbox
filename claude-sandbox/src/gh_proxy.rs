@@ -29,6 +29,14 @@ struct CommandDef {
     allowed_flags: &'static [&'static str],
 }
 
+struct ExtCommandDef {
+    group: &'static str,
+    subcommand: &'static str,
+    description: &'static str,
+    help_text: &'static str,
+    handler: fn(&[String]) -> Response,
+}
+
 const COMMANDS: &[CommandDef] = &[
     // ── Read commands ──────────────────────────────────────────────
     CommandDef {
@@ -36,11 +44,34 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "list",
         is_write: false,
         allowed_flags: &[
-            "--state", "-s", "--limit", "-L", "--json", "--jq", "-q",
-            "--label", "-l", "--author", "-A", "--assignee", "-a",
-            "--base", "-B", "--head", "-H", "--search", "-S",
-            "--draft", "-d", "--template", "-t", "--web", "-w",
-            "--repo", "-R", "--app",
+            "--state",
+            "-s",
+            "--limit",
+            "-L",
+            "--json",
+            "--jq",
+            "-q",
+            "--label",
+            "-l",
+            "--author",
+            "-A",
+            "--assignee",
+            "-a",
+            "--base",
+            "-B",
+            "--head",
+            "-H",
+            "--search",
+            "-S",
+            "--draft",
+            "-d",
+            "--template",
+            "-t",
+            "--web",
+            "-w",
+            "--repo",
+            "-R",
+            "--app",
         ],
     },
     CommandDef {
@@ -48,25 +79,42 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "view",
         is_write: false,
         allowed_flags: &[
-            "--json", "--jq", "-q", "--comments", "-c",
-            "--template", "-t", "--web", "-w", "--repo", "-R",
+            "--json",
+            "--jq",
+            "-q",
+            "--comments",
+            "-c",
+            "--template",
+            "-t",
+            "--web",
+            "-w",
+            "--repo",
+            "-R",
         ],
     },
     CommandDef {
         group: "pr",
         subcommand: "diff",
         is_write: false,
-        allowed_flags: &[
-            "--color", "--patch", "--name-only", "--repo", "-R",
-        ],
+        allowed_flags: &["--color", "--patch", "--name-only", "--repo", "-R"],
     },
     CommandDef {
         group: "pr",
         subcommand: "checks",
         is_write: false,
         allowed_flags: &[
-            "--json", "--jq", "-q", "--watch", "--interval", "-i",
-            "--fail-fast", "--required", "--web", "-w", "--repo", "-R",
+            "--json",
+            "--jq",
+            "-q",
+            "--watch",
+            "--interval",
+            "-i",
+            "--fail-fast",
+            "--required",
+            "--web",
+            "-w",
+            "--repo",
+            "-R",
         ],
     },
     CommandDef {
@@ -74,10 +122,29 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "list",
         is_write: false,
         allowed_flags: &[
-            "--state", "-s", "--limit", "-L", "--json", "--jq", "-q",
-            "--label", "-l", "--author", "-A", "--assignee", "-a",
-            "--milestone", "-m", "--search", "-S",
-            "--template", "-t", "--web", "-w", "--repo", "-R",
+            "--state",
+            "-s",
+            "--limit",
+            "-L",
+            "--json",
+            "--jq",
+            "-q",
+            "--label",
+            "-l",
+            "--author",
+            "-A",
+            "--assignee",
+            "-a",
+            "--milestone",
+            "-m",
+            "--search",
+            "-S",
+            "--template",
+            "-t",
+            "--web",
+            "-w",
+            "--repo",
+            "-R",
         ],
     },
     CommandDef {
@@ -85,8 +152,17 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "view",
         is_write: false,
         allowed_flags: &[
-            "--json", "--jq", "-q", "--comments", "-c",
-            "--template", "-t", "--web", "-w", "--repo", "-R",
+            "--json",
+            "--jq",
+            "-q",
+            "--comments",
+            "-c",
+            "--template",
+            "-t",
+            "--web",
+            "-w",
+            "--repo",
+            "-R",
         ],
     },
     CommandDef {
@@ -94,8 +170,15 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "view",
         is_write: false,
         allowed_flags: &[
-            "--json", "--jq", "-q", "--template", "-t",
-            "--web", "-w", "--repo", "-R",
+            "--json",
+            "--jq",
+            "-q",
+            "--template",
+            "-t",
+            "--web",
+            "-w",
+            "--repo",
+            "-R",
         ],
     },
     CommandDef {
@@ -103,9 +186,17 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "list",
         is_write: false,
         allowed_flags: &[
-            "--limit", "-L", "--json", "--jq", "-q",
-            "--exclude-drafts", "--exclude-pre-releases",
-            "--order", "-O", "--repo", "-R",
+            "--limit",
+            "-L",
+            "--json",
+            "--jq",
+            "-q",
+            "--exclude-drafts",
+            "--exclude-pre-releases",
+            "--order",
+            "-O",
+            "--repo",
+            "-R",
         ],
     },
     CommandDef {
@@ -113,8 +204,15 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "view",
         is_write: false,
         allowed_flags: &[
-            "--json", "--jq", "-q", "--template", "-t",
-            "--web", "-w", "--repo", "-R",
+            "--json",
+            "--jq",
+            "-q",
+            "--template",
+            "-t",
+            "--web",
+            "-w",
+            "--repo",
+            "-R",
         ],
     },
     CommandDef {
@@ -122,10 +220,25 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "list",
         is_write: false,
         allowed_flags: &[
-            "--limit", "-L", "--json", "--jq", "-q",
-            "--branch", "-b", "--workflow", "-w",
-            "--status", "-s", "--event", "-e",
-            "--user", "-u", "--commit", "-c", "--repo", "-R",
+            "--limit",
+            "-L",
+            "--json",
+            "--jq",
+            "-q",
+            "--branch",
+            "-b",
+            "--workflow",
+            "-w",
+            "--status",
+            "-s",
+            "--event",
+            "-e",
+            "--user",
+            "-u",
+            "--commit",
+            "-c",
+            "--repo",
+            "-R",
         ],
     },
     CommandDef {
@@ -133,9 +246,21 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "view",
         is_write: false,
         allowed_flags: &[
-            "--json", "--jq", "-q", "--log", "--log-failed",
-            "--exit-status", "--verbose", "-v",
-            "--web", "-w", "--job", "-j", "--attempt", "--repo", "-R",
+            "--json",
+            "--jq",
+            "-q",
+            "--log",
+            "--log-failed",
+            "--exit-status",
+            "--verbose",
+            "-v",
+            "--web",
+            "-w",
+            "--job",
+            "-j",
+            "--attempt",
+            "--repo",
+            "-R",
         ],
     },
     // ── Write commands (no --repo/-R, no --body-file/-F) ───────────
@@ -144,40 +269,89 @@ const COMMANDS: &[CommandDef] = &[
         subcommand: "create",
         is_write: true,
         allowed_flags: &[
-            "--title", "-t", "--body", "-b", "--base", "-B", "--head", "-H",
-            "--draft", "-d", "--label", "-l", "--assignee", "-a",
-            "--reviewer", "-r", "--milestone", "-m",
-            "--fill", "-f", "--fill-first", "--fill-verbose",
-            "--web", "-w", "--template", "-T", "--no-maintainer-edit",
+            "--title",
+            "-t",
+            "--body",
+            "-b",
+            "--base",
+            "-B",
+            "--head",
+            "-H",
+            "--draft",
+            "-d",
+            "--label",
+            "-l",
+            "--assignee",
+            "-a",
+            "--reviewer",
+            "-r",
+            "--milestone",
+            "-m",
+            "--fill",
+            "-f",
+            "--fill-first",
+            "--fill-verbose",
+            "--web",
+            "-w",
+            "--template",
+            "-T",
+            "--no-maintainer-edit",
         ],
     },
     CommandDef {
         group: "pr",
         subcommand: "comment",
         is_write: true,
-        allowed_flags: &[
-            "--body", "-b", "--edit-last", "--web", "-w",
-        ],
+        allowed_flags: &["--body", "-b", "--edit-last", "--web", "-w"],
     },
     CommandDef {
         group: "issue",
         subcommand: "create",
         is_write: true,
         allowed_flags: &[
-            "--title", "-t", "--body", "-b", "--label", "-l",
-            "--assignee", "-a", "--milestone", "-m",
-            "--project", "-p", "--web", "-w", "--template", "-T",
+            "--title",
+            "-t",
+            "--body",
+            "-b",
+            "--label",
+            "-l",
+            "--assignee",
+            "-a",
+            "--milestone",
+            "-m",
+            "--project",
+            "-p",
+            "--web",
+            "-w",
+            "--template",
+            "-T",
         ],
     },
     CommandDef {
         group: "issue",
         subcommand: "comment",
         is_write: true,
-        allowed_flags: &[
-            "--body", "-b", "--edit-last", "--web", "-w",
-        ],
+        allowed_flags: &["--body", "-b", "--edit-last", "--web", "-w"],
     },
 ];
+
+// ── Extension commands (gh ext …) ─────────────────────────────────────
+
+const EXT_COMMANDS: &[ExtCommandDef] = &[ExtCommandDef {
+    group: "ext",
+    subcommand: "run-logs",
+    description: "Download workflow run logs",
+    help_text: "gh ext run-logs <run-id> (workspace repo only)\n\n\
+                    Download workflow run logs for the current repository.\n\
+                    Translates to: gh api /repos/{owner}/{repo}/actions/runs/{run-id}/logs\n",
+    handler: handle_run_logs,
+}];
+
+fn find_ext_command(group: &str, subcommand: &str) -> Option<&'static ExtCommandDef> {
+    EXT_COMMANDS
+        .iter()
+        .find(|c| c.group == group && c.subcommand == subcommand)
+}
 
 fn find_command<'a>(group: &str, subcommand: &str) -> Option<&'a CommandDef> {
     COMMANDS
@@ -220,7 +394,7 @@ fn check_flags(args: &[String], allowed_flags: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-// ── Virtual commands (translated to specific gh API calls) ────────────
+// ── Extension command handlers ────────────────────────────────────────
 
 /// Detect the workspace repo slug (owner/repo) from git remote, cached.
 fn detect_repo() -> Option<&'static str> {
@@ -248,13 +422,12 @@ fn detect_repo() -> Option<&'static str> {
         .as_deref()
 }
 
-/// Handle virtual commands that don't map 1:1 to gh subcommands.
-/// Returns Some(Response) if matched, None to fall through to normal handling.
-fn maybe_virtual_command(args: &[String]) -> Option<Response> {
-    if args.len() >= 2 && args[0] == "run" && args[1] == "logs" {
-        return Some(handle_run_logs(&args[2..]));
+fn maybe_ext_command(args: &[String]) -> Option<Response> {
+    if args.len() < 2 {
+        return None;
     }
-    None
+    let ext = find_ext_command(&args[0], &args[1])?;
+    Some((ext.handler)(&args[2..]))
 }
 
 fn handle_run_logs(args: &[String]) -> Response {
@@ -262,7 +435,7 @@ fn handle_run_logs(args: &[String]) -> Response {
         return Response {
             exit_code: 1,
             stdout: String::new(),
-            stderr: "gh-proxy: usage: gh run logs <run-id>".to_string(),
+            stderr: "gh-proxy: usage: gh ext run-logs <run-id>".to_string(),
         };
     }
 
@@ -284,7 +457,7 @@ fn handle_run_logs(args: &[String]) -> Response {
                 exit_code: 1,
                 stdout: String::new(),
                 stderr: "gh-proxy: could not detect repository from git remote".to_string(),
-            }
+            };
         }
     };
 
@@ -356,25 +529,36 @@ fn help_toplevel() -> String {
             groups.push(cmd.group);
         }
     }
+    for ext in EXT_COMMANDS {
+        if !groups.contains(&ext.group) {
+            groups.push(ext.group);
+        }
+    }
 
-    let mut out = String::from("gh - GitHub CLI (proxy, restricted subset)\n\nAvailable command groups:\n");
+    let mut out =
+        String::from("gh - GitHub CLI (proxy, restricted subset)\n\nAvailable command groups:\n");
     for group in &groups {
-        let subs: Vec<&str> = COMMANDS
+        let mut subs: Vec<&str> = COMMANDS
             .iter()
             .filter(|c| c.group == *group)
             .map(|c| c.subcommand)
             .collect();
+        for ext in EXT_COMMANDS.iter().filter(|c| c.group == *group) {
+            subs.push(ext.subcommand);
+        }
         out.push_str(&format!("  {:12} {}\n", group, subs.join(", ")));
     }
     out.push_str("\nRun 'gh <command> -h' for more information about a command.\n");
-    out.push_str("Note: This is a sandboxed proxy. Only the commands listed above are available.\n");
+    out.push_str(
+        "Note: This is a sandboxed proxy. Only the commands listed above are available.\n",
+    );
     out
 }
 
 fn help_group(group: &str) -> Option<String> {
     let cmds: Vec<&CommandDef> = COMMANDS.iter().filter(|c| c.group == group).collect();
-    let has_virtual = group == "run"; // virtual: run logs
-    if cmds.is_empty() && !has_virtual {
+    let exts: Vec<&ExtCommandDef> = EXT_COMMANDS.iter().filter(|c| c.group == group).collect();
+    if cmds.is_empty() && exts.is_empty() {
         return None;
     }
 
@@ -383,25 +567,19 @@ fn help_group(group: &str) -> Option<String> {
         let rw = if cmd.is_write { " (write)" } else { "" };
         out.push_str(&format!("  {:12}{}\n", cmd.subcommand, rw));
     }
-    if group == "run" {
-        out.push_str("  logs         (virtual) Download workflow run logs\n");
+    for ext in &exts {
+        out.push_str(&format!("  {:12} {}\n", ext.subcommand, ext.description));
     }
     out.push_str(&format!(
-        "\nRun 'gh {} <subcommand> -h' for allowed flags.\n",
+        "\nRun 'gh {} <subcommand> -h' for more information.\n",
         group
     ));
     Some(out)
 }
 
 fn help_command(group: &str, subcommand: &str) -> Option<String> {
-    // Virtual command: run logs
-    if group == "run" && subcommand == "logs" {
-        return Some(
-            "gh run logs <run-id> (virtual — workspace repo only)\n\n\
-             Download workflow run logs for the current repository.\n\
-             Translates to: gh api /repos/{owner}/{repo}/actions/runs/{run-id}/logs\n"
-                .to_string(),
-        );
+    if let Some(ext) = find_ext_command(group, subcommand) {
+        return Some(ext.help_text.to_string());
     }
 
     let cmd = find_command(group, subcommand)?;
@@ -470,13 +648,10 @@ fn reject_reason(args: &[String]) -> Option<String> {
     };
 
     if let Err(flag) = check_flags(args, cmd.allowed_flags) {
-        return Some(format!("flag not allowed for gh {} {}: {}", group, subcommand, flag));
-    }
-
-    if cmd.is_write {
-        // Write commands: --repo/-R is not in allowed_flags, so check_flags
-        // already rejects it. But give a clearer message if someone tries.
-        // (This is a belt-and-suspenders check — check_flags catches it first.)
+        return Some(format!(
+            "flag not allowed for gh {} {}: {}",
+            group, subcommand, flag
+        ));
     }
 
     None
@@ -548,9 +723,16 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>) -> Response {
         };
     }
 
-    if let Some(response) = maybe_virtual_command(&req.args) {
-        let tag = if response.exit_code == 0 { "VIRTUAL" } else { "V_ERROR" };
-        log_line(log, &format!("{} gh {} -> {}", tag, cmd_str, response.exit_code));
+    if let Some(response) = maybe_ext_command(&req.args) {
+        let tag = if response.exit_code == 0 {
+            "EXT"
+        } else {
+            "EXT_ERR"
+        };
+        log_line(
+            log,
+            &format!("{} gh {} -> {}", tag, cmd_str, response.exit_code),
+        );
         return response;
     }
 
@@ -624,19 +806,21 @@ pub fn run(socket_path: &str) {
     let parent_pid = std::os::unix::process::parent_id();
     let watchdog_socket = socket_path.to_string();
     let watchdog_log = Arc::clone(&log);
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(2));
-        let current_ppid = std::os::unix::process::parent_id();
-        if current_ppid != parent_pid {
-            log_line(
-                &watchdog_log,
-                &format!(
-                    "parent {} exited (ppid now {}), shutting down",
-                    parent_pid, current_ppid
-                ),
-            );
-            let _ = fs::remove_file(&watchdog_socket);
-            process::exit(0);
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(2));
+            let current_ppid = std::os::unix::process::parent_id();
+            if current_ppid != parent_pid {
+                log_line(
+                    &watchdog_log,
+                    &format!(
+                        "parent {} exited (ppid now {}), shutting down",
+                        parent_pid, current_ppid
+                    ),
+                );
+                let _ = fs::remove_file(&watchdog_socket);
+                process::exit(0);
+            }
         }
     });
 
@@ -710,7 +894,9 @@ mod tests {
 
     #[test]
     fn test_write_commands_allowed() {
-        assert!(reject_reason(&strs(&["pr", "create", "--title", "foo", "--body", "bar"])).is_none());
+        assert!(
+            reject_reason(&strs(&["pr", "create", "--title", "foo", "--body", "bar"])).is_none()
+        );
         assert!(reject_reason(&strs(&["pr", "comment", "123", "--body", "hi"])).is_none());
         assert!(reject_reason(&strs(&["issue", "create", "--title", "bug"])).is_none());
         assert!(reject_reason(&strs(&["issue", "comment", "42", "--body", "x"])).is_none());
@@ -718,7 +904,14 @@ mod tests {
 
     #[test]
     fn test_write_commands_block_repo_flag() {
-        let r = reject_reason(&strs(&["pr", "create", "-R", "other/repo", "--title", "foo"]));
+        let r = reject_reason(&strs(&[
+            "pr",
+            "create",
+            "-R",
+            "other/repo",
+            "--title",
+            "foo",
+        ]));
         assert!(r.is_some());
         assert!(r.unwrap().contains("flag not allowed"));
 
@@ -730,7 +923,14 @@ mod tests {
 
     #[test]
     fn test_write_commands_block_body_file() {
-        let r = reject_reason(&strs(&["pr", "create", "--title", "t", "--body-file", "/etc/passwd"]));
+        let r = reject_reason(&strs(&[
+            "pr",
+            "create",
+            "--title",
+            "t",
+            "--body-file",
+            "/etc/passwd",
+        ]));
         assert!(r.is_some());
         assert!(r.unwrap().contains("--body-file"));
 
@@ -859,45 +1059,52 @@ mod tests {
         assert!(maybe_help(&strs(&["pr", "view", "123"])).is_none());
     }
 
-    // ── Virtual commands ───────────────────────────────────────────
+    // ── Extension commands (gh ext) ──────────────────────────────────
 
     #[test]
-    fn test_run_logs_valid_id() {
-        let r = maybe_virtual_command(&strs(&["run", "logs", "12345"]));
-        assert!(r.is_some()); // Will fail to call gh but tests the dispatch
+    fn test_ext_run_logs_valid_id() {
+        let r = maybe_ext_command(&strs(&["ext", "run-logs", "12345"]));
+        assert!(r.is_some());
     }
 
     #[test]
-    fn test_run_logs_rejects_non_numeric_id() {
-        let r = maybe_virtual_command(&strs(&["run", "logs", "../etc/passwd"])).unwrap();
+    fn test_ext_run_logs_rejects_non_numeric_id() {
+        let r = maybe_ext_command(&strs(&["ext", "run-logs", "../etc/passwd"])).unwrap();
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("invalid run id"));
     }
 
     #[test]
-    fn test_run_logs_missing_id() {
-        let r = maybe_virtual_command(&strs(&["run", "logs"])).unwrap();
+    fn test_ext_run_logs_missing_id() {
+        let r = maybe_ext_command(&strs(&["ext", "run-logs"])).unwrap();
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("usage"));
     }
 
     #[test]
-    fn test_run_logs_not_matched_for_other_commands() {
-        assert!(maybe_virtual_command(&strs(&["pr", "list"])).is_none());
-        assert!(maybe_virtual_command(&strs(&["run", "list"])).is_none());
+    fn test_ext_not_matched_for_other_commands() {
+        assert!(maybe_ext_command(&strs(&["pr", "list"])).is_none());
+        assert!(maybe_ext_command(&strs(&["run", "list"])).is_none());
+        assert!(maybe_ext_command(&strs(&["run", "logs"])).is_none());
     }
 
     #[test]
-    fn test_run_logs_help() {
-        let h = maybe_help(&strs(&["run", "logs", "-h"])).unwrap();
+    fn test_ext_run_logs_help() {
+        let h = maybe_help(&strs(&["ext", "run-logs", "-h"])).unwrap();
         assert!(h.contains("run-id"));
         assert!(h.contains("workspace repo only"));
     }
 
     #[test]
-    fn test_run_group_help_includes_logs() {
-        let h = maybe_help(&strs(&["run", "-h"])).unwrap();
-        assert!(h.contains("logs"));
+    fn test_ext_group_help() {
+        let h = maybe_help(&strs(&["ext", "-h"])).unwrap();
+        assert!(h.contains("run-logs"));
+    }
+
+    #[test]
+    fn test_toplevel_help_includes_ext() {
+        let h = maybe_help(&strs(&["-h"])).unwrap();
+        assert!(h.contains("ext"));
     }
 
     fn strs(s: &[&str]) -> Vec<String> {
