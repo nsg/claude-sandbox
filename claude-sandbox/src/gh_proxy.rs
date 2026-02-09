@@ -513,7 +513,6 @@ pub fn run(socket_path: &str) {
     let log = Arc::new(Mutex::new(log_file));
 
     log_line(&log, &format!("listening on {}", socket_path));
-    eprintln!("gh-proxy: listening on {}", socket_path);
 
     // Watchdog: exit when parent process (podman after exec) dies.
     // After exec(), our ppid is podman's PID. When podman exits, ppid
@@ -569,7 +568,6 @@ pub fn run(socket_path: &str) {
             }
             Err(e) => {
                 log_line(&log, &format!("connection error: {}", e));
-                eprintln!("gh-proxy: connection error: {}", e);
             }
         }
     }
