@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -219,6 +220,144 @@ fn check_flags(args: &[String], allowed_flags: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+// ── Help text generation (derived from COMMANDS) ──────────────────────
+
+fn is_help_flag(arg: &str) -> bool {
+    arg == "-h" || arg == "--help"
+}
+
+/// Format flags for display: pair short+long together, e.g. "-s, --state"
+fn format_flags(flags: &[&str]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut used: BTreeSet<usize> = BTreeSet::new();
+
+    for (i, flag) in flags.iter().enumerate() {
+        if used.contains(&i) {
+            continue;
+        }
+        if flag.starts_with("--") {
+            // Look for a preceding short flag (single dash, single char)
+            let short = if i > 0
+                && !used.contains(&(i - 1))
+                && flags[i - 1].starts_with('-')
+                && !flags[i - 1].starts_with("--")
+            {
+                used.insert(i - 1);
+                Some(flags[i - 1])
+            } else {
+                None
+            };
+            used.insert(i);
+            match short {
+                Some(s) => result.push(format!("  {}, {}", s, flag)),
+                None => result.push(format!("      {}", flag)),
+            }
+        } else if flag.starts_with('-') && !flag.starts_with("--") {
+            // Short flag without a following long flag — check next
+            if i + 1 < flags.len() && flags[i + 1].starts_with("--") {
+                // Will be handled when we reach the long flag
+                continue;
+            }
+            used.insert(i);
+            result.push(format!("  {}", flag));
+        }
+    }
+    result
+}
+
+fn help_toplevel() -> String {
+    let mut groups: Vec<&str> = Vec::new();
+    for cmd in COMMANDS {
+        if !groups.contains(&cmd.group) {
+            groups.push(cmd.group);
+        }
+    }
+
+    let mut out = String::from("gh - GitHub CLI (proxy, restricted subset)\n\nAvailable command groups:\n");
+    for group in &groups {
+        let subs: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.group == *group)
+            .map(|c| c.subcommand)
+            .collect();
+        out.push_str(&format!("  {:12} {}\n", group, subs.join(", ")));
+    }
+    out.push_str("\nRun 'gh <command> -h' for more information about a command.\n");
+    out.push_str("Note: This is a sandboxed proxy. Only the commands listed above are available.\n");
+    out
+}
+
+fn help_group(group: &str) -> Option<String> {
+    let cmds: Vec<&CommandDef> = COMMANDS.iter().filter(|c| c.group == group).collect();
+    if cmds.is_empty() {
+        return None;
+    }
+
+    let mut out = format!("gh {} - available subcommands:\n\n", group);
+    for cmd in &cmds {
+        let rw = if cmd.is_write { " (write)" } else { "" };
+        out.push_str(&format!("  {:12}{}\n", cmd.subcommand, rw));
+    }
+    out.push_str(&format!(
+        "\nRun 'gh {} <subcommand> -h' for allowed flags.\n",
+        group
+    ));
+    Some(out)
+}
+
+fn help_command(group: &str, subcommand: &str) -> Option<String> {
+    let cmd = find_command(group, subcommand)?;
+
+    let rw = if cmd.is_write {
+        " (write — workspace repo only, no -R/--repo)"
+    } else {
+        " (read)"
+    };
+    let mut out = format!("gh {} {}{}\n\nAllowed flags:\n", group, subcommand, rw);
+    for line in format_flags(cmd.allowed_flags) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// Check if args represent a help request and return help text if so.
+fn maybe_help(args: &[String]) -> Option<String> {
+    // `gh` (no args)
+    if args.is_empty() {
+        return Some(help_toplevel());
+    }
+
+    // `gh -h` / `gh --help` / `gh help`
+    if args.len() == 1 {
+        if is_help_flag(&args[0]) || args[0] == "help" {
+            return Some(help_toplevel());
+        }
+    }
+
+    // `gh help <group>` or `gh help <group> <sub>`
+    if args[0] == "help" {
+        if args.len() == 2 {
+            return help_group(&args[1]).or_else(|| Some(help_toplevel()));
+        }
+        if args.len() >= 3 {
+            return help_command(&args[1], &args[2]).or_else(|| help_group(&args[1]));
+        }
+    }
+
+    // `gh <group> -h`
+    if args.len() == 2 && is_help_flag(&args[1]) {
+        return help_group(&args[0]).or_else(|| Some(help_toplevel()));
+    }
+
+    // `gh <group> <sub> -h` or any args containing -h/--help
+    if args.len() >= 2 && args[2..].iter().any(|a| is_help_flag(a)) {
+        return help_command(&args[0], &args[1]);
+    }
+
+    None
+}
+
 fn reject_reason(args: &[String]) -> Option<String> {
     if args.len() < 2 {
         return Some(format!("command not allowed: gh {}", args.join(" ")));
@@ -301,6 +440,15 @@ fn log_line(log: &Arc<Mutex<File>>, message: &str) {
 
 fn handle_request(req: Request, log: &Arc<Mutex<File>>) -> Response {
     let cmd_str = req.args.join(" ");
+
+    if let Some(help_text) = maybe_help(&req.args) {
+        log_line(log, &format!("HELP    gh {}", cmd_str));
+        return Response {
+            exit_code: 0,
+            stdout: help_text,
+            stderr: String::new(),
+        };
+    }
 
     if let Some(reason) = reject_reason(&req.args) {
         log_line(log, &format!("DENIED  gh {} ({})", cmd_str, reason));
@@ -524,6 +672,67 @@ mod tests {
     #[test]
     fn test_single_arg() {
         assert!(reject_reason(&strs(&["pr"])).is_some());
+    }
+
+    // ── Help ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_help_toplevel() {
+        let h = maybe_help(&[]).unwrap();
+        assert!(h.contains("pr"));
+        assert!(h.contains("issue"));
+        assert!(h.contains("repo"));
+        assert!(h.contains("release"));
+        assert!(h.contains("run"));
+
+        // Also triggered by -h, --help, help
+        assert!(maybe_help(&strs(&["--help"])).is_some());
+        assert!(maybe_help(&strs(&["-h"])).is_some());
+        assert!(maybe_help(&strs(&["help"])).is_some());
+    }
+
+    #[test]
+    fn test_help_group() {
+        let h = maybe_help(&strs(&["pr", "-h"])).unwrap();
+        assert!(h.contains("list"));
+        assert!(h.contains("view"));
+        assert!(h.contains("create"));
+        assert!(h.contains("comment"));
+
+        // Via `gh help pr`
+        let h2 = maybe_help(&strs(&["help", "pr"])).unwrap();
+        assert!(h2.contains("list"));
+    }
+
+    #[test]
+    fn test_help_command() {
+        let h = maybe_help(&strs(&["pr", "list", "--help"])).unwrap();
+        assert!(h.contains("--state"));
+        assert!(h.contains("--limit"));
+        assert!(h.contains("--json"));
+        assert!(h.contains("(read)"));
+
+        // Write command shows workspace restriction
+        let h2 = maybe_help(&strs(&["pr", "create", "-h"])).unwrap();
+        assert!(h2.contains("--title"));
+        assert!(h2.contains("workspace repo only"));
+
+        // Via `gh help pr list`
+        let h3 = maybe_help(&strs(&["help", "pr", "list"])).unwrap();
+        assert!(h3.contains("--state"));
+    }
+
+    #[test]
+    fn test_help_unknown_group_falls_back() {
+        // Unknown group via `gh help bogus` falls back to toplevel
+        let h = maybe_help(&strs(&["help", "bogus"])).unwrap();
+        assert!(h.contains("Available command groups"));
+    }
+
+    #[test]
+    fn test_no_help_for_normal_commands() {
+        assert!(maybe_help(&strs(&["pr", "list", "--state", "open"])).is_none());
+        assert!(maybe_help(&strs(&["pr", "view", "123"])).is_none());
     }
 
     fn strs(s: &[&str]) -> Vec<String> {
