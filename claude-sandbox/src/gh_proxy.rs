@@ -7,8 +7,8 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
-use std::{fs, thread};
+use std::time::{Duration, SystemTime};
+use std::{fs, process, thread};
 
 #[derive(Deserialize)]
 struct Request {
@@ -514,6 +514,28 @@ pub fn run(socket_path: &str) {
 
     log_line(&log, &format!("listening on {}", socket_path));
     eprintln!("gh-proxy: listening on {}", socket_path);
+
+    // Watchdog: exit when parent process (podman after exec) dies.
+    // After exec(), our ppid is podman's PID. When podman exits, ppid
+    // becomes 1 (init). Poll every 2s and clean up when that happens.
+    let parent_pid = std::os::unix::process::parent_id();
+    let watchdog_socket = socket_path.to_string();
+    let watchdog_log = Arc::clone(&log);
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(2));
+        let current_ppid = std::os::unix::process::parent_id();
+        if current_ppid != parent_pid {
+            log_line(
+                &watchdog_log,
+                &format!(
+                    "parent {} exited (ppid now {}), shutting down",
+                    parent_pid, current_ppid
+                ),
+            );
+            let _ = fs::remove_file(&watchdog_socket);
+            process::exit(0);
+        }
+    });
 
     for stream in listener.incoming() {
         match stream {
