@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use std::{fs, process, thread};
 
@@ -220,6 +220,90 @@ fn check_flags(args: &[String], allowed_flags: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+// ── Virtual commands (translated to specific gh API calls) ────────────
+
+/// Detect the workspace repo slug (owner/repo) from git remote, cached.
+fn detect_repo() -> Option<&'static str> {
+    static REPO_SLUG: OnceLock<Option<String>> = OnceLock::new();
+    REPO_SLUG
+        .get_or_init(|| {
+            let output = Command::new("git")
+                .args(["remote", "get-url", "origin"])
+                .output()
+                .ok()?;
+            let url = String::from_utf8(output.stdout).ok()?.trim().to_string();
+            // Handle SSH: git@github.com:owner/repo.git
+            if let Some(rest) = url.strip_prefix("git@github.com:") {
+                return Some(rest.trim_end_matches(".git").to_string());
+            }
+            // Handle HTTPS: https://github.com/owner/repo.git
+            if let Some(rest) = url
+                .strip_prefix("https://github.com/")
+                .or_else(|| url.strip_prefix("http://github.com/"))
+            {
+                return Some(rest.trim_end_matches(".git").to_string());
+            }
+            None
+        })
+        .as_deref()
+}
+
+/// Handle virtual commands that don't map 1:1 to gh subcommands.
+/// Returns Some(Response) if matched, None to fall through to normal handling.
+fn maybe_virtual_command(args: &[String]) -> Option<Response> {
+    if args.len() >= 2 && args[0] == "run" && args[1] == "logs" {
+        return Some(handle_run_logs(&args[2..]));
+    }
+    None
+}
+
+fn handle_run_logs(args: &[String]) -> Response {
+    if args.is_empty() {
+        return Response {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "gh-proxy: usage: gh run logs <run-id>".to_string(),
+        };
+    }
+
+    let run_id = &args[0];
+
+    // Validate run_id is numeric to prevent path traversal
+    if !run_id.chars().all(|c| c.is_ascii_digit()) {
+        return Response {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("gh-proxy: invalid run id: {}", run_id),
+        };
+    }
+
+    let repo = match detect_repo() {
+        Some(r) => r,
+        None => {
+            return Response {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "gh-proxy: could not detect repository from git remote".to_string(),
+            }
+        }
+    };
+
+    let api_path = format!("/repos/{}/actions/runs/{}/logs", repo, run_id);
+
+    match Command::new("gh").args(["api", &api_path]).output() {
+        Ok(output) => Response {
+            exit_code: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
+        Err(e) => Response {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("gh-proxy: failed to execute gh api: {}", e),
+        },
+    }
+}
+
 // ── Help text generation (derived from COMMANDS) ──────────────────────
 
 fn is_help_flag(arg: &str) -> bool {
@@ -289,7 +373,8 @@ fn help_toplevel() -> String {
 
 fn help_group(group: &str) -> Option<String> {
     let cmds: Vec<&CommandDef> = COMMANDS.iter().filter(|c| c.group == group).collect();
-    if cmds.is_empty() {
+    let has_virtual = group == "run"; // virtual: run logs
+    if cmds.is_empty() && !has_virtual {
         return None;
     }
 
@@ -297,6 +382,9 @@ fn help_group(group: &str) -> Option<String> {
     for cmd in &cmds {
         let rw = if cmd.is_write { " (write)" } else { "" };
         out.push_str(&format!("  {:12}{}\n", cmd.subcommand, rw));
+    }
+    if group == "run" {
+        out.push_str("  logs         (virtual) Download workflow run logs\n");
     }
     out.push_str(&format!(
         "\nRun 'gh {} <subcommand> -h' for allowed flags.\n",
@@ -306,6 +394,16 @@ fn help_group(group: &str) -> Option<String> {
 }
 
 fn help_command(group: &str, subcommand: &str) -> Option<String> {
+    // Virtual command: run logs
+    if group == "run" && subcommand == "logs" {
+        return Some(
+            "gh run logs <run-id> (virtual — workspace repo only)\n\n\
+             Download workflow run logs for the current repository.\n\
+             Translates to: gh api /repos/{owner}/{repo}/actions/runs/{run-id}/logs\n"
+                .to_string(),
+        );
+    }
+
     let cmd = find_command(group, subcommand)?;
 
     let rw = if cmd.is_write {
@@ -448,6 +546,12 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>) -> Response {
             stdout: help_text,
             stderr: String::new(),
         };
+    }
+
+    if let Some(response) = maybe_virtual_command(&req.args) {
+        let tag = if response.exit_code == 0 { "VIRTUAL" } else { "V_ERROR" };
+        log_line(log, &format!("{} gh {} -> {}", tag, cmd_str, response.exit_code));
+        return response;
     }
 
     if let Some(reason) = reject_reason(&req.args) {
@@ -753,6 +857,47 @@ mod tests {
     fn test_no_help_for_normal_commands() {
         assert!(maybe_help(&strs(&["pr", "list", "--state", "open"])).is_none());
         assert!(maybe_help(&strs(&["pr", "view", "123"])).is_none());
+    }
+
+    // ── Virtual commands ───────────────────────────────────────────
+
+    #[test]
+    fn test_run_logs_valid_id() {
+        let r = maybe_virtual_command(&strs(&["run", "logs", "12345"]));
+        assert!(r.is_some()); // Will fail to call gh but tests the dispatch
+    }
+
+    #[test]
+    fn test_run_logs_rejects_non_numeric_id() {
+        let r = maybe_virtual_command(&strs(&["run", "logs", "../etc/passwd"])).unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("invalid run id"));
+    }
+
+    #[test]
+    fn test_run_logs_missing_id() {
+        let r = maybe_virtual_command(&strs(&["run", "logs"])).unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("usage"));
+    }
+
+    #[test]
+    fn test_run_logs_not_matched_for_other_commands() {
+        assert!(maybe_virtual_command(&strs(&["pr", "list"])).is_none());
+        assert!(maybe_virtual_command(&strs(&["run", "list"])).is_none());
+    }
+
+    #[test]
+    fn test_run_logs_help() {
+        let h = maybe_help(&strs(&["run", "logs", "-h"])).unwrap();
+        assert!(h.contains("run-id"));
+        assert!(h.contains("workspace repo only"));
+    }
+
+    #[test]
+    fn test_run_group_help_includes_logs() {
+        let h = maybe_help(&strs(&["run", "-h"])).unwrap();
+        assert!(h.contains("logs"));
     }
 
     fn strs(s: &[&str]) -> Vec<String> {
