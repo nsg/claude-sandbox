@@ -58,6 +58,11 @@ COPY config/starship.toml /root/.config/starship.toml
 COPY config/gh-proxy-client.js /usr/local/bin/gh
 RUN chmod +x /usr/local/bin/gh
 
+# Clipboard image proxy client (talks to host-side proxy via Unix socket)
+COPY config/clipboard-proxy-client.js /usr/local/bin/xclip
+RUN chmod +x /usr/local/bin/xclip
+RUN ln -s /usr/local/bin/xclip /usr/local/bin/wl-paste
+
 # Managed configs (merged at runtime by entrypoint)
 COPY config/mcp.json /etc/claude/mcp.json
 COPY config/CLAUDE.md /etc/claude/CLAUDE.md

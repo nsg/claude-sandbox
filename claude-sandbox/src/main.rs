@@ -1,4 +1,6 @@
+mod clipboard_proxy;
 mod gh_proxy;
+mod logging;
 
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
@@ -21,6 +23,7 @@ const SKILLS_URL: &str =
 const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
 const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
 const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
+const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
 
 #[derive(Parser)]
 #[command(name = "claude-sandbox")]
@@ -49,6 +52,12 @@ enum Commands {
     },
     /// Start the gh CLI proxy (internal, spawned automatically)
     GhProxy {
+        /// Socket path (absolute)
+        #[arg(long)]
+        socket: String,
+    },
+    /// Start the clipboard image proxy (internal, spawned automatically)
+    ClipboardProxy {
         /// Socket path (absolute)
         #[arg(long)]
         socket: String,
@@ -266,6 +275,13 @@ fn gh_proxy_socket_path() -> PathBuf {
         .join(GH_PROXY_SOCKET_NAME)
 }
 
+fn clipboard_proxy_socket_path() -> PathBuf {
+    env::current_dir()
+        .expect("Could not get current directory")
+        .join(GH_PROXY_SUBDIR)
+        .join(CLIPBOARD_PROXY_SOCKET_NAME)
+}
+
 fn ensure_gh_proxy() {
     let socket_path = gh_proxy_socket_path();
 
@@ -305,8 +321,44 @@ fn ensure_gh_proxy() {
     eprintln!("Warning: gh-proxy did not start in time");
 }
 
+fn ensure_clipboard_proxy() {
+    let socket_path = clipboard_proxy_socket_path();
+
+    if socket_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            return;
+        }
+    }
+
+    let exe = env::current_exe().expect("Could not get executable path");
+    let socket_str = socket_path.to_str().expect("Invalid socket path");
+    match Command::new(&exe)
+        .args(["clipboard-proxy", "--socket", socket_str])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Warning: failed to start clipboard-proxy: {}", e);
+            return;
+        }
+    }
+
+    for _ in 0..30 {
+        thread::sleep(Duration::from_millis(100));
+        if socket_path.exists() {
+            return;
+        }
+    }
+
+    eprintln!("Warning: clipboard-proxy did not start in time");
+}
+
 fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16]) {
     ensure_gh_proxy();
+    ensure_clipboard_proxy();
 
     let cwd = env::current_dir().expect("Could not get current directory");
     let home = home_dir();
@@ -368,6 +420,9 @@ fn main() {
         }
         Some(Commands::GhProxy { socket }) => {
             gh_proxy::run(&socket);
+        }
+        Some(Commands::ClipboardProxy { socket }) => {
+            clipboard_proxy::run(&socket);
         }
         None => {
             if cli.args.is_empty() {

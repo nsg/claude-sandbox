@@ -7,7 +7,7 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{fs, process, thread};
 
 #[derive(Deserialize)]
@@ -674,59 +674,7 @@ fn reject_reason(args: &[String]) -> Option<String> {
     None
 }
 
-fn timestamp() -> String {
-    let dur = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs();
-    // UTC breakdown without external crates
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let h = time_secs / 3600;
-    let m = (time_secs % 3600) / 60;
-    let s = time_secs % 60;
-    // Days since 1970-01-01
-    let mut y: u64 = 1970;
-    let mut remaining = days;
-    loop {
-        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-        let ydays: u64 = if leap { 366 } else { 365 };
-        if remaining < ydays {
-            break;
-        }
-        remaining -= ydays;
-        y += 1;
-    }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let mdays: &[u64] = if leap {
-        &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut mo: u64 = 0;
-    for md in mdays {
-        if remaining < *md {
-            break;
-        }
-        remaining -= md;
-        mo += 1;
-    }
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y,
-        mo + 1,
-        remaining + 1,
-        h,
-        m,
-        s
-    )
-}
-
-fn log_line(log: &Arc<Mutex<File>>, message: &str) {
-    if let Ok(mut f) = log.lock() {
-        let _ = writeln!(f, "{} {}", timestamp(), message);
-    }
-}
+use crate::logging::log_line;
 
 fn handle_request(req: Request, log: &Arc<Mutex<File>>) -> Response {
     let cmd_str = req.args.join(" ");
