@@ -58,8 +58,9 @@ COPY config/starship.toml /root/.config/starship.toml
 COPY config/gh-proxy-client.js /usr/local/bin/gh
 RUN chmod +x /usr/local/bin/gh
 
-# MCP server config (merged into project .mcp.json at runtime by entrypoint)
+# Managed configs (merged at runtime by entrypoint)
 COPY config/mcp.json /etc/claude/mcp.json
+COPY config/CLAUDE.md /etc/claude/CLAUDE.md
 
 # Entrypoint script for runtime configuration
 COPY config/entrypoint.sh /usr/local/bin/entrypoint.sh
