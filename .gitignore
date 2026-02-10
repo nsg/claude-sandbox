@@ -1,4 +1,5 @@
 .vscode/
 dist/
 claude-sandbox/target/
+.claude-sandbox/
 .playwright-output/

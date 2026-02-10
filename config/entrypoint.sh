@@ -21,5 +21,21 @@ if [ -f /etc/claude/mcp.json ]; then
     fi
 fi
 
+# Symlink auto-memory into .claude-sandbox so it's per-project
+# (all containers mount at /workspace, so the slug is always "-workspace")
+MEMORY_LINK="$HOME/.claude/projects/-workspace/memory"
+MEMORY_TARGET=/workspace/.claude-sandbox/memory
+if [ ! -L "$MEMORY_LINK" ]; then
+    mkdir -p "$(dirname "$MEMORY_LINK")"
+    if [ -d "$MEMORY_LINK" ]; then
+        # Migrate existing memory into the project folder
+        mkdir -p "$(dirname "$MEMORY_TARGET")"
+        mv "$MEMORY_LINK" "$MEMORY_TARGET"
+    else
+        mkdir -p "$MEMORY_TARGET"
+    fi
+    ln -s "$MEMORY_TARGET" "$MEMORY_LINK"
+fi
+
 # Execute the command passed to the container
 exec "$@"
