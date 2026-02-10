@@ -464,20 +464,25 @@ fn handle_run_logs(args: &[String]) -> Response {
     let api_path = format!("/repos/{}/actions/runs/{}/logs", repo, run_id);
     let out_path = format!(".claude-sandbox/run-{}.zip", run_id);
 
-    match Command::new("gh")
-        .args(["api", &api_path, "-o", &out_path])
-        .output()
-    {
+    match Command::new("gh").args(["api", &api_path]).output() {
         Ok(output) => {
             let exit_code = output.status.code().unwrap_or(1);
-            let stdout = if exit_code == 0 {
-                out_path
-            } else {
-                String::new()
-            };
+            if exit_code == 0 {
+                if let Err(e) = fs::write(&out_path, &output.stdout) {
+                    return Response {
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: format!("gh-proxy: failed to write {}: {}", out_path, e),
+                    };
+                }
+            }
             Response {
                 exit_code,
-                stdout,
+                stdout: if exit_code == 0 {
+                    out_path
+                } else {
+                    String::new()
+                },
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             }
         }
