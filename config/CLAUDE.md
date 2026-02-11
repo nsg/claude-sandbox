@@ -7,3 +7,7 @@
 ## Git Commits
 
 - Never add Co-Authored-By lines to commit messages
+
+## Clipboard
+
+- To read the clipboard image: `xclip -selection clipboard -t image/png -o > /tmp/clipboard.png` then read the file
