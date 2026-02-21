@@ -70,6 +70,16 @@ Skip the interactive update prompt and update automatically:
 claude-sandbox --auto-update
 ```
 
+### Quiet mode
+
+Suppress informational output, only show errors:
+
+```bash
+claude-sandbox --quiet
+```
+
+This is useful when launching from editors or scripts where stdout noise is unwanted.
+
 ### Host environment
 
 Override environment variables for the Podman process itself (not the container). Useful when the calling environment injects unwanted paths, e.g. VS Code snap overriding `XDG_DATA_HOME`:

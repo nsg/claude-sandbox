@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long)]
     auto_update: bool,
 
+    /// Suppress informational output, only show errors
+    #[arg(short, long)]
+    quiet: bool,
+
     /// Set host environment variable for the podman process (e.g., --host-env XDG_DATA_HOME=/home/user/.local/share)
     #[arg(long = "host-env", action = clap::ArgAction::Append)]
     host_env: Vec<String>,
@@ -137,7 +141,7 @@ fn check_available_updates(client: &Client) -> UpdateStatus {
     }
 }
 
-fn perform_updates(client: &Client, status: &UpdateStatus, auto: bool) -> bool {
+fn perform_updates(client: &Client, status: &UpdateStatus, auto: bool, quiet: bool) -> bool {
     let has_binary = status.binary_available.is_some();
     let has_skills = status.skills_available.is_some();
 
@@ -146,6 +150,10 @@ fn perform_updates(client: &Client, status: &UpdateStatus, auto: bool) -> bool {
     }
 
     if !auto {
+        if quiet {
+            return false;
+        }
+
         let prompt = match (has_binary, has_skills) {
             (true, true) => "Updates available: binary, skills, container image. Update now?",
             (true, false) => "Updates available: binary, container image. Update now?",
@@ -165,7 +173,7 @@ fn perform_updates(client: &Client, status: &UpdateStatus, auto: bool) -> bool {
     }
 
     if has_skills {
-        install_skills(client);
+        install_skills(client, quiet);
     }
 
     if let Some(ref remote_lastmod) = status.binary_available {
@@ -226,11 +234,13 @@ fn do_binary_update(client: &Client, remote_lastmod: &str) {
     std::process::exit(1);
 }
 
-fn install_skills(client: &Client) {
+fn install_skills(client: &Client, quiet: bool) {
     let target_dir = home_dir().join(".claude/skills");
     let cache_file = cache_dir().join("claude-sandbox-skills-lastmod");
 
-    println!("Installing skills to {}...", target_dir.display());
+    if !quiet {
+        println!("Installing skills to {}...", target_dir.display());
+    }
 
     if let Err(e) = fs::create_dir_all(&target_dir) {
         eprintln!("Failed to create directory: {}", e);
@@ -265,7 +275,9 @@ fn install_skills(client: &Client) {
         write_cache_file(&cache_file, &remote_lastmod);
     }
 
-    println!("Skills installed successfully.");
+    if !quiet {
+        println!("Skills installed successfully.");
+    }
 }
 
 fn git_config(key: &str) -> String {
@@ -424,7 +436,7 @@ fn main() {
     let client = Client::new();
 
     let update_status = check_available_updates(&client);
-    let should_pull = perform_updates(&client, &update_status, cli.auto_update);
+    let should_pull = perform_updates(&client, &update_status, cli.auto_update, cli.quiet);
 
     match cli.command {
         Some(Commands::Shell) => {
@@ -432,7 +444,7 @@ fn main() {
         }
         Some(Commands::Install { target }) => {
             if target == "skills" {
-                install_skills(&client);
+                install_skills(&client, cli.quiet);
             } else {
                 eprintln!("Unknown install target: {}", target);
                 eprintln!("Usage: claude-sandbox install skills");
