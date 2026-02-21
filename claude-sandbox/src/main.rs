@@ -477,10 +477,13 @@ fn main() {
             clipboard_proxy::run(&socket);
         }
         None => {
-            let needs_unbuffer = cli.unbuffered || !std::io::stdin().is_terminal();
-            let prefix = if needs_unbuffer { "stdbuf -oL " } else { "" };
+            let needs_pty = cli.unbuffered || !std::io::stdin().is_terminal();
             if cli.args.is_empty() {
-                let claude_cmd = format!("{prefix}claude");
+                let claude_cmd = if needs_pty {
+                    "script -qc claude /dev/null".to_string()
+                } else {
+                    "claude".to_string()
+                };
                 run_container(
                     &["bash", "-lc", &claude_cmd],
                     should_pull,
@@ -489,7 +492,12 @@ fn main() {
                     cli.quiet,
                 );
             } else {
-                let claude_cmd = format!("{prefix}claude {}", cli.args.join(" "));
+                let args = cli.args.join(" ");
+                let claude_cmd = if needs_pty {
+                    format!("script -qc 'claude {args}' /dev/null")
+                } else {
+                    format!("claude {args}")
+                };
                 run_container(
                     &["bash", "-lc", &claude_cmd],
                     should_pull,
