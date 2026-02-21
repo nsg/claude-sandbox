@@ -37,6 +37,10 @@ struct Cli {
     #[arg(short = 'p', long = "port", action = clap::ArgAction::Append)]
     ports: Vec<u16>,
 
+    /// Automatically update without prompting
+    #[arg(long)]
+    auto_update: bool,
+
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -129,7 +133,7 @@ fn check_available_updates(client: &Client) -> UpdateStatus {
     }
 }
 
-fn perform_updates(client: &Client, status: &UpdateStatus) -> bool {
+fn perform_updates(client: &Client, status: &UpdateStatus, auto: bool) -> bool {
     let has_binary = status.binary_available.is_some();
     let has_skills = status.skills_available.is_some();
 
@@ -137,21 +141,23 @@ fn perform_updates(client: &Client, status: &UpdateStatus) -> bool {
         return true;
     }
 
-    let prompt = match (has_binary, has_skills) {
-        (true, true) => "Updates available: binary, skills, container image. Update now?",
-        (true, false) => "Updates available: binary, container image. Update now?",
-        (false, true) => "Updates available: skills, container image. Update now?",
-        (false, false) => unreachable!(),
-    };
+    if !auto {
+        let prompt = match (has_binary, has_skills) {
+            (true, true) => "Updates available: binary, skills, container image. Update now?",
+            (true, false) => "Updates available: binary, container image. Update now?",
+            (false, true) => "Updates available: skills, container image. Update now?",
+            (false, false) => unreachable!(),
+        };
 
-    let confirm = Confirm::new()
-        .with_prompt(prompt)
-        .default(false)
-        .interact()
-        .unwrap_or(false);
+        let confirm = Confirm::new()
+            .with_prompt(prompt)
+            .default(false)
+            .interact()
+            .unwrap_or(false);
 
-    if !confirm {
-        return false;
+        if !confirm {
+            return false;
+        }
     }
 
     if has_skills {
@@ -413,7 +419,7 @@ fn main() {
     let client = Client::new();
 
     let update_status = check_available_updates(&client);
-    let should_pull = perform_updates(&client, &update_status);
+    let should_pull = perform_updates(&client, &update_status, cli.auto_update);
 
     match cli.command {
         Some(Commands::Shell) => {
