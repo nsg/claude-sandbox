@@ -368,6 +368,16 @@ fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16]) {
     let git_user_email = git_config("user.email");
 
     let mut cmd = Command::new("podman");
+    // VS Code snap overrides XDG_DATA_HOME to ~/snap/code/<rev>/.local/share,
+    // causing Podman's database path to shift on each snap revision update.
+    // Restore the original value if we detect the snap environment.
+    if let Some(orig) = env::var_os("XDG_DATA_HOME_VSCODE_SNAP_ORIG") {
+        if orig.is_empty() {
+            cmd.env_remove("XDG_DATA_HOME");
+        } else {
+            cmd.env("XDG_DATA_HOME", orig);
+        }
+    }
     cmd.args(["run", "--rm", "-it"]);
     if pull_image {
         cmd.arg("--pull=newer");
