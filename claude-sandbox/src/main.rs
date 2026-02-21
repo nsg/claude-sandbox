@@ -378,7 +378,13 @@ fn ensure_clipboard_proxy() {
     eprintln!("Warning: clipboard-proxy did not start in time");
 }
 
-fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16], host_env: &[String]) {
+fn run_container(
+    extra_args: &[&str],
+    pull_image: bool,
+    ports: &[u16],
+    host_env: &[String],
+    quiet: bool,
+) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
 
@@ -401,6 +407,9 @@ fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16], host_env:
         cmd.args(["run", "--rm", "-it"]);
     } else {
         cmd.args(["run", "--rm", "-i"]);
+    }
+    if quiet {
+        cmd.arg("--quiet");
     }
     if pull_image {
         cmd.arg("--pull=newer");
@@ -440,7 +449,13 @@ fn main() {
 
     match cli.command {
         Some(Commands::Shell) => {
-            run_container(&["bash", "-l"], should_pull, &cli.ports, &cli.host_env);
+            run_container(
+                &["bash", "-l"],
+                should_pull,
+                &cli.ports,
+                &cli.host_env,
+                cli.quiet,
+            );
         }
         Some(Commands::Install { target }) => {
             if target == "skills" {
@@ -464,6 +479,7 @@ fn main() {
                     should_pull,
                     &cli.ports,
                     &cli.host_env,
+                    cli.quiet,
                 );
             } else {
                 let claude_cmd = format!("claude {}", cli.args.join(" "));
@@ -472,6 +488,7 @@ fn main() {
                     should_pull,
                     &cli.ports,
                     &cli.host_env,
+                    cli.quiet,
                 );
             }
         }
