@@ -382,6 +382,20 @@ fn ensure_clipboard_proxy() {
     eprintln!("Warning: clipboard-proxy did not start in time");
 }
 
+fn find_vscode_extension(prefix: &str) -> Option<PathBuf> {
+    let extensions_dir = home_dir().join(".vscode/extensions");
+    let entries = fs::read_dir(&extensions_dir).ok()?;
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(prefix))
+        })
+        .max_by_key(|e| e.file_name())
+        .map(|e| e.path())
+}
+
 fn run_container(
     extra_args: &[&str],
     pull_image: bool,
@@ -429,6 +443,16 @@ fn run_container(
         .args(["-e", "IS_SANDBOX=1"])
         .args(["-v", "/etc/localtime:/etc/localtime:ro"])
         .args(["-v", "/etc/timezone:/etc/timezone:ro"]);
+
+    if let Some(ext_dir) = find_vscode_extension("anthropic.claude-code-") {
+        let ext_name = ext_dir.file_name().expect("Invalid extension path");
+        let container_path = PathBuf::from("/root/.vscode/extensions").join(ext_name);
+        cmd.arg("-v").arg(format!(
+            "{}:{}:ro",
+            ext_dir.display(),
+            container_path.display()
+        ));
+    }
 
     for port in ports {
         cmd.args(["-p", &format!("{}:{}", port, port)]);
