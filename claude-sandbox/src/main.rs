@@ -8,7 +8,7 @@ use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use std::env;
 use std::fs::{self, File, Permissions};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -385,7 +385,11 @@ fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16], host_env:
             cmd.env_remove(entry);
         }
     }
-    cmd.args(["run", "--rm", "-it"]);
+    if std::io::stdin().is_terminal() {
+        cmd.args(["run", "--rm", "-it"]);
+    } else {
+        cmd.args(["run", "--rm", "-i"]);
+    }
     if pull_image {
         cmd.arg("--pull=newer");
     }
@@ -443,10 +447,20 @@ fn main() {
         }
         None => {
             if cli.args.is_empty() {
-                run_container(&["bash", "-lc", "claude"], should_pull, &cli.ports, &cli.host_env);
+                run_container(
+                    &["bash", "-lc", "claude"],
+                    should_pull,
+                    &cli.ports,
+                    &cli.host_env,
+                );
             } else {
                 let claude_cmd = format!("claude {}", cli.args.join(" "));
-                run_container(&["bash", "-lc", &claude_cmd], should_pull, &cli.ports, &cli.host_env);
+                run_container(
+                    &["bash", "-lc", &claude_cmd],
+                    should_pull,
+                    &cli.ports,
+                    &cli.host_env,
+                );
             }
         }
     }

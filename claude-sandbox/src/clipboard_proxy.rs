@@ -96,7 +96,11 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>) -> Response {
             let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
             log_line(
                 log,
-                &format!("OK      read_image ({} bytes, {} b64)", bytes.len(), encoded.len()),
+                &format!(
+                    "OK      read_image ({} bytes, {} b64)",
+                    bytes.len(),
+                    encoded.len()
+                ),
             );
             Response {
                 exit_code: 0,
@@ -215,11 +219,8 @@ mod tests {
     fn make_temp_dir() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = env::temp_dir().join(format!(
-            "clipboard-proxy-test-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            env::temp_dir().join(format!("clipboard-proxy-test-{}-{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -241,9 +242,8 @@ mod tests {
         fs::write(&path, b"PNG old").unwrap();
 
         // Set mtime to 5 minutes ago
-        let old_time = filetime::FileTime::from_system_time(
-            SystemTime::now() - Duration::from_secs(300),
-        );
+        let old_time =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(300));
         filetime::set_file_mtime(&path, old_time).unwrap();
 
         let result = find_newest_screenshot(&dir);
@@ -259,9 +259,8 @@ mod tests {
         // Create an older-but-still-recent file (30s ago)
         let older = dir.join("older.png");
         fs::write(&older, b"PNG older").unwrap();
-        let older_time = filetime::FileTime::from_system_time(
-            SystemTime::now() - Duration::from_secs(30),
-        );
+        let older_time =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(30));
         filetime::set_file_mtime(&older, older_time).unwrap();
 
         // Create the newest file (just now)
