@@ -62,6 +62,28 @@ Use `--` to pass arguments to claude instead of claude-sandbox:
 claude-sandbox -p 8080 -- -p
 ```
 
+### Auto-update
+
+Skip the interactive update prompt and update automatically:
+
+```bash
+claude-sandbox --auto-update
+```
+
+### Host environment
+
+Override environment variables for the Podman process itself (not the container). Useful when the calling environment injects unwanted paths, e.g. VS Code snap overriding `XDG_DATA_HOME`:
+
+```bash
+claude-sandbox --host-env XDG_DATA_HOME=/home/user/.local/share
+```
+
+Pass without a value to unset a variable:
+
+```bash
+claude-sandbox --host-env XDG_DATA_HOME
+```
+
 ---
 
 ## GitHub CLI Proxy

@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long)]
     auto_update: bool,
 
+    /// Set host environment variable for the podman process (e.g., --host-env XDG_DATA_HOME=/home/user/.local/share)
+    #[arg(long = "host-env", action = clap::ArgAction::Append)]
+    host_env: Vec<String>,
+
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -362,7 +366,7 @@ fn ensure_clipboard_proxy() {
     eprintln!("Warning: clipboard-proxy did not start in time");
 }
 
-fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16]) {
+fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16], host_env: &[String]) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
 
@@ -374,14 +378,11 @@ fn run_container(extra_args: &[&str], pull_image: bool, ports: &[u16]) {
     let git_user_email = git_config("user.email");
 
     let mut cmd = Command::new("podman");
-    // VS Code snap overrides XDG_DATA_HOME to ~/snap/code/<rev>/.local/share,
-    // causing Podman's database path to shift on each snap revision update.
-    // Restore the original value if we detect the snap environment.
-    if let Some(orig) = env::var_os("XDG_DATA_HOME_VSCODE_SNAP_ORIG") {
-        if orig.is_empty() {
-            cmd.env_remove("XDG_DATA_HOME");
+    for entry in host_env {
+        if let Some((key, val)) = entry.split_once('=') {
+            cmd.env(key, val);
         } else {
-            cmd.env("XDG_DATA_HOME", orig);
+            cmd.env_remove(entry);
         }
     }
     cmd.args(["run", "--rm", "-it"]);
@@ -423,7 +424,7 @@ fn main() {
 
     match cli.command {
         Some(Commands::Shell) => {
-            run_container(&["bash", "-l"], should_pull, &cli.ports);
+            run_container(&["bash", "-l"], should_pull, &cli.ports, &cli.host_env);
         }
         Some(Commands::Install { target }) => {
             if target == "skills" {
@@ -442,10 +443,10 @@ fn main() {
         }
         None => {
             if cli.args.is_empty() {
-                run_container(&["bash", "-lc", "claude"], should_pull, &cli.ports);
+                run_container(&["bash", "-lc", "claude"], should_pull, &cli.ports, &cli.host_env);
             } else {
                 let claude_cmd = format!("claude {}", cli.args.join(" "));
-                run_container(&["bash", "-lc", &claude_cmd], should_pull, &cli.ports);
+                run_container(&["bash", "-lc", &claude_cmd], should_pull, &cli.ports, &cli.host_env);
             }
         }
     }
