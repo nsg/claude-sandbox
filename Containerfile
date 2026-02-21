@@ -28,6 +28,7 @@ RUN apt-get update && apt-get upgrade -y && \
         ffmpeg \
         nodejs \
         npm \
+        openssh-server \
         rustup \
         shellcheck \
     && rm -rf /var/lib/apt/lists/*

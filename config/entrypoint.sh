@@ -59,5 +59,26 @@ fi
 # Ensure the target directory exists (symlink may point to a not-yet-created path)
 mkdir -p "$MEMORY_TARGET"
 
+# Start SSH server if authorized key is provided
+if [ -n "$SSH_AUTHORIZED_KEY" ]; then
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    echo "$SSH_AUTHORIZED_KEY" > /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+
+    # Generate host keys if missing
+    ssh-keygen -A
+
+    # Configure sshd: key-only auth, no password, no PAM
+    mkdir -p /run/sshd
+    cat > /etc/ssh/sshd_config.d/sandbox.conf <<SSHEOF
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+UsePAM no
+SSHEOF
+
+    /usr/sbin/sshd
+fi
+
 # Execute the command passed to the container
 exec "$@"

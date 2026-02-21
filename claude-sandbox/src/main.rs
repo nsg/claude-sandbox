@@ -53,6 +53,18 @@ struct Cli {
     #[arg(long = "host-env", action = clap::ArgAction::Append)]
     host_env: Vec<String>,
 
+    /// Enable SSH server in the container
+    #[arg(long)]
+    ssh: bool,
+
+    /// Path to the public key file to authorize for SSH access (required when --ssh is set)
+    #[arg(long = "ssh-allow-key", requires = "ssh")]
+    ssh_allow_key: Option<PathBuf>,
+
+    /// Host port to map to container's SSH port 22 (default: 2222)
+    #[arg(long = "ssh-port", default_value = "2222", requires = "ssh")]
+    ssh_port: u16,
+
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -401,6 +413,11 @@ fn find_vscode_extension(prefix: &str) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
+struct SshConfig {
+    authorized_key: String,
+    host_port: u16,
+}
+
 fn run_container(
     extra_args: &[&str],
     pull_image: bool,
@@ -408,6 +425,7 @@ fn run_container(
     host_env: &[String],
     quiet: bool,
     json_filter: bool,
+    ssh: Option<&SshConfig>,
 ) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
@@ -461,6 +479,12 @@ fn run_container(
 
     for port in ports {
         cmd.args(["-p", &format!("{}:{}", port, port)]);
+    }
+
+    if let Some(ssh_cfg) = ssh {
+        cmd.arg("-e")
+            .arg(format!("SSH_AUTHORIZED_KEY={}", ssh_cfg.authorized_key));
+        cmd.args(["-p", &format!("{}:22", ssh_cfg.host_port)]);
     }
 
     cmd.args(["-w", "/workspace"]).arg(IMAGE).args(extra_args);
@@ -526,6 +550,28 @@ fn main() {
     let update_status = check_available_updates(&client);
     let should_pull = perform_updates(&client, &update_status, cli.auto_update, cli.quiet);
 
+    let ssh_config = if cli.ssh {
+        let key_path = cli.ssh_allow_key.as_ref().unwrap_or_else(|| {
+            eprintln!("Error: --ssh-allow-key is required when --ssh is set");
+            std::process::exit(1);
+        });
+        let authorized_key = fs::read_to_string(key_path).unwrap_or_else(|e| {
+            eprintln!("Error: could not read public key file {}: {}", key_path.display(), e);
+            std::process::exit(1);
+        });
+        let authorized_key = authorized_key.trim().to_string();
+        if authorized_key.is_empty() {
+            eprintln!("Error: public key file {} is empty", key_path.display());
+            std::process::exit(1);
+        }
+        Some(SshConfig {
+            authorized_key,
+            host_port: cli.ssh_port,
+        })
+    } else {
+        None
+    };
+
     match cli.command {
         Some(Commands::Shell) => {
             run_container(
@@ -535,6 +581,7 @@ fn main() {
                 &cli.host_env,
                 cli.quiet,
                 cli.json_filter,
+                ssh_config.as_ref(),
             );
         }
         Some(Commands::Install { target }) => {
@@ -561,6 +608,7 @@ fn main() {
                 &cli.host_env,
                 cli.quiet,
                 cli.json_filter,
+                ssh_config.as_ref(),
             );
         }
         None => {
@@ -572,6 +620,7 @@ fn main() {
                     &cli.host_env,
                     cli.quiet,
                     cli.json_filter,
+                    ssh_config.as_ref(),
                 );
             } else {
                 let claude_cmd = format!("claude {}", cli.args.join(" "));
@@ -582,6 +631,7 @@ fn main() {
                     &cli.host_env,
                     cli.quiet,
                     cli.json_filter,
+                    ssh_config.as_ref(),
                 );
             }
         }
