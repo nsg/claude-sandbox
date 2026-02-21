@@ -80,16 +80,6 @@ claude-sandbox --quiet
 
 This is useful when launching from editors or scripts where stdout noise is unwanted.
 
-### Unbuffered output
-
-Force line-buffered stdout for the Claude process. This is auto-detected when stdin is not a TTY, but can be forced explicitly:
-
-```bash
-claude-sandbox --unbuffered
-```
-
-Without this, stdout may be fully buffered through Podman in non-TTY environments (like VS Code), causing Claude's responses to get stuck in a buffer.
-
 ### Host environment
 
 Override environment variables for the Podman process itself (not the container). Useful when the calling environment injects unwanted paths, e.g. VS Code snap overriding `XDG_DATA_HOME`:

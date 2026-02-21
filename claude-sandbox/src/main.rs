@@ -8,7 +8,7 @@ use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use std::env;
 use std::fs::{self, File, Permissions};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -44,10 +44,6 @@ struct Cli {
     /// Suppress informational output, only show errors
     #[arg(short, long)]
     quiet: bool,
-
-    /// Force line-buffered stdout (for non-TTY environments like VS Code)
-    #[arg(long)]
-    unbuffered: bool,
 
     /// Set host environment variable for the podman process (e.g., --host-env XDG_DATA_HOME=/home/user/.local/share)
     #[arg(long = "host-env", action = clap::ArgAction::Append)]
@@ -407,11 +403,7 @@ fn run_container(
             cmd.env_remove(entry);
         }
     }
-    if std::io::stdin().is_terminal() {
-        cmd.args(["run", "--rm", "-it"]);
-    } else {
-        cmd.args(["run", "--rm", "-i"]);
-    }
+    cmd.args(["run", "--rm", "-it"]);
     if quiet {
         cmd.arg("--quiet");
     }
@@ -477,27 +469,16 @@ fn main() {
             clipboard_proxy::run(&socket);
         }
         None => {
-            let needs_pty = cli.unbuffered || !std::io::stdin().is_terminal();
             if cli.args.is_empty() {
-                let claude_cmd = if needs_pty {
-                    "script -qc claude /dev/null".to_string()
-                } else {
-                    "claude".to_string()
-                };
                 run_container(
-                    &["bash", "-lc", &claude_cmd],
+                    &["bash", "-lc", "claude"],
                     should_pull,
                     &cli.ports,
                     &cli.host_env,
                     cli.quiet,
                 );
             } else {
-                let args = cli.args.join(" ");
-                let claude_cmd = if needs_pty {
-                    format!("script -qc 'claude {args}' /dev/null")
-                } else {
-                    format!("claude {args}")
-                };
+                let claude_cmd = format!("claude {}", cli.args.join(" "));
                 run_container(
                     &["bash", "-lc", &claude_cmd],
                     should_pull,
