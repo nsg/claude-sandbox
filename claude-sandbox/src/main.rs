@@ -45,6 +45,10 @@ struct Cli {
     #[arg(short, long)]
     quiet: bool,
 
+    /// Filter stdout/stderr to only pass through JSON lines (for VS Code extension)
+    #[arg(long)]
+    json_filter: bool,
+
     /// Set host environment variable for the podman process (e.g., --host-env XDG_DATA_HOME=/home/user/.local/share)
     #[arg(long = "host-env", action = clap::ArgAction::Append)]
     host_env: Vec<String>,
@@ -384,6 +388,7 @@ fn run_container(
     ports: &[u16],
     host_env: &[String],
     quiet: bool,
+    json_filter: bool,
 ) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
@@ -431,18 +436,51 @@ fn run_container(
 
     cmd.args(["-w", "/workspace"]).arg(IMAGE).args(extra_args);
 
+    if !json_filter {
+        let err = cmd.exec();
+        eprintln!("Failed to exec podman: {}", err);
+        std::process::exit(1);
+    }
+
+    let log_dir = cwd.join(GH_PROXY_SUBDIR);
+    let _ = fs::create_dir_all(&log_dir);
+
     let mut child = cmd
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("Failed to spawn podman");
 
+    let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
+
+    let stdout_log = log_dir.join("non-json-stdout.log");
     thread::spawn(move || {
-        let reader = BufReader::new(stderr);
+        let reader = BufReader::new(stdout);
+        let mut log = File::create(&stdout_log).ok();
+        let mut out = std::io::stdout().lock();
         for line in reader.lines() {
             if let Ok(line) = line {
-                if !line.contains("input device is not a TTY") {
-                    eprintln!("{}", line);
+                if line.starts_with('{') {
+                    let _ = writeln!(out, "{}", line);
+                } else if let Some(ref mut f) = log {
+                    let _ = writeln!(f, "{}", line);
+                }
+            }
+        }
+    });
+
+    let stderr_log = log_dir.join("non-json-stderr.log");
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut log = File::create(&stderr_log).ok();
+        let mut err = std::io::stderr().lock();
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                if line.starts_with('{') {
+                    let _ = writeln!(err, "{}", line);
+                } else if let Some(ref mut f) = log {
+                    let _ = writeln!(f, "{}", line);
                 }
             }
         }
@@ -467,6 +505,7 @@ fn main() {
                 &cli.ports,
                 &cli.host_env,
                 cli.quiet,
+                cli.json_filter,
             );
         }
         Some(Commands::Install { target }) => {
@@ -492,6 +531,7 @@ fn main() {
                     &cli.ports,
                     &cli.host_env,
                     cli.quiet,
+                    cli.json_filter,
                 );
             } else {
                 let claude_cmd = format!("claude {}", cli.args.join(" "));
@@ -501,6 +541,7 @@ fn main() {
                     &cli.ports,
                     &cli.host_env,
                     cli.quiet,
+                    cli.json_filter,
                 );
             }
         }

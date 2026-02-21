@@ -80,6 +80,16 @@ claude-sandbox --quiet
 
 This is useful when launching from editors or scripts where stdout noise is unwanted.
 
+### JSON filter
+
+Filter stdout and stderr to only pass through JSON lines. Non-JSON output is logged to `.claude-sandbox/non-json-stdout.log` and `.claude-sandbox/non-json-stderr.log`:
+
+```bash
+claude-sandbox --json-filter
+```
+
+This is designed for the VS Code extension which expects JSON on both streams. Without the filter, stray non-JSON output (e.g. Podman warnings, Claude CLI debug messages) can break the extension's JSON parser.
+
 ### Host environment
 
 Override environment variables for the Podman process itself (not the container). Useful when the calling environment injects unwanted paths, e.g. VS Code snap overriding `XDG_DATA_HOME`:
