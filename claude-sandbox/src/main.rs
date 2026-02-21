@@ -473,16 +473,19 @@ fn main() {
             clipboard_proxy::run(&socket);
         }
         None => {
+            let is_tty = std::io::stdin().is_terminal();
+            let prefix = if is_tty { "" } else { "stdbuf -oL " };
             if cli.args.is_empty() {
+                let claude_cmd = format!("{prefix}claude");
                 run_container(
-                    &["bash", "-lc", "claude"],
+                    &["bash", "-lc", &claude_cmd],
                     should_pull,
                     &cli.ports,
                     &cli.host_env,
                     cli.quiet,
                 );
             } else {
-                let claude_cmd = format!("claude {}", cli.args.join(" "));
+                let claude_cmd = format!("{prefix}claude {}", cli.args.join(" "));
                 run_container(
                     &["bash", "-lc", &claude_cmd],
                     should_pull,
