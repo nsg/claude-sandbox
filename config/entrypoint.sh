@@ -56,6 +56,8 @@ if [ ! -L "$MEMORY_LINK" ]; then
     fi
     ln -s "$MEMORY_TARGET" "$MEMORY_LINK"
 fi
+# Ensure the target directory exists (symlink may point to a not-yet-created path)
+mkdir -p "$MEMORY_TARGET"
 
 # Execute the command passed to the container
 exec "$@"
