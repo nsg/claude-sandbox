@@ -78,6 +78,11 @@ enum Commands {
         #[arg(long)]
         socket: String,
     },
+    /// Run a command inside the container
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 fn home_dir() -> PathBuf {
@@ -546,6 +551,17 @@ fn main() {
         }
         Some(Commands::ClipboardProxy { socket }) => {
             clipboard_proxy::run(&socket);
+        }
+        Some(Commands::Run { command }) => {
+            let cmd_str = command.join(" ");
+            run_container(
+                &["bash", "-lc", &cmd_str],
+                should_pull,
+                &cli.ports,
+                &cli.host_env,
+                cli.quiet,
+                cli.json_filter,
+            );
         }
         None => {
             if cli.args.is_empty() {
