@@ -8,7 +8,7 @@ use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use std::env;
 use std::fs::{self, File, Permissions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -431,9 +431,25 @@ fn run_container(
 
     cmd.args(["-w", "/workspace"]).arg(IMAGE).args(extra_args);
 
-    let err = cmd.exec();
-    eprintln!("Failed to exec podman: {}", err);
-    std::process::exit(1);
+    let mut child = cmd
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn podman");
+
+    let stderr = child.stderr.take().unwrap();
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                if !line.contains("input device is not a TTY") {
+                    eprintln!("{}", line);
+                }
+            }
+        }
+    });
+
+    let status = child.wait().expect("Failed to wait for podman");
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 fn main() {
