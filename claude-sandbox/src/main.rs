@@ -45,6 +45,10 @@ struct Cli {
     #[arg(short, long)]
     quiet: bool,
 
+    /// Force line-buffered stdout (for non-TTY environments like VS Code)
+    #[arg(long)]
+    unbuffered: bool,
+
     /// Set host environment variable for the podman process (e.g., --host-env XDG_DATA_HOME=/home/user/.local/share)
     #[arg(long = "host-env", action = clap::ArgAction::Append)]
     host_env: Vec<String>,
@@ -473,8 +477,8 @@ fn main() {
             clipboard_proxy::run(&socket);
         }
         None => {
-            let is_tty = std::io::stdin().is_terminal();
-            let prefix = if is_tty { "" } else { "stdbuf -oL " };
+            let needs_unbuffer = cli.unbuffered || !std::io::stdin().is_terminal();
+            let prefix = if needs_unbuffer { "stdbuf -oL " } else { "" };
             if cli.args.is_empty() {
                 let claude_cmd = format!("{prefix}claude");
                 run_container(
