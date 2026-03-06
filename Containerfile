@@ -74,6 +74,9 @@ COPY config/CLAUDE.md /etc/claude/CLAUDE.md
 COPY config/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# Symlink ubuntu user's .claude to root's
+RUN rm -rf /home/ubuntu/.claude && ln -s /root/.claude /home/ubuntu/.claude
+
 WORKDIR /workspace
 
 EXPOSE 8080
