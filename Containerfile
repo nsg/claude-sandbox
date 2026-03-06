@@ -35,6 +35,7 @@ RUN apt-get update && apt-get upgrade -y && \
 
 # Rust toolchain
 RUN rustup default stable
+RUN rustup target add wasm32-unknown-unknown
 RUN cargo install cargo-audit
 
 # Copy binaries from builder
