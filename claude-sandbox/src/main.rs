@@ -6,6 +6,8 @@ use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, Permissions};
 use std::io::{BufRead, BufReader, Write};
@@ -24,6 +26,42 @@ const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
 const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
 const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
 const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
+const SSHD_CONFIG_FILE: &str = "sshd.json";
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct SshdConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authorized_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_keys: Option<HashMap<String, String>>,
+}
+
+fn sshd_config_path() -> PathBuf {
+    env::current_dir()
+        .expect("Could not get current directory")
+        .join(GH_PROXY_SUBDIR)
+        .join(SSHD_CONFIG_FILE)
+}
+
+fn load_sshd_config() -> SshdConfig {
+    let path = sshd_config_path();
+    match fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => SshdConfig::default(),
+    }
+}
+
+fn save_sshd_config(config: &SshdConfig) {
+    let path = sshd_config_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = fs::write(&path, json);
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "claude-sandbox")]
@@ -57,13 +95,13 @@ struct Cli {
     #[arg(long)]
     ssh: bool,
 
-    /// Path to the public key file to authorize for SSH access (required when --ssh is set)
-    #[arg(long = "ssh-allow-key", requires = "ssh")]
+    /// Path to the public key file to authorize for SSH access
+    #[arg(long = "ssh-allow-key")]
     ssh_allow_key: Option<PathBuf>,
 
-    /// Host port to map to container's SSH port 22 (default: 2222)
-    #[arg(long = "ssh-port", default_value = "2222", requires = "ssh")]
-    ssh_port: u16,
+    /// Host port to map to container's SSH port 22
+    #[arg(long = "ssh-port")]
+    ssh_port: Option<u16>,
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -551,22 +589,42 @@ fn main() {
     let should_pull = perform_updates(&client, &update_status, cli.auto_update, cli.quiet);
 
     let ssh_config = if cli.ssh {
-        let key_path = cli.ssh_allow_key.as_ref().unwrap_or_else(|| {
-            eprintln!("Error: --ssh-allow-key is required when --ssh is set");
+        let mut saved = load_sshd_config();
+
+        // Resolve authorized_key: CLI flag overrides saved value
+        let authorized_key = if let Some(ref key_path) = cli.ssh_allow_key {
+            let key = fs::read_to_string(key_path).unwrap_or_else(|e| {
+                eprintln!(
+                    "Error: could not read public key file {}: {}",
+                    key_path.display(),
+                    e
+                );
+                std::process::exit(1);
+            });
+            let key = key.trim().to_string();
+            if key.is_empty() {
+                eprintln!("Error: public key file {} is empty", key_path.display());
+                std::process::exit(1);
+            }
+            key
+        } else if let Some(ref key) = saved.authorized_key {
+            key.clone()
+        } else {
+            eprintln!("Error: --ssh-allow-key is required (no saved config found)");
             std::process::exit(1);
-        });
-        let authorized_key = fs::read_to_string(key_path).unwrap_or_else(|e| {
-            eprintln!("Error: could not read public key file {}: {}", key_path.display(), e);
-            std::process::exit(1);
-        });
-        let authorized_key = authorized_key.trim().to_string();
-        if authorized_key.is_empty() {
-            eprintln!("Error: public key file {} is empty", key_path.display());
-            std::process::exit(1);
-        }
+        };
+
+        // Resolve port: CLI flag overrides saved value, default 2222
+        let host_port = cli.ssh_port.or(saved.port).unwrap_or(2222);
+
+        // Save resolved config back to sshd.json
+        saved.authorized_key = Some(authorized_key.clone());
+        saved.port = Some(host_port);
+        save_sshd_config(&saved);
+
         Some(SshConfig {
             authorized_key,
-            host_port: cli.ssh_port,
+            host_port,
         })
     } else {
         None
