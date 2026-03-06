@@ -38,6 +38,9 @@ RUN rustup default stable
 RUN rustup target add wasm32-unknown-unknown
 RUN cargo install cargo-audit trunk
 
+# Make cargo binaries available in all login shells (e.g. SSH sessions)
+RUN echo 'export PATH="$HOME/.cargo/bin:$PATH"' > /etc/profile.d/cargo.sh
+
 # Copy binaries from builder
 COPY --from=builder /usr/local/bin/starship /usr/local/bin/
 COPY --from=builder /usr/local/bin/zola /usr/local/bin/
