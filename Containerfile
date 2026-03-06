@@ -36,7 +36,7 @@ RUN apt-get update && apt-get upgrade -y && \
 # Rust toolchain
 RUN rustup default stable
 RUN rustup target add wasm32-unknown-unknown
-RUN cargo install cargo-audit
+RUN cargo install cargo-audit trunk
 
 # Copy binaries from builder
 COPY --from=builder /usr/local/bin/starship /usr/local/bin/
