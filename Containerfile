@@ -48,6 +48,7 @@ COPY --from=builder /root/.local/bin/claude /root/.local/bin/
 
 # Install Playwright MCP server and Chrome with OS dependencies
 RUN npm install -g @playwright/mcp && \
+    cd /usr/local/lib/node_modules/@playwright/mcp && \
     npx playwright install --with-deps chromium
 
 # Set PATH for all shells
