@@ -6,9 +6,7 @@
         "@playwright/mcp@latest",
         "--headless",
         "--browser=chromium",
-        "--no-sandbox",
-        "--save-video=1280x720",
-        "--output-dir=/workspace/.playwright-output"
+        "--no-sandbox"
       ]
     }
   }
