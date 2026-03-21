@@ -8,6 +8,6 @@
 
 - Never add Co-Authored-By lines to commit messages
 
-## Clipboard
+## Clipboard / Screenshots
 
-- To read the clipboard image: `xclip -selection clipboard -t image/png -o > /tmp/clipboard.png` then read the file
+- "Screenshot" refers to the clipboard image. To read it: `xclip -selection clipboard -t image/png -o > /tmp/clipboard.png` then read the file
