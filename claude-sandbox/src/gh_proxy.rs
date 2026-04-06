@@ -337,15 +337,37 @@ const COMMANDS: &[CommandDef] = &[
 
 // ── Extension commands (gh ext …) ─────────────────────────────────────
 
-const EXT_COMMANDS: &[ExtCommandDef] = &[ExtCommandDef {
-    group: "ext",
-    subcommand: "run-logs",
-    description: "Download workflow run logs",
-    help_text: "gh ext run-logs <run-id> (workspace repo only)\n\n\
-                    Download workflow run logs for the current repository.\n\
-                    Saves zip to .claude-sandbox/run-<run-id>.zip and prints the path.\n",
-    handler: handle_run_logs,
-}];
+const EXT_COMMANDS: &[ExtCommandDef] = &[
+    ExtCommandDef {
+        group: "ext",
+        subcommand: "run-logs",
+        description: "Download workflow run logs",
+        help_text: "gh ext run-logs <run-id> (workspace repo only)\n\n\
+                        Download workflow run logs for the current repository.\n\
+                        Saves zip to .claude-sandbox/run-<run-id>.zip and prints the path.\n",
+        handler: handle_run_logs,
+    },
+    ExtCommandDef {
+        group: "ext",
+        subcommand: "milestone-create",
+        description: "Create a milestone",
+        help_text: "gh ext milestone-create <title> [--description <text>] [--due-on <date>] \
+                        (workspace repo only)\n\n\
+                        Create a milestone in the current repository.\n\
+                        --description, -d  Milestone description\n\
+                        --due-on           Due date (ISO 8601: YYYY-MM-DDTHH:MM:SSZ)\n",
+        handler: handle_milestone_create,
+    },
+    ExtCommandDef {
+        group: "ext",
+        subcommand: "milestone-list",
+        description: "List milestones",
+        help_text: "gh ext milestone-list [--state <open|closed|all>] (workspace repo only)\n\n\
+                        List milestones in the current repository.\n\
+                        --state, -s  Filter by state: open (default), closed, all\n",
+        handler: handle_milestone_list,
+    },
+];
 
 fn find_ext_command(group: &str, subcommand: &str) -> Option<&'static ExtCommandDef> {
     EXT_COMMANDS
@@ -486,6 +508,194 @@ fn handle_run_logs(args: &[String]) -> Response {
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             }
         }
+        Err(e) => Response {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("gh-proxy: failed to execute gh api: {}", e),
+        },
+    }
+}
+
+fn handle_milestone_create(args: &[String]) -> Response {
+    let usage = "gh-proxy: usage: gh ext milestone-create <title> \
+                 [--description <text>] [--due-on <date>]";
+
+    if args.is_empty() {
+        return Response {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: usage.to_string(),
+        };
+    }
+
+    let repo = match detect_repo() {
+        Some(r) => r,
+        None => {
+            return Response {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "gh-proxy: could not detect repository from git remote".to_string(),
+            };
+        }
+    };
+
+    let mut title: Option<&str> = None;
+    let mut description: Option<&str> = None;
+    let mut due_on: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--description" | "-d" => {
+                i += 1;
+                if i < args.len() {
+                    description = Some(&args[i]);
+                }
+            }
+            "--due-on" => {
+                i += 1;
+                if i < args.len() {
+                    due_on = Some(&args[i]);
+                }
+            }
+            arg if arg.starts_with('-') => {
+                return Response {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: format!("gh-proxy: unknown flag: {}", arg),
+                };
+            }
+            _ if title.is_none() => title = Some(&args[i]),
+            _ => {
+                return Response {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: "gh-proxy: unexpected positional argument".to_string(),
+                };
+            }
+        }
+        i += 1;
+    }
+
+    let title = match title {
+        Some(t) => t,
+        None => {
+            return Response {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: usage.to_string(),
+            };
+        }
+    };
+
+    let api_path = format!("/repos/{}/milestones", repo);
+
+    let mut body = format!("{{\"title\":{}", serde_json::to_string(title).unwrap());
+    if let Some(desc) = description {
+        body.push_str(&format!(
+            ",\"description\":{}",
+            serde_json::to_string(desc).unwrap()
+        ));
+    }
+    if let Some(due) = due_on {
+        body.push_str(&format!(
+            ",\"due_on\":{}",
+            serde_json::to_string(due).unwrap()
+        ));
+    }
+    body.push('}');
+
+    match Command::new("gh")
+        .args(["api", &api_path, "-X", "POST", "--input", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(ref mut stdin) = child.stdin {
+                let _ = stdin.write_all(body.as_bytes());
+            }
+            match child.wait_with_output() {
+                Ok(output) => Response {
+                    exit_code: output.status.code().unwrap_or(1),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                },
+                Err(e) => Response {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: format!("gh-proxy: failed to execute gh api: {}", e),
+                },
+            }
+        }
+        Err(e) => Response {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("gh-proxy: failed to execute gh api: {}", e),
+        },
+    }
+}
+
+fn handle_milestone_list(args: &[String]) -> Response {
+    let repo = match detect_repo() {
+        Some(r) => r,
+        None => {
+            return Response {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "gh-proxy: could not detect repository from git remote".to_string(),
+            };
+        }
+    };
+
+    let mut state = "open";
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--state" | "-s" => {
+                i += 1;
+                if i < args.len() {
+                    match args[i].as_str() {
+                        "open" | "closed" | "all" => state = &args[i],
+                        _ => {
+                            return Response {
+                                exit_code: 1,
+                                stdout: String::new(),
+                                stderr: format!(
+                                    "gh-proxy: invalid state '{}', must be open, closed, or all",
+                                    args[i]
+                                ),
+                            };
+                        }
+                    }
+                }
+            }
+            arg if arg.starts_with('-') => {
+                return Response {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: format!("gh-proxy: unknown flag: {}", arg),
+                };
+            }
+            _ => {
+                return Response {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: "gh-proxy: unexpected positional argument".to_string(),
+                };
+            }
+        }
+        i += 1;
+    }
+
+    let api_path = format!("/repos/{}/milestones?state={}", repo, state);
+
+    match Command::new("gh").args(["api", &api_path]).output() {
+        Ok(output) => Response {
+            exit_code: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
         Err(e) => Response {
             exit_code: 1,
             stdout: String::new(),
@@ -658,6 +868,15 @@ fn reject_reason(args: &[String]) -> Option<String> {
 
     let group = args[0].as_str();
     let subcommand = args[1].as_str();
+
+    // Guide callers trying to use `gh api` for milestones to the extension commands
+    if group == "api" && args[1..].iter().any(|a| a.contains("milestone")) {
+        return Some(
+            "command not allowed: gh api is not available. \
+             Use 'gh ext milestone-list' and 'gh ext milestone-create <title>' instead."
+                .to_string(),
+        );
+    }
 
     let cmd = match find_command(group, subcommand) {
         Some(c) => c,
@@ -1070,6 +1289,86 @@ mod tests {
     fn test_toplevel_help_includes_ext() {
         let h = maybe_help(&strs(&["-h"])).unwrap();
         assert!(h.contains("ext"));
+    }
+
+    // ── Milestone extension commands ──────────────────────────────
+
+    #[test]
+    fn test_ext_milestone_create_missing_title() {
+        let r = maybe_ext_command(&strs(&["ext", "milestone-create"])).unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("usage"));
+    }
+
+    #[test]
+    fn test_ext_milestone_create_unknown_flag() {
+        let r = maybe_ext_command(&strs(&["ext", "milestone-create", "v1", "--bogus"])).unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("unknown flag"));
+    }
+
+    #[test]
+    fn test_ext_milestone_create_extra_positional() {
+        let r = maybe_ext_command(&strs(&["ext", "milestone-create", "v1", "extra"])).unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("unexpected positional"));
+    }
+
+    #[test]
+    fn test_ext_milestone_list_unknown_flag() {
+        let r = maybe_ext_command(&strs(&["ext", "milestone-list", "--bogus"])).unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("unknown flag"));
+    }
+
+    #[test]
+    fn test_ext_milestone_list_invalid_state() {
+        let r = maybe_ext_command(&strs(&["ext", "milestone-list", "--state", "invalid"])).unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("invalid state"));
+    }
+
+    #[test]
+    fn test_ext_milestone_list_unexpected_positional() {
+        let r = maybe_ext_command(&strs(&["ext", "milestone-list", "something"])).unwrap();
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("unexpected positional"));
+    }
+
+    #[test]
+    fn test_ext_milestone_help() {
+        let h = maybe_help(&strs(&["ext", "milestone-create", "-h"])).unwrap();
+        assert!(h.contains("--description"));
+        assert!(h.contains("--due-on"));
+
+        let h = maybe_help(&strs(&["ext", "milestone-list", "-h"])).unwrap();
+        assert!(h.contains("--state"));
+    }
+
+    #[test]
+    fn test_ext_group_help_includes_milestones() {
+        let h = maybe_help(&strs(&["ext", "-h"])).unwrap();
+        assert!(h.contains("milestone-create"));
+        assert!(h.contains("milestone-list"));
+    }
+
+    // ── API milestone hint ────────────────────────────────────────
+
+    #[test]
+    fn test_api_milestone_hint() {
+        let r = reject_reason(&strs(&["api", "/repos/owner/repo/milestones"]));
+        assert!(r.is_some());
+        let msg = r.unwrap();
+        assert!(msg.contains("gh ext milestone-list"));
+        assert!(msg.contains("gh ext milestone-create"));
+    }
+
+    #[test]
+    fn test_api_non_milestone_no_hint() {
+        let r = reject_reason(&strs(&["api", "/repos/owner/repo/releases"]));
+        assert!(r.is_some());
+        let msg = r.unwrap();
+        assert!(!msg.contains("milestone"));
     }
 
     fn strs(s: &[&str]) -> Vec<String> {

@@ -132,6 +132,8 @@ The container includes a sandboxed `gh` proxy that gives Claude safe access to G
 | Command | Description |
 |---------|-------------|
 | `gh ext run-logs <run-id>` | Download workflow run logs as a zip file |
+| `gh ext milestone-create <title>` | Create a milestone (supports `--description`, `--due-on`) |
+| `gh ext milestone-list` | List milestones (supports `--state open\|closed\|all`) |
 
 All commands are flag-validated against a strict allowlist. Every request is logged to `.claude-sandbox/gh-proxy.log`.
 
