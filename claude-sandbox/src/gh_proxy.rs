@@ -333,6 +333,32 @@ const COMMANDS: &[CommandDef] = &[
         is_write: true,
         allowed_flags: &["--body", "-b", "--edit-last", "--web", "-w"],
     },
+    CommandDef {
+        group: "issue",
+        subcommand: "close",
+        is_write: true,
+        allowed_flags: &["--comment", "-c", "--reason", "-r", "--duplicate-of"],
+    },
+    CommandDef {
+        group: "issue",
+        subcommand: "edit",
+        is_write: true,
+        allowed_flags: &[
+            "--title",
+            "-t",
+            "--body",
+            "-b",
+            "--milestone",
+            "-m",
+            "--add-assignee",
+            "--remove-assignee",
+            "--add-label",
+            "--remove-label",
+            "--add-project",
+            "--remove-project",
+            "--remove-milestone",
+        ],
+    },
 ];
 
 // ── Extension commands (gh ext …) ─────────────────────────────────────
@@ -1084,6 +1110,22 @@ mod tests {
         assert!(reject_reason(&strs(&["pr", "comment", "123", "--body", "hi"])).is_none());
         assert!(reject_reason(&strs(&["issue", "create", "--title", "bug"])).is_none());
         assert!(reject_reason(&strs(&["issue", "comment", "42", "--body", "x"])).is_none());
+        assert!(reject_reason(&strs(&["issue", "close", "42"])).is_none());
+        assert!(reject_reason(&strs(&["issue", "close", "42", "--reason", "completed"])).is_none());
+        assert!(reject_reason(&strs(&["issue", "close", "42", "--comment", "done"])).is_none());
+        assert!(reject_reason(&strs(&["issue", "edit", "42", "--title", "new"])).is_none());
+        assert!(
+            reject_reason(&strs(&[
+                "issue",
+                "edit",
+                "42",
+                "--add-label",
+                "bug",
+                "--milestone",
+                "v1"
+            ]))
+            .is_none()
+        );
     }
 
     #[test]
@@ -1103,6 +1145,8 @@ mod tests {
         assert!(reject_reason(&strs(&["pr", "create", "--repo=other/repo"])).is_some());
         assert!(reject_reason(&strs(&["issue", "create", "--repo", "other/repo"])).is_some());
         assert!(reject_reason(&strs(&["issue", "comment", "1", "-R", "other/repo"])).is_some());
+        assert!(reject_reason(&strs(&["issue", "close", "42", "-R", "other/repo"])).is_some());
+        assert!(reject_reason(&strs(&["issue", "edit", "42", "--repo", "other/repo"])).is_some());
     }
 
     #[test]
@@ -1120,6 +1164,8 @@ mod tests {
 
         assert!(reject_reason(&strs(&["pr", "comment", "1", "-F", "file.txt"])).is_some());
         assert!(reject_reason(&strs(&["issue", "create", "--body-file", "f"])).is_some());
+        assert!(reject_reason(&strs(&["issue", "edit", "42", "--body-file", "f"])).is_some());
+        assert!(reject_reason(&strs(&["issue", "edit", "42", "-F", "f"])).is_some());
     }
 
     // ── Flag whitelist enforcement ─────────────────────────────────
@@ -1162,8 +1208,7 @@ mod tests {
         assert!(reject_reason(&strs(&["pr", "merge", "123"])).is_some());
         assert!(reject_reason(&strs(&["pr", "close", "123"])).is_some());
         assert!(reject_reason(&strs(&["pr", "edit", "123"])).is_some());
-        assert!(reject_reason(&strs(&["issue", "close", "42"])).is_some());
-        assert!(reject_reason(&strs(&["issue", "edit", "42"])).is_some());
+        assert!(reject_reason(&strs(&["issue", "delete", "42"])).is_some());
         assert!(reject_reason(&strs(&["repo", "create"])).is_some());
         assert!(reject_reason(&strs(&["repo", "delete"])).is_some());
         assert!(reject_reason(&strs(&["release", "create"])).is_some());
