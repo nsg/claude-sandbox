@@ -91,6 +91,10 @@ struct Cli {
     #[arg(long = "host-env", action = clap::ArgAction::Append)]
     host_env: Vec<String>,
 
+    /// Disable audio passthrough (PulseAudio socket mount for voice mode)
+    #[arg(long)]
+    no_audio: bool,
+
     /// Enable SSH server in the container
     #[arg(long)]
     ssh: bool,
@@ -464,6 +468,7 @@ fn run_container(
     quiet: bool,
     json_filter: bool,
     ssh: Option<&SshConfig>,
+    audio: bool,
 ) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
@@ -513,6 +518,16 @@ fn run_container(
             ext_dir.display(),
             container_path.display()
         ));
+    }
+
+    if audio
+        && let Some(pulse_path) = env::var_os("XDG_RUNTIME_DIR")
+            .map(|d| PathBuf::from(d).join("pulse"))
+            .filter(|p| p.join("native").exists())
+    {
+        cmd.arg("-v")
+            .arg(format!("{}:/run/user/0/pulse:ro", pulse_path.display()))
+            .args(["-e", "PULSE_SERVER=unix:/run/user/0/pulse/native"]);
     }
 
     for port in ports {
@@ -640,6 +655,7 @@ fn main() {
                 cli.quiet,
                 cli.json_filter,
                 ssh_config.as_ref(),
+                !cli.no_audio,
             );
         }
         Some(Commands::Install { target }) => {
@@ -667,6 +683,7 @@ fn main() {
                 cli.quiet,
                 cli.json_filter,
                 ssh_config.as_ref(),
+                !cli.no_audio,
             );
         }
         None => {
@@ -679,6 +696,7 @@ fn main() {
                     cli.quiet,
                     cli.json_filter,
                     ssh_config.as_ref(),
+                    !cli.no_audio,
                 );
             } else {
                 let claude_cmd = format!("claude {}", cli.args.join(" "));
@@ -690,6 +708,7 @@ fn main() {
                     cli.quiet,
                     cli.json_filter,
                     ssh_config.as_ref(),
+                    !cli.no_audio,
                 );
             }
         }
