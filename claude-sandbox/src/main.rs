@@ -133,6 +133,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
+    /// Run the OpenAI Codex CLI in the container
+    Codex {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn home_dir() -> PathBuf {
@@ -453,6 +458,8 @@ fn run_container(
     let cwd = env::current_dir().expect("Could not get current directory");
     let home = home_dir();
     let claude_dir = home.join(".claude");
+    let codex_dir = home.join(".codex");
+    let _ = fs::create_dir_all(&codex_dir);
 
     let git_user_name = git_config("user.name");
     let git_user_email = git_config("user.email");
@@ -476,7 +483,10 @@ fn run_container(
         .arg(format!("{}:/workspace", cwd.display()))
         .arg("-v")
         .arg(format!("{}:/root/.claude", claude_dir.display()))
+        .arg("-v")
+        .arg(format!("{}:/root/.codex", codex_dir.display()))
         .args(["-e", "CLAUDE_CONFIG_DIR=/root/.claude"])
+        .args(["-e", "CODEX_HOME=/root/.codex"])
         .args(["-e", "TERM=xterm-256color"])
         .args(["-e", "COLORTERM=truecolor"])
         .arg("-e")
@@ -594,6 +604,22 @@ fn main() {
             let cmd_str = command.join(" ");
             run_container(
                 &["bash", "-lc", &cmd_str],
+                should_pull,
+                &cli.ports,
+                &cli.host_env,
+                cli.quiet,
+                ssh_config.as_ref(),
+                !cli.no_audio,
+            );
+        }
+        Some(Commands::Codex { args }) => {
+            let codex_cmd = if args.is_empty() {
+                "codex".to_string()
+            } else {
+                format!("codex {}", args.join(" "))
+            };
+            run_container(
+                &["bash", "-lc", &codex_cmd],
                 should_pull,
                 &cli.ports,
                 &cli.host_env,

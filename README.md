@@ -5,7 +5,7 @@
 
 ## About
 
-claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude` config into the container, keeping your host system clean while giving Claude access to everything it needs.
+claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) and [OpenAI Codex CLI](https://github.com/openai/codex) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude` and `~/.codex` configs into the container, keeping your host system clean while giving each agent access to everything it needs.
 
 The binary handles container image pulls, self-updates, and skill updates automatically.
 
@@ -54,12 +54,23 @@ claude-sandbox shell
 
 # Install skills
 claude-sandbox install skills
+
+# Run OpenAI Codex CLI instead of Claude
+claude-sandbox codex
+claude-sandbox codex "explain this code"
+claude-sandbox codex exec "fix the failing test"
 ```
 
 Use `--` to pass arguments to claude instead of claude-sandbox:
 
 ```bash
 claude-sandbox -p 8080 -- -p
+```
+
+The same top-level flags (`-p`/`--port`, `--quiet`, `--auto-update`, `--host-env`, `--ssh`, `--no-audio`, …) work with the `codex` subcommand. Flags after `codex` are forwarded to the Codex CLI:
+
+```bash
+claude-sandbox -p 8080 codex -m gpt-5
 ```
 
 ### Auto-update
@@ -183,6 +194,7 @@ Browser sessions are recorded to `.playwright-output/videos/` as `.webm` files a
 The container includes:
 
 - Claude CLI
+- OpenAI Codex CLI
 - Node.js & npm
 - Rust (via rustup) + cargo-audit
 - Playwright MCP with Chromium and ffmpeg

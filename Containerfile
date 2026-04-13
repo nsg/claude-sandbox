@@ -57,6 +57,9 @@ RUN npm install -g @playwright/mcp && \
     cd /usr/local/lib/node_modules/@playwright/mcp && \
     npx playwright install --with-deps chromium
 
+# OpenAI Codex CLI
+RUN npm install -g @openai/codex
+
 # Set PATH for all shells
 ENV PATH="/root/.local/bin:$PATH"
 
@@ -84,8 +87,9 @@ COPY config/CLAUDE.md /etc/claude/CLAUDE.md
 COPY config/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Symlink ubuntu user's .claude to root's
+# Symlink ubuntu user's .claude and .codex to root's
 RUN rm -rf /home/ubuntu/.claude && ln -s /root/.claude /home/ubuntu/.claude
+RUN rm -rf /home/ubuntu/.codex && ln -s /root/.codex /home/ubuntu/.codex
 
 WORKDIR /workspace
 
