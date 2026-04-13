@@ -35,6 +35,10 @@ RUN apt-get update && apt-get upgrade -y && \
         libasound2-plugins \
     && rm -rf /var/lib/apt/lists/*
 
+# Route ALSA default device to PulseAudio so arecord/aplay work without a
+# hardware sound card (otherwise ALSA spams "cannot find card '0'" errors)
+RUN printf 'pcm.!default pulse\nctl.!default pulse\n' > /etc/asound.conf
+
 # Rust toolchain
 RUN rustup default stable
 RUN rustup target add wasm32-unknown-unknown
