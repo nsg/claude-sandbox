@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, Permissions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -82,10 +82,6 @@ struct Cli {
     /// Suppress informational output, only show errors
     #[arg(short, long)]
     quiet: bool,
-
-    /// Filter stdout/stderr to only pass through JSON lines (for VS Code extension)
-    #[arg(long)]
-    json_filter: bool,
 
     /// Set host environment variable for the podman process (e.g., --host-env XDG_DATA_HOME=/home/user/.local/share)
     #[arg(long = "host-env", action = clap::ArgAction::Append)]
@@ -441,20 +437,6 @@ fn ensure_clipboard_proxy() {
     eprintln!("Warning: clipboard-proxy did not start in time");
 }
 
-fn find_vscode_extension(prefix: &str) -> Option<PathBuf> {
-    let extensions_dir = home_dir().join(".vscode/extensions");
-    let entries = fs::read_dir(&extensions_dir).ok()?;
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with(prefix))
-        })
-        .max_by_key(|e| e.file_name())
-        .map(|e| e.path())
-}
-
 struct SshConfig {
     authorized_key: String,
     host_port: u16,
@@ -466,7 +448,6 @@ fn run_container(
     ports: &[u16],
     host_env: &[String],
     quiet: bool,
-    json_filter: bool,
     ssh: Option<&SshConfig>,
     audio: bool,
 ) {
@@ -510,16 +491,6 @@ fn run_container(
         .args(["-v", "/etc/localtime:/etc/localtime:ro"])
         .args(["-v", "/etc/timezone:/etc/timezone:ro"]);
 
-    if let Some(ext_dir) = find_vscode_extension("anthropic.claude-code-") {
-        let ext_name = ext_dir.file_name().expect("Invalid extension path");
-        let container_path = PathBuf::from("/root/.vscode/extensions").join(ext_name);
-        cmd.arg("-v").arg(format!(
-            "{}:{}:ro",
-            ext_dir.display(),
-            container_path.display()
-        ));
-    }
-
     if audio
         && let Some(pulse_path) = env::var_os("XDG_RUNTIME_DIR")
             .map(|d| PathBuf::from(d).join("pulse"))
@@ -542,58 +513,9 @@ fn run_container(
 
     cmd.args(["-w", "/workspace"]).arg(IMAGE).args(extra_args);
 
-    if !json_filter {
-        let err = cmd.exec();
-        eprintln!("Failed to exec podman: {}", err);
-        std::process::exit(1);
-    }
-
-    let log_dir = cwd.join(GH_PROXY_SUBDIR);
-    let _ = fs::create_dir_all(&log_dir);
-
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn podman");
-
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-
-    let stdout_log = log_dir.join("non-json-stdout.log");
-    thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        let mut log = File::create(&stdout_log).ok();
-        let mut out = std::io::stdout().lock();
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                if line.starts_with('{') {
-                    let _ = writeln!(out, "{}", line);
-                } else if let Some(ref mut f) = log {
-                    let _ = writeln!(f, "{}", line);
-                }
-            }
-        }
-    });
-
-    let stderr_log = log_dir.join("non-json-stderr.log");
-    thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        let mut log = File::create(&stderr_log).ok();
-        let mut err = std::io::stderr().lock();
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                if line.starts_with('{') {
-                    let _ = writeln!(err, "{}", line);
-                } else if let Some(ref mut f) = log {
-                    let _ = writeln!(f, "{}", line);
-                }
-            }
-        }
-    });
-
-    let status = child.wait().expect("Failed to wait for podman");
-    std::process::exit(status.code().unwrap_or(1));
+    let err = cmd.exec();
+    eprintln!("Failed to exec podman: {}", err);
+    std::process::exit(1);
 }
 
 fn main() {
@@ -653,7 +575,6 @@ fn main() {
                 &cli.ports,
                 &cli.host_env,
                 cli.quiet,
-                cli.json_filter,
                 ssh_config.as_ref(),
                 !cli.no_audio,
             );
@@ -681,7 +602,6 @@ fn main() {
                 &cli.ports,
                 &cli.host_env,
                 cli.quiet,
-                cli.json_filter,
                 ssh_config.as_ref(),
                 !cli.no_audio,
             );
@@ -694,7 +614,6 @@ fn main() {
                     &cli.ports,
                     &cli.host_env,
                     cli.quiet,
-                    cli.json_filter,
                     ssh_config.as_ref(),
                     !cli.no_audio,
                 );
@@ -706,7 +625,6 @@ fn main() {
                     &cli.ports,
                     &cli.host_env,
                     cli.quiet,
-                    cli.json_filter,
                     ssh_config.as_ref(),
                     !cli.no_audio,
                 );
