@@ -62,7 +62,7 @@ fn find_newest_screenshot(dir: &Path) -> Result<Vec<u8>, String> {
             continue;
         }
 
-        if newest.as_ref().map_or(true, |(best, _)| mtime > *best) {
+        if newest.as_ref().is_none_or(|(best, _)| mtime > *best) {
             newest = Some((mtime, path));
         }
     }

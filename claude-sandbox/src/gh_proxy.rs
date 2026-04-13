@@ -409,10 +409,10 @@ fn find_command<'a>(group: &str, subcommand: &str) -> Option<&'a CommandDef> {
 
 /// Extract the flag name from an arg, handling `--flag=value` forms.
 fn extract_flag(arg: &str) -> &str {
-    if arg.starts_with("--") {
-        if let Some(eq) = arg.find('=') {
-            return &arg[..eq];
-        }
+    if arg.starts_with("--")
+        && let Some(eq) = arg.find('=')
+    {
+        return &arg[..eq];
     }
     arg
 }
@@ -515,14 +515,14 @@ fn handle_run_logs(args: &[String]) -> Response {
     match Command::new("gh").args(["api", &api_path]).output() {
         Ok(output) => {
             let exit_code = output.status.code().unwrap_or(1);
-            if exit_code == 0 {
-                if let Err(e) = fs::write(&out_path, &output.stdout) {
-                    return Response {
-                        exit_code: 1,
-                        stdout: String::new(),
-                        stderr: format!("gh-proxy: failed to write {}: {}", out_path, e),
-                    };
-                }
+            if exit_code == 0
+                && let Err(e) = fs::write(&out_path, &output.stdout)
+            {
+                return Response {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: format!("gh-proxy: failed to write {}: {}", out_path, e),
+                };
             }
             Response {
                 exit_code,
@@ -858,10 +858,8 @@ fn maybe_help(args: &[String]) -> Option<String> {
     }
 
     // `gh -h` / `gh --help` / `gh help`
-    if args.len() == 1 {
-        if is_help_flag(&args[0]) || args[0] == "help" {
-            return Some(help_toplevel());
-        }
+    if args.len() == 1 && (is_help_flag(&args[0]) || args[0] == "help") {
+        return Some(help_toplevel());
     }
 
     // `gh help <group>` or `gh help <group> <sub>`

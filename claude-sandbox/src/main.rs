@@ -367,12 +367,10 @@ fn ensure_gh_proxy() {
     let socket_path = gh_proxy_socket_path();
 
     // If socket already exists and is connectable, proxy is running
-    if socket_path.exists() {
-        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-            return;
-        }
-        // Stale socket, will be cleaned up by the proxy on start
+    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+        return;
     }
+    // Stale socket, will be cleaned up by the proxy on start
 
     // Spawn proxy as a background process
     let exe = env::current_exe().expect("Could not get executable path");
@@ -405,10 +403,8 @@ fn ensure_gh_proxy() {
 fn ensure_clipboard_proxy() {
     let socket_path = clipboard_proxy_socket_path();
 
-    if socket_path.exists() {
-        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-            return;
-        }
+    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+        return;
     }
 
     let exe = env::current_exe().expect("Could not get executable path");

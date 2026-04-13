@@ -16,7 +16,7 @@ pub fn timestamp() -> String {
     let mut y: u64 = 1970;
     let mut remaining = days;
     loop {
-        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
         let ydays: u64 = if leap { 366 } else { 365 };
         if remaining < ydays {
             break;
@@ -24,7 +24,7 @@ pub fn timestamp() -> String {
         remaining -= ydays;
         y += 1;
     }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
     let mdays: &[u64] = if leap {
         &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
