@@ -31,6 +31,7 @@ RUN apt-get update && apt-get upgrade -y && \
         openssh-server \
         rustup \
         shellcheck \
+        bubblewrap \
         alsa-utils \
         libasound2-plugins \
     && rm -rf /var/lib/apt/lists/*
