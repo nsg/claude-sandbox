@@ -73,6 +73,14 @@ The same top-level flags (`-p`/`--port`, `--quiet`, `--auto-update`, `--host-env
 claude-sandbox -p 8080 codex -m gpt-5
 ```
 
+Symlink the binary as `codex-sandbox` to make Codex the default when no subcommand is given:
+
+```bash
+ln -s ~/bin/claude-sandbox ~/bin/codex-sandbox
+codex-sandbox             # runs codex
+codex-sandbox "fix bug"   # runs: codex "fix bug"
+```
+
 ### Auto-update
 
 Skip the interactive update prompt and update automatically:

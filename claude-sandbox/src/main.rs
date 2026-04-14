@@ -140,6 +140,20 @@ enum Commands {
     },
 }
 
+fn default_tool() -> &'static str {
+    let invoked = env::args().next().unwrap_or_default();
+    let name = PathBuf::from(&invoked)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    if name.starts_with("codex") {
+        "codex"
+    } else {
+        "claude"
+    }
+}
+
 fn home_dir() -> PathBuf {
     PathBuf::from(env::var("HOME").expect("HOME environment variable not set"))
 }
@@ -629,28 +643,21 @@ fn main() {
             );
         }
         None => {
-            if cli.args.is_empty() {
-                run_container(
-                    &["bash", "-lc", "claude"],
-                    should_pull,
-                    &cli.ports,
-                    &cli.host_env,
-                    cli.quiet,
-                    ssh_config.as_ref(),
-                    !cli.no_audio,
-                );
+            let tool = default_tool();
+            let inner_cmd = if cli.args.is_empty() {
+                tool.to_string()
             } else {
-                let claude_cmd = format!("claude {}", cli.args.join(" "));
-                run_container(
-                    &["bash", "-lc", &claude_cmd],
-                    should_pull,
-                    &cli.ports,
-                    &cli.host_env,
-                    cli.quiet,
-                    ssh_config.as_ref(),
-                    !cli.no_audio,
-                );
-            }
+                format!("{} {}", tool, cli.args.join(" "))
+            };
+            run_container(
+                &["bash", "-lc", &inner_cmd],
+                should_pull,
+                &cli.ports,
+                &cli.host_env,
+                cli.quiet,
+                ssh_config.as_ref(),
+                !cli.no_audio,
+            );
         }
     }
 }
