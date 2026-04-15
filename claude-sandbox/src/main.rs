@@ -145,6 +145,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run the Happy CLI in the container
+    Happy {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 const T3CODE_PORT: u16 = 3773;
@@ -547,9 +552,11 @@ fn run_container(
     let codex_dir = home.join(".codex");
     let agents_dir = home.join(".agents");
     let t3_dir = home.join(".t3");
+    let happy_dir = home.join(".happy");
     let _ = fs::create_dir_all(&codex_dir);
     let _ = fs::create_dir_all(&agents_dir);
     let _ = fs::create_dir_all(&t3_dir);
+    let _ = fs::create_dir_all(&happy_dir);
 
     let git_user_name = git_config("user.name");
     let git_user_email = git_config("user.email");
@@ -579,6 +586,8 @@ fn run_container(
         .arg(format!("{}:/root/.agents", agents_dir.display()))
         .arg("-v")
         .arg(format!("{}:/root/.t3", t3_dir.display()))
+        .arg("-v")
+        .arg(format!("{}:/root/.happy", happy_dir.display()))
         .args(["-e", "CLAUDE_CONFIG_DIR=/root/.claude"])
         .args(["-e", "CODEX_HOME=/root/.codex"])
         .args(["-e", "TERM=xterm-256color"])
@@ -714,6 +723,22 @@ fn main() {
             };
             run_container(
                 &["bash", "-lc", &codex_cmd],
+                should_pull,
+                &cli.ports,
+                &cli.host_env,
+                cli.quiet,
+                ssh_config.as_ref(),
+                !cli.no_audio,
+            );
+        }
+        Some(Commands::Happy { args }) => {
+            let happy_cmd = if args.is_empty() {
+                "happy".to_string()
+            } else {
+                format!("happy {}", args.join(" "))
+            };
+            run_container(
+                &["bash", "-lc", &happy_cmd],
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
