@@ -502,8 +502,10 @@ fn run_container(
     let claude_dir = home.join(".claude");
     let codex_dir = home.join(".codex");
     let agents_dir = home.join(".agents");
+    let t3_dir = home.join(".t3");
     let _ = fs::create_dir_all(&codex_dir);
     let _ = fs::create_dir_all(&agents_dir);
+    let _ = fs::create_dir_all(&t3_dir);
 
     let git_user_name = git_config("user.name");
     let git_user_email = git_config("user.email");
@@ -531,6 +533,8 @@ fn run_container(
         .arg(format!("{}:/root/.codex", codex_dir.display()))
         .arg("-v")
         .arg(format!("{}:/root/.agents", agents_dir.display()))
+        .arg("-v")
+        .arg(format!("{}:/root/.t3", t3_dir.display()))
         .args(["-e", "CLAUDE_CONFIG_DIR=/root/.claude"])
         .args(["-e", "CODEX_HOME=/root/.codex"])
         .args(["-e", "TERM=xterm-256color"])
