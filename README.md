@@ -13,7 +13,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 
 - **Sandboxed GitHub CLI** — proxied `gh` access with an audited allowlist of safe commands
 - **Clipboard image bridge** — paste screenshots from your host into the container via `xclip`/`wl-paste`
-- **Managed configuration** — ships default `CLAUDE.md` instructions while preserving your customizations
+- **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
 - **MCP servers** — pre-configured Playwright with headless Chromium
 - **Auto-updates** — binary, skills, and container image updates are checked on every launch
@@ -164,7 +164,7 @@ Set `CLIPBOARD_SCREENSHOTS_DIR` on the host to override the default screenshot d
 
 ## Managed Configuration
 
-The container ships default `CLAUDE.md` instructions (skills guidance, commit conventions) that are merged into `~/.claude/CLAUDE.md` at startup using marker comments. Any content you add outside the `<!-- MANAGED START -->` / `<!-- MANAGED END -->` markers is preserved across container runs.
+The container ships default `AGENTS.md` instructions (skills guidance, commit conventions) at `/etc/AGENTS.md`. At startup, that managed block is merged into both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, preserving any content you keep outside the `<!-- MANAGED START -->` / `<!-- MANAGED END -->` markers in either file.
 
 MCP server config (`/etc/claude/mcp.json`) is similarly merged into the project's `.mcp.json` — image defaults take precedence for shared server names, project-level config is preserved otherwise.
 

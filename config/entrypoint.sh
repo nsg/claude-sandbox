@@ -21,24 +21,34 @@ if [ -f /etc/claude/mcp.json ]; then
     fi
 fi
 
-# Merge managed CLAUDE.md from image, preserving user additions
+# Merge managed AGENTS.md from image into user-level Claude and Codex files
+MANAGED_SOURCE=/etc/AGENTS.md
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+CODEX_AGENTS_MD="$HOME/.codex/AGENTS.md"
 MANAGED_START="<!-- MANAGED START -->"
 MANAGED_END="<!-- MANAGED END -->"
-if [ -f /etc/claude/CLAUDE.md ]; then
-    mkdir -p "$(dirname "$CLAUDE_MD")"
+merge_managed_file() {
+    local target_file="$1"
+    local user_content=""
+
+    mkdir -p "$(dirname "$target_file")"
+
+    if [ -f "$target_file" ]; then
+        user_content=$(sed "/$MANAGED_START/,/$MANAGED_END/d" "$target_file")
+    fi
+
+    printf '%s\n' "$MANAGED_BLOCK" > "$target_file"
+    if [ -n "$user_content" ]; then
+        printf '%s' "$user_content" >> "$target_file"
+    fi
+}
+
+if [ -f "$MANAGED_SOURCE" ]; then
     MANAGED_BLOCK="$MANAGED_START
-$(cat /etc/claude/CLAUDE.md)
+$(cat "$MANAGED_SOURCE")
 $MANAGED_END"
-    if [ -f "$CLAUDE_MD" ]; then
-        USER_CONTENT=$(sed "/$MANAGED_START/,/$MANAGED_END/d" "$CLAUDE_MD")
-    else
-        USER_CONTENT=""
-    fi
-    printf '%s\n' "$MANAGED_BLOCK" > "$CLAUDE_MD"
-    if [ -n "$USER_CONTENT" ]; then
-        printf '%s' "$USER_CONTENT" >> "$CLAUDE_MD"
-    fi
+    merge_managed_file "$CLAUDE_MD"
+    merge_managed_file "$CODEX_AGENTS_MD"
 fi
 
 # Symlink auto-memory into .claude-sandbox so it's per-project
