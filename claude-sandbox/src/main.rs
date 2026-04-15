@@ -141,7 +141,7 @@ enum Commands {
 }
 
 fn default_tool() -> &'static str {
-    let invoked = env::args().next().unwrap_or_default();
+    let invoked = invoked_program();
     let name = PathBuf::from(&invoked)
         .file_name()
         .and_then(|s| s.to_str())
@@ -152,6 +152,12 @@ fn default_tool() -> &'static str {
     } else {
         "claude"
     }
+}
+
+fn invoked_program() -> std::ffi::OsString {
+    env::args_os()
+        .next()
+        .unwrap_or_else(|| env::current_exe().unwrap_or_default().into_os_string())
 }
 
 fn home_dir() -> PathBuf {
@@ -264,6 +270,7 @@ fn perform_updates(client: &Client, status: &UpdateStatus, auto: bool, quiet: bo
 fn do_binary_update(client: &Client, remote_lastmod: &str) {
     let cache_file = cache_dir().join("claude-sandbox-lastmod");
     let exe_path = env::current_exe().expect("Could not get executable path");
+    let invoked_program = invoked_program();
 
     let response = match client.get(SCRIPT_URL).send() {
         Ok(r) => r,
@@ -306,8 +313,8 @@ fn do_binary_update(client: &Client, remote_lastmod: &str) {
 
     write_cache_file(&cache_file, remote_lastmod);
 
-    let args: Vec<String> = env::args().skip(1).collect();
-    let err = Command::new(&exe_path).args(&args).exec();
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    let err = Command::new(&invoked_program).args(&args).exec();
     eprintln!("Failed to exec: {}", err);
     std::process::exit(1);
 }
