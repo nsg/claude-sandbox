@@ -313,16 +313,16 @@ fn do_binary_update(client: &Client, remote_lastmod: &str) {
 }
 
 fn install_skills(client: &Client, quiet: bool) {
-    let target_dir = home_dir().join(".claude/skills");
+    let target_dirs = [
+        home_dir().join(".claude/skills"),
+        home_dir().join(".agents/skills"),
+    ];
     let cache_file = cache_dir().join("claude-sandbox-skills-lastmod");
 
     if !quiet {
-        println!("Installing skills to {}...", target_dir.display());
-    }
-
-    if let Err(e) = fs::create_dir_all(&target_dir) {
-        eprintln!("Failed to create directory: {}", e);
-        return;
+        for target_dir in &target_dirs {
+            println!("Installing skills to {}...", target_dir.display());
+        }
     }
 
     let response = match client.get(SKILLS_URL).send() {
@@ -341,12 +341,26 @@ fn install_skills(client: &Client, quiet: bool) {
         }
     };
 
-    let decoder = GzDecoder::new(&bytes[..]);
-    let mut archive = Archive::new(decoder);
+    for target_dir in &target_dirs {
+        if let Err(e) = fs::create_dir_all(target_dir) {
+            eprintln!(
+                "Failed to create skills directory {}: {}",
+                target_dir.display(),
+                e
+            );
+            return;
+        }
+        let decoder = GzDecoder::new(&bytes[..]);
+        let mut archive = Archive::new(decoder);
 
-    if let Err(e) = archive.unpack(&target_dir) {
-        eprintln!("Failed to extract skills: {}", e);
-        return;
+        if let Err(e) = archive.unpack(target_dir) {
+            eprintln!(
+                "Failed to extract skills to {}: {}",
+                target_dir.display(),
+                e
+            );
+            return;
+        }
     }
 
     if let Some(remote_lastmod) = get_last_modified(client, SKILLS_URL) {

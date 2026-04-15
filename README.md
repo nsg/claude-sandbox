@@ -174,7 +174,7 @@ All containers mount at `/workspace`, which means Claude's auto-memory would nor
 
 ## Skills
 
-Install optional Claude Code skills to `~/.claude/skills/`. Updates are checked automatically on each launch.
+Install optional skills to both `~/.claude/skills/` for Claude Code and `~/.agents/skills/` for Codex. Updates are checked automatically on each launch.
 
 ```bash
 claude-sandbox install skills
@@ -187,7 +187,7 @@ claude-sandbox install skills
 | `/github-actions` | GitHub Actions workflow development with official actions preference |
 | `/readme` | README writing and maintenance guidelines |
 
-Invoke skills manually with `/skill-name` inside Claude.
+Invoke skills manually with `/skill-name` inside Claude. Codex discovers the same skills from `~/.agents/skills/`.
 
 ## MCP Servers
 
@@ -215,13 +215,19 @@ The container includes:
 Build the container image:
 
 ```bash
-make build
+podman build \
+  --build-arg GIT_USER_NAME="$(git config user.name)" \
+  --build-arg GIT_USER_EMAIL="$(git config user.email)" \
+  -t localhost/claude:latest .
 ```
 
 Build and install the binary:
 
 ```bash
-make install
+cd claude-sandbox
+cargo build --release
+mkdir -p ~/bin
+cp target/release/claude-sandbox ~/bin/claude-sandbox
 ```
 
 ## License
