@@ -61,6 +61,9 @@ RUN npm install -g @playwright/mcp && \
 # OpenAI Codex CLI
 RUN npm install -g @openai/codex
 
+# t3code — web GUI for coding agents (https://github.com/pingdotgg/t3code)
+RUN npm install -g t3
+
 # Set PATH for all shells
 ENV PATH="/root/.local/bin:$PATH"
 

@@ -59,6 +59,10 @@ claude-sandbox install skills
 claude-sandbox codex
 claude-sandbox codex "explain this code"
 claude-sandbox codex exec "fix the failing test"
+
+# Run the t3code web GUI (auto-publishes port 3773 to the host)
+claude-sandbox t3code
+# Then open http://localhost:3773
 ```
 
 Use `--` to pass arguments to claude instead of claude-sandbox:
@@ -205,6 +209,7 @@ The container includes:
 
 - Claude CLI
 - OpenAI Codex CLI
+- [t3code](https://github.com/pingdotgg/t3code) web GUI for coding agents
 - Node.js & npm
 - Rust (via rustup) + cargo-audit
 - Playwright MCP with Chromium and ffmpeg

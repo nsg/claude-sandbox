@@ -138,7 +138,14 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run the t3code web GUI in the container (publishes port 3773)
+    T3code {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
+
+const T3CODE_PORT: u16 = 3773;
 
 fn default_tool() -> &'static str {
     let invoked = invoked_program();
@@ -661,6 +668,27 @@ fn main() {
                 &["bash", "-lc", &codex_cmd],
                 should_pull,
                 &cli.ports,
+                &cli.host_env,
+                cli.quiet,
+                ssh_config.as_ref(),
+                !cli.no_audio,
+            );
+        }
+        Some(Commands::T3code { args }) => {
+            let base = format!("t3 --host 0.0.0.0 --port {}", T3CODE_PORT);
+            let t3_cmd = if args.is_empty() {
+                base
+            } else {
+                format!("{} {}", base, args.join(" "))
+            };
+            let mut ports = cli.ports.clone();
+            if !ports.contains(&T3CODE_PORT) {
+                ports.push(T3CODE_PORT);
+            }
+            run_container(
+                &["bash", "-lc", &t3_cmd],
+                should_pull,
+                &ports,
                 &cli.host_env,
                 cli.quiet,
                 ssh_config.as_ref(),
