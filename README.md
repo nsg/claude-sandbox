@@ -5,7 +5,7 @@
 
 ## About
 
-claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) and [OpenAI Codex CLI](https://github.com/openai/codex) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude` and `~/.codex` configs into the container, keeping your host system clean while giving each agent access to everything it needs.
+claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli), [OpenAI Codex CLI](https://github.com/openai/codex), and [t3code](https://github.com/pingdotgg/t3code) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude` and `~/.codex` configs into the container, keeping your host system clean while giving each agent access to everything it needs.
 
 The binary handles container image pulls, self-updates, and skill updates automatically.
 

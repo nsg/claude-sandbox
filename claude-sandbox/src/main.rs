@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, Permissions};
 use std::io::Write;
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -138,7 +139,7 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run the t3code web GUI in the container (publishes port 3773)
+    /// Run the t3code web GUI in the container (auto-discovers a free host port)
     T3code {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -146,6 +147,19 @@ enum Commands {
 }
 
 const T3CODE_PORT: u16 = 3773;
+
+fn find_free_port(preferred: u16) -> u16 {
+    for port in preferred..=preferred.saturating_add(100) {
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    TcpListener::bind(("127.0.0.1", 0))
+        .expect("Failed to find a free port")
+        .local_addr()
+        .expect("Failed to get local address")
+        .port()
+}
 
 fn default_tool() -> &'static str {
     let invoked = invoked_program();
@@ -679,16 +693,24 @@ fn main() {
             );
         }
         Some(Commands::T3code { args }) => {
-            let base = format!("t3 --host 0.0.0.0 --port {}", T3CODE_PORT);
+            let port = find_free_port(T3CODE_PORT);
+            let base = format!("t3 --host 0.0.0.0 --port {}", port);
             let t3_cmd = if args.is_empty() {
                 base
             } else {
                 format!("{} {}", base, args.join(" "))
             };
             let mut ports = cli.ports.clone();
-            if !ports.contains(&T3CODE_PORT) {
-                ports.push(T3CODE_PORT);
+            if !ports.contains(&port) {
+                ports.push(port);
             }
+            if port != T3CODE_PORT {
+                eprintln!(
+                    "Port {} is in use, using port {} instead",
+                    T3CODE_PORT, port
+                );
+            }
+            eprintln!("t3code available at http://localhost:{}", port);
             run_container(
                 &["bash", "-lc", &t3_cmd],
                 should_pull,
