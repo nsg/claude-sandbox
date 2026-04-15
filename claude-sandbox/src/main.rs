@@ -162,7 +162,13 @@ fn project_instance_name(path: &Path) -> String {
     // Keep only ASCII alphanumeric, dash and underscore.
     let sanitised: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -723,8 +729,10 @@ fn main() {
             let cwd = env::current_dir().expect("Could not get current directory");
             let instance_name = project_instance_name(&cwd);
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
-            let base =
-                format!("t3 --host 0.0.0.0 --port {} --base-dir {}", port, instance_dir);
+            let base = format!(
+                "t3 --host 0.0.0.0 --port {} --base-dir {}",
+                port, instance_dir
+            );
             let t3_cmd = if args.is_empty() {
                 base
             } else {
