@@ -6,7 +6,6 @@ on:
     paths:
       - claude-sandbox/**
       - skills/**
-      - Makefile
 
 jobs:
   release:
@@ -24,7 +23,10 @@ jobs:
           cd claude-sandbox && cargo build --release
 
       - name: Build skills archives
-        run: make dist
+        run: |
+          mkdir -p dist
+          cd skills && zip -r ../dist/skills.zip .
+          cd skills && tar -czf ../dist/skills.tar.gz .
 
       - name: Create or update release
         env:
