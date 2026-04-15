@@ -25,8 +25,8 @@ jobs:
       - name: Build skills archives
         run: |
           mkdir -p dist
-          cd skills && zip -r ../dist/skills.zip .
-          cd skills && tar -czf ../dist/skills.tar.gz .
+          (cd skills && zip -r ../dist/skills.zip .)
+          tar -czf dist/skills.tar.gz -C skills .
 
       - name: Create or update release
         env:
