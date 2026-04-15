@@ -26,8 +26,6 @@ RUN apt-get update && apt-get upgrade -y && \
         patchutils \
         jq \
         ffmpeg \
-        nodejs \
-        npm \
         openssh-server \
         rustup \
         shellcheck \
@@ -47,6 +45,13 @@ RUN cargo install cargo-audit trunk
 
 # Make cargo binaries available in all login shells (e.g. SSH sessions)
 RUN echo 'export PATH="$HOME/.cargo/bin:$PATH"' > /etc/profile.d/cargo.sh
+
+# Node.js 24 (Ubuntu 24.04 ships Node 18, which lacks global `crypto` —
+# breaks t3code's crypto.randomUUID() call)
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/* && \
+    node -v && npm -v
 
 # Copy binaries from builder
 COPY --from=builder /usr/local/bin/starship /usr/local/bin/
