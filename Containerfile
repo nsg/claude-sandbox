@@ -82,6 +82,7 @@ RUN ln -s /usr/local/bin/xclip /usr/local/bin/wl-paste
 
 # Managed configs (merged at runtime by entrypoint)
 COPY config/mcp.json /etc/claude/mcp.json
+COPY config/codex.toml /etc/codex/config.toml
 COPY config/AGENTS.md /etc/AGENTS.md
 
 # Entrypoint script for runtime configuration

@@ -21,6 +21,36 @@ if [ -f /etc/claude/mcp.json ]; then
     fi
 fi
 
+# Merge managed Codex config into user-level config.toml
+MANAGED_CODEX_CONFIG_SOURCE=/etc/codex/config.toml
+MANAGED_CODEX_CONFIG_TARGET="$HOME/.codex/config.toml"
+TOML_MANAGED_START="# MANAGED START"
+TOML_MANAGED_END="# MANAGED END"
+merge_managed_toml() {
+    local source_file="$1"
+    local target_file="$2"
+    local user_content=""
+    local managed_block=""
+
+    mkdir -p "$(dirname "$target_file")"
+
+    if [ -f "$target_file" ]; then
+        user_content=$(sed "/$TOML_MANAGED_START/,/$TOML_MANAGED_END/d" "$target_file")
+    fi
+
+    managed_block="$TOML_MANAGED_START
+$(cat "$source_file")
+$TOML_MANAGED_END"
+    printf '%s\n' "$managed_block" > "$target_file"
+    if [ -n "$user_content" ]; then
+        printf '%s' "$user_content" >> "$target_file"
+    fi
+}
+
+if [ -f "$MANAGED_CODEX_CONFIG_SOURCE" ]; then
+    merge_managed_toml "$MANAGED_CODEX_CONFIG_SOURCE" "$MANAGED_CODEX_CONFIG_TARGET"
+fi
+
 # Merge managed AGENTS.md from image into user-level Claude and Codex files
 MANAGED_SOURCE=/etc/AGENTS.md
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"

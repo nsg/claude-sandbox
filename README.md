@@ -166,7 +166,9 @@ Set `CLIPBOARD_SCREENSHOTS_DIR` on the host to override the default screenshot d
 
 The container ships default `AGENTS.md` instructions (skills guidance, commit conventions) at `/etc/AGENTS.md`. At startup, that managed block is merged into both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, preserving any content you keep outside the `<!-- MANAGED START -->` / `<!-- MANAGED END -->` markers in either file.
 
-MCP server config (`/etc/claude/mcp.json`) is similarly merged into the project's `.mcp.json` — image defaults take precedence for shared server names, project-level config is preserved otherwise.
+Claude MCP server config (`/etc/claude/mcp.json`) is merged into the project's `.mcp.json` — image defaults take precedence for shared server names, project-level config is preserved otherwise.
+
+Managed Codex config is shipped separately at `/etc/codex/config.toml` and merged into `~/.codex/config.toml` inside `# MANAGED START` / `# MANAGED END` markers, preserving user-owned Codex config outside that block. Today that managed block only configures MCP, but it can be extended with other Codex settings later.
 
 ## Per-Project Memory
 
@@ -193,7 +195,7 @@ Invoke skills manually with `/skill-name` inside Claude. Codex discovers the sam
 
 ### Playwright
 
-[Playwright MCP](https://github.com/anthropics/playwright-mcp) gives Claude a headless Chromium browser. Claude can navigate websites, take screenshots, fill forms, and interact with web pages.
+[Playwright MCP](https://github.com/anthropics/playwright-mcp) gives Claude and Codex a headless Chromium browser. They can navigate websites, take screenshots, fill forms, and interact with web pages.
 
 Browser sessions are recorded to `.playwright-output/videos/` as `.webm` files at 1280x720.
 
