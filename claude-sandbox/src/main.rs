@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, Permissions};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{thread, time::Duration};
 use tar::Archive;
@@ -147,6 +148,29 @@ enum Commands {
 }
 
 const T3CODE_PORT: u16 = 3773;
+
+/// Derive a stable, filesystem-safe identifier from a project path.
+/// Returns `"name-abcd1234"` where `name` is the directory basename
+/// (sanitised) and the suffix is a short hash of the full path to
+/// disambiguate projects with the same name in different locations.
+fn project_instance_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("default");
+
+    // Keep only ASCII alphanumeric, dash and underscore.
+    let sanitised: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    format!("{}-{:08x}", sanitised, hash as u32)
+}
 
 fn find_free_port(preferred: u16) -> u16 {
     for port in preferred..=preferred.saturating_add(100) {
@@ -694,7 +718,13 @@ fn main() {
         }
         Some(Commands::T3code { args }) => {
             let port = find_free_port(T3CODE_PORT);
-            let base = format!("t3 --host 0.0.0.0 --port {}", port);
+            // Each project gets its own base-dir so multiple instances don't
+            // share the same state.sqlite / environment-id.
+            let cwd = env::current_dir().expect("Could not get current directory");
+            let instance_name = project_instance_name(&cwd);
+            let instance_dir = format!("/root/.t3/instances/{}", instance_name);
+            let base =
+                format!("t3 --host 0.0.0.0 --port {} --base-dir {}", port, instance_dir);
             let t3_cmd = if args.is_empty() {
                 base
             } else {
