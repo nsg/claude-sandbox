@@ -569,7 +569,7 @@ fn run_container(
             cmd.env_remove(entry);
         }
     }
-    cmd.args(["run", "--rm", "-it"]);
+    cmd.args(["run", "--rm", "-it", "--init"]);
     if quiet {
         cmd.arg("--quiet");
     }
