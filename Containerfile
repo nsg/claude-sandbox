@@ -72,6 +72,9 @@ RUN npm install -g t3
 # Happy — mobile/web client for Claude Code and Codex (https://github.com/slopus/happy)
 RUN npm install -g happy
 
+# opencode — TUI coding agent (https://opencode.ai)
+RUN npm install -g opencode-ai
+
 # Set PATH for all shells
 ENV PATH="/root/.local/bin:$PATH"
 
@@ -94,6 +97,7 @@ RUN ln -s /usr/local/bin/xclip /usr/local/bin/wl-paste
 # Managed configs (merged at runtime by entrypoint)
 COPY config/mcp.json /etc/claude/mcp.json
 COPY config/codex.toml /etc/codex/config.toml
+COPY config/opencode.json /etc/opencode/opencode.json
 COPY config/AGENTS.md /etc/AGENTS.md
 
 # Entrypoint script for runtime configuration

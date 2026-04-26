@@ -21,6 +21,19 @@ if [ -f /etc/claude/mcp.json ]; then
     fi
 fi
 
+# Merge managed opencode config into user-level opencode.json
+if [ -f /etc/opencode/opencode.json ]; then
+    OPENCODE_TARGET="$HOME/.config/opencode/opencode.json"
+    mkdir -p "$(dirname "$OPENCODE_TARGET")"
+    if [ -f "$OPENCODE_TARGET" ]; then
+        # Merge: image config wins over user config for shared keys (e.g. mcp.playwright)
+        jq -s '.[0] * .[1]' "$OPENCODE_TARGET" /etc/opencode/opencode.json > "$OPENCODE_TARGET.tmp" \
+            && mv "$OPENCODE_TARGET.tmp" "$OPENCODE_TARGET"
+    else
+        cp /etc/opencode/opencode.json "$OPENCODE_TARGET"
+    fi
+fi
+
 # Merge managed Codex config into user-level config.toml
 MANAGED_CODEX_CONFIG_SOURCE=/etc/codex/config.toml
 MANAGED_CODEX_CONFIG_TARGET="$HOME/.codex/config.toml"
@@ -55,6 +68,7 @@ fi
 MANAGED_SOURCE=/etc/AGENTS.md
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 CODEX_AGENTS_MD="$HOME/.codex/AGENTS.md"
+OPENCODE_AGENTS_MD="$HOME/.config/opencode/AGENTS.md"
 MANAGED_START="<!-- MANAGED START -->"
 MANAGED_END="<!-- MANAGED END -->"
 merge_managed_file() {
@@ -79,6 +93,7 @@ $(cat "$MANAGED_SOURCE")
 $MANAGED_END"
     merge_managed_file "$CLAUDE_MD"
     merge_managed_file "$CODEX_AGENTS_MD"
+    merge_managed_file "$OPENCODE_AGENTS_MD"
 fi
 
 # Symlink auto-memory into .claude-sandbox so it's per-project

@@ -5,7 +5,7 @@
 
 ## About
 
-claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli), [OpenAI Codex CLI](https://github.com/openai/codex), [t3code](https://github.com/pingdotgg/t3code), and [Happy](https://github.com/slopus/happy) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude` and `~/.codex` configs into the container, keeping your host system clean while giving each agent access to everything it needs.
+claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai), [t3code](https://github.com/pingdotgg/t3code), and [Happy](https://github.com/slopus/happy) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude`, `~/.codex`, and `~/.config/opencode` configs into the container, keeping your host system clean while giving each agent access to everything it needs.
 
 The binary handles container image pulls, self-updates, and skill updates automatically.
 
@@ -67,6 +67,10 @@ claude-sandbox t3code
 # Run Happy — mobile/web client for Claude Code and Codex
 claude-sandbox happy claude
 claude-sandbox happy codex
+
+# Run opencode TUI
+claude-sandbox opencode
+claude-sandbox opencode "explain this code"
 ```
 
 Use `--` to pass arguments to claude instead of claude-sandbox:
@@ -172,11 +176,13 @@ Set `CLIPBOARD_SCREENSHOTS_DIR` on the host to override the default screenshot d
 
 ## Managed Configuration
 
-The container ships default `AGENTS.md` instructions (skills guidance, commit conventions) at `/etc/AGENTS.md`. At startup, that managed block is merged into both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, preserving any content you keep outside the `<!-- MANAGED START -->` / `<!-- MANAGED END -->` markers in either file.
+The container ships default `AGENTS.md` instructions (skills guidance, commit conventions) at `/etc/AGENTS.md`. At startup, that managed block is merged into `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, and `~/.config/opencode/AGENTS.md`, preserving any content you keep outside the `<!-- MANAGED START -->` / `<!-- MANAGED END -->` markers in each file.
 
 Claude MCP server config (`/etc/claude/mcp.json`) is merged into the project's `.mcp.json` — image defaults take precedence for shared server names, project-level config is preserved otherwise.
 
 Managed Codex config is shipped separately at `/etc/codex/config.toml` and merged into `~/.codex/config.toml` inside `# MANAGED START` / `# MANAGED END` markers, preserving user-owned Codex config outside that block. Today that managed block only configures MCP, but it can be extended with other Codex settings later.
+
+Managed opencode config (`/etc/opencode/opencode.json`) is merged into `~/.config/opencode/opencode.json` using the same JSON deep-merge as Claude — image defaults win for shared keys (e.g. `mcp.playwright`), the rest of your opencode config is preserved.
 
 ## Per-Project Memory
 
@@ -213,6 +219,7 @@ The container includes:
 
 - Claude CLI
 - OpenAI Codex CLI
+- [opencode](https://opencode.ai) TUI coding agent
 - [t3code](https://github.com/pingdotgg/t3code) web GUI for coding agents
 - [Happy](https://github.com/slopus/happy) mobile/web client for Claude Code and Codex
 - Node.js & npm
