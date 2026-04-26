@@ -1,6 +1,7 @@
 mod clipboard_proxy;
 mod gh_proxy;
 mod logging;
+mod ssh_proxy;
 
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
@@ -28,6 +29,8 @@ const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
 const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
 const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
 const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
+const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
+const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
 const SSHD_CONFIG_FILE: &str = "sshd.json";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -129,6 +132,15 @@ enum Commands {
         /// Socket path (absolute)
         #[arg(long)]
         socket: String,
+    },
+    /// Start the SSH proxy (internal, spawned automatically)
+    SshProxy {
+        /// Socket path (absolute)
+        #[arg(long)]
+        socket: String,
+        /// Config as JSON string
+        #[arg(long)]
+        config_json: String,
     },
     /// Run a command inside the container
     Run {
@@ -534,6 +546,112 @@ fn ensure_clipboard_proxy() {
     eprintln!("Warning: clipboard-proxy did not start in time");
 }
 
+fn ssh_proxy_socket_path() -> PathBuf {
+    env::current_dir()
+        .expect("Could not get current directory")
+        .join(GH_PROXY_SUBDIR)
+        .join(SSH_PROXY_SOCKET_NAME)
+}
+
+fn ssh_proxy_host_config_path() -> PathBuf {
+    let cwd = env::current_dir().expect("Could not get current directory");
+    let instance = project_instance_name(&cwd);
+    home_dir()
+        .join(".config/claude-sandbox/projects")
+        .join(instance)
+        .join(SSH_PROXY_CONFIG_FILE)
+}
+
+fn ssh_proxy_workspace_symlink_path() -> PathBuf {
+    env::current_dir()
+        .expect("Could not get current directory")
+        .join(GH_PROXY_SUBDIR)
+        .join(SSH_PROXY_CONFIG_FILE)
+}
+
+fn ensure_ssh_proxy_symlink() {
+    let link_path = ssh_proxy_workspace_symlink_path();
+    let target = ssh_proxy_host_config_path();
+
+    if link_path.is_symlink() {
+        if let Ok(existing) = fs::read_link(&link_path)
+            && existing == target
+        {
+            return;
+        }
+        let _ = fs::remove_file(&link_path);
+    } else if link_path.exists() {
+        // Regular file exists (old-style config) — migrate it
+        let _ = fs::remove_file(&link_path);
+    }
+
+    if let Some(parent) = link_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let _ = std::os::unix::fs::symlink(&target, &link_path);
+}
+
+fn load_ssh_proxy_config() -> ssh_proxy::Config {
+    let path = ssh_proxy_host_config_path();
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            serde_json::from_str(&contents).unwrap_or_else(|_| ssh_proxy::default_config())
+        }
+        Err(_) => ssh_proxy::default_config(),
+    }
+}
+
+fn save_ssh_proxy_config(config: &ssh_proxy::Config) {
+    let path = ssh_proxy_host_config_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = fs::write(&path, json);
+    }
+}
+
+fn ensure_ssh_proxy(config: &ssh_proxy::Config) {
+    let socket_path = ssh_proxy_socket_path();
+
+    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+        return;
+    }
+
+    let config_json = serde_json::to_string(config).expect("Failed to serialize ssh-proxy config");
+    let exe = env::current_exe().expect("Could not get executable path");
+    let socket_str = socket_path.to_str().expect("Invalid socket path");
+    match Command::new(&exe)
+        .args([
+            "ssh-proxy",
+            "--socket",
+            socket_str,
+            "--config-json",
+            &config_json,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Warning: failed to start ssh-proxy: {}", e);
+            return;
+        }
+    }
+
+    for _ in 0..30 {
+        thread::sleep(Duration::from_millis(100));
+        if socket_path.exists() {
+            return;
+        }
+    }
+
+    eprintln!("Warning: ssh-proxy did not start in time");
+}
+
 struct SshConfig {
     authorized_key: String,
     host_port: u16,
@@ -550,6 +668,13 @@ fn run_container(
 ) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
+
+    let ssh_proxy_config = load_ssh_proxy_config();
+    if !ssh_proxy_config.allow.is_empty() {
+        save_ssh_proxy_config(&ssh_proxy_config);
+        ensure_ssh_proxy_symlink();
+        ensure_ssh_proxy(&ssh_proxy_config);
+    }
 
     let cwd = env::current_dir().expect("Could not get current directory");
     let home = home_dir();
@@ -721,6 +846,17 @@ fn main() {
         }
         Some(Commands::ClipboardProxy { socket }) => {
             clipboard_proxy::run(&socket);
+        }
+        Some(Commands::SshProxy {
+            socket,
+            config_json,
+        }) => {
+            let config: ssh_proxy::Config =
+                serde_json::from_str(&config_json).unwrap_or_else(|e| {
+                    eprintln!("ssh-proxy: invalid config JSON: {}", e);
+                    std::process::exit(1);
+                });
+            ssh_proxy::run(&socket, &config);
         }
         Some(Commands::Run { command }) => {
             let cmd_str = command.join(" ");

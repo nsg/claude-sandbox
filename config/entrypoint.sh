@@ -9,6 +9,11 @@ if [ -n "$GIT_USER_EMAIL" ]; then
     git config --global user.email "$GIT_USER_EMAIL"
 fi
 
+# Use SSH proxy for git remote operations (if proxy socket exists)
+if [ -S /workspace/.claude-sandbox/ssh-proxy.sock ]; then
+    git config --global core.sshCommand "/usr/local/bin/ssh"
+fi
+
 # Merge image MCP config into project-level config
 if [ -f /etc/claude/mcp.json ]; then
     MCP_TARGET=/workspace/.mcp.json

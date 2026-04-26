@@ -12,6 +12,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 ## Features
 
 - **Sandboxed GitHub CLI** — proxied `gh` access with an audited allowlist of safe commands
+- **SSH proxy** — filtered SSH access without exposing keys to the container
 - **Clipboard image bridge** — paste screenshots from your host into the container via `xclip`/`wl-paste`
 - **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
@@ -159,6 +160,61 @@ The container includes a sandboxed `gh` proxy that gives Claude safe access to G
 All commands are flag-validated against a strict allowlist. Every request is logged to `.claude-sandbox/gh-proxy.log`.
 
 Run `gh -h` inside the container to see available commands.
+
+## SSH Proxy
+
+The container includes an SSH proxy that gives filtered SSH access without exposing your SSH keys to the container. The proxy runs on the host and communicates with the container over a Unix socket, the same pattern as the GitHub CLI proxy. Your SSH keys never enter the container.
+
+**How it works:** Inside the container, `/usr/local/bin/ssh` is a client that forwards SSH invocations through the proxy. The host-side proxy checks the full command line against an allowlist of glob patterns, and only spawns the real `/usr/bin/ssh` if there's a match. Everything else is denied.
+
+**Default config** (created on first run at `~/.config/claude-sandbox/projects/<project>/ssh-proxy.json`):
+
+```json
+{
+  "allow": [
+    "git@github.com git-receive-pack *",
+    "git@github.com git-upload-pack *"
+  ]
+}
+```
+
+The default allows `git push` and `git pull`/`fetch` to GitHub. A convenience symlink is placed at `.claude-sandbox/ssh-proxy.json` pointing to the host-side config.
+
+**Adding more patterns:** If an SSH operation is denied, check the log and add a matching pattern:
+
+```bash
+# See what was denied
+grep DENIED .claude-sandbox/ssh-proxy.log
+
+# Example log output:
+# 2026-04-26T12:00:01Z DENIED  git@gitlab.com git-receive-pack '/org/repo.git'
+# 2026-04-26T12:05:30Z DENIED  user@deploy.example.com uptime
+```
+
+Edit the config to allow it:
+
+```json
+{
+  "allow": [
+    "git@github.com git-receive-pack *",
+    "git@github.com git-upload-pack *",
+    "git@gitlab.com git-receive-pack *",
+    "git@gitlab.com git-upload-pack *",
+    "user@deploy.example.com uptime"
+  ]
+}
+```
+
+The proxy must be restarted for config changes to take effect (restart the container).
+
+**Pattern syntax:** Simple `*` wildcard matching. The full SSH argument list is joined with spaces and matched against each pattern. Patterns match the exact command line, so flags, hosts, and commands are all part of the match:
+
+- `git@github.com git-receive-pack *` — push to any repo on GitHub, no flags
+- `git@*.gitlab.com git-*` — any git command to any GitLab subdomain
+- `user@deploy.example.com *` — any command to a specific server
+- `-v git@host.com git-*` — verbose flag allowed for a specific host
+
+All requests (allowed and denied) are logged to `.claude-sandbox/ssh-proxy.log`.
 
 ## Clipboard Image Bridge
 
