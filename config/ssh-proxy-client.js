@@ -42,7 +42,10 @@ socket.on("data", (chunk) => {
 
     if (response.status !== "ok") {
       process.stderr.write(
-        "ssh-proxy: " + (response.reason || "denied") + "\n"
+        "ssh-proxy: " +
+          (response.reason ||
+            "denied (ask the user to update ssh-proxy.json to allow this command)") +
+          "\n"
       );
       process.exit(1);
     }
@@ -89,8 +92,14 @@ socket.on("end", () => {
 });
 
 socket.on("error", (err) => {
-  process.stderr.write(
-    "ssh-proxy-client: connection error: " + err.message + "\n"
-  );
+  if (err.code === "ENOENT" || err.code === "ECONNREFUSED") {
+    process.stderr.write(
+      "ssh-proxy: not running (configure ssh-proxy.json to enable it)\n"
+    );
+  } else {
+    process.stderr.write(
+      "ssh-proxy-client: connection error: " + err.message + "\n"
+    );
+  }
   process.exit(255);
 });

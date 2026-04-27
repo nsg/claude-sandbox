@@ -165,56 +165,63 @@ Run `gh -h` inside the container to see available commands.
 
 The container includes an SSH proxy that gives filtered SSH access without exposing your SSH keys to the container. The proxy runs on the host and communicates with the container over a Unix socket, the same pattern as the GitHub CLI proxy. Your SSH keys never enter the container.
 
-**How it works:** Inside the container, `/usr/local/bin/ssh` is a client that forwards SSH invocations through the proxy. The host-side proxy checks the full command line against an allowlist of glob patterns, and only spawns the real `/usr/bin/ssh` if there's a match. Everything else is denied.
+**How it works:** Inside the container, `/usr/local/bin/ssh` is a client that forwards SSH invocations through the proxy. The host-side proxy validates each request against a typed rule set and only spawns the real `/usr/bin/ssh` if there's a match. Everything else is denied. SSH flags (like `-L`, `-D`, `-o`) are never accepted from the container.
 
-**Default config** (created on first run at `~/.config/claude-sandbox/projects/<project>/ssh-proxy.json`):
+**Default config** is empty — all SSH is denied until you configure it. The config is stored at `~/.config/claude-sandbox/projects/<project>/ssh-proxy.json` with a convenience symlink at `.claude-sandbox/ssh-proxy.json`.
+
+The config has three rule types:
 
 ```json
 {
-  "allow": [
-    "git@github.com git-receive-pack *",
-    "git@github.com git-upload-pack *"
+  "git": [
+    "github.com",
+    "github.com/myorg/*"
+  ],
+  "command": [
+    "deploy@prod.example.com uptime"
+  ],
+  "host": [
+    "admin@staging.internal"
   ]
 }
 ```
 
-The default allows `git push` and `git pull`/`fetch` to GitHub. A convenience symlink is placed at `.claude-sandbox/ssh-proxy.json` pointing to the host-side config.
+### `git` — allow git operations to a host
 
-**Adding more patterns:** If an SSH operation is denied, check the log and add a matching pattern:
+Each entry is a hostname. The proxy structurally validates that the SSH invocation matches the exact shape git uses (`git-receive-pack`, `git-upload-pack`, `git-upload-archive`, `git-lfs-authenticate`). Only `git@<host>` destinations are accepted.
+
+- `github.com` — all repos on GitHub
+- `github.com/myorg/*` — only repos under that org
+- `github.com/myorg/specific-repo` — only that repo
+- `*.gitlab.com` — any GitLab subdomain
+
+### `command` — allow a specific command on a host
+
+Each entry is an exact `user@host command` string. No wildcards. The full invocation must match exactly.
+
+- `deploy@prod.example.com uptime`
+- `deploy@prod.example.com sudo systemctl restart myapp`
+
+Remote commands with dash-prefixed arguments must be passed as a single quoted string: `ssh deploy@host "ls -la /tmp"`, not `ssh deploy@host ls -la /tmp`. The proxy rejects any argument starting with `-` to prevent SSH flag injection.
+
+### `host` — allow any command on a host
+
+Each entry is a `user@host` destination. Any remote command is allowed (but a command is always required — interactive shells are denied). This is the broadest permission — prefer `command` rules when you know the specific commands needed.
+
+- `admin@staging.internal`
+
+### Discovering what to allow
+
+All requests are logged to `.claude-sandbox/ssh-proxy.log`:
 
 ```bash
-# See what was denied
 grep DENIED .claude-sandbox/ssh-proxy.log
 
-# Example log output:
 # 2026-04-26T12:00:01Z DENIED  git@gitlab.com git-receive-pack '/org/repo.git'
-# 2026-04-26T12:05:30Z DENIED  user@deploy.example.com uptime
+# 2026-04-26T12:05:30Z DENIED  deploy@prod.example.com uptime
 ```
 
-Edit the config to allow it:
-
-```json
-{
-  "allow": [
-    "git@github.com git-receive-pack *",
-    "git@github.com git-upload-pack *",
-    "git@gitlab.com git-receive-pack *",
-    "git@gitlab.com git-upload-pack *",
-    "user@deploy.example.com uptime"
-  ]
-}
-```
-
-The proxy must be restarted for config changes to take effect (restart the container).
-
-**Pattern syntax:** Simple `*` wildcard matching. The full SSH argument list is joined with spaces and matched against each pattern. Patterns match the exact command line, so flags, hosts, and commands are all part of the match:
-
-- `git@github.com git-receive-pack *` — push to any repo on GitHub, no flags
-- `git@*.gitlab.com git-*` — any git command to any GitLab subdomain
-- `user@deploy.example.com *` — any command to a specific server
-- `-v git@host.com git-*` — verbose flag allowed for a specific host
-
-All requests (allowed and denied) are logged to `.claude-sandbox/ssh-proxy.log`.
+Use the denied command line to determine which rule type and entry to add. The proxy must be restarted for config changes to take effect (restart the container).
 
 ## Clipboard Image Bridge
 

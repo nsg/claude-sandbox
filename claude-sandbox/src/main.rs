@@ -670,7 +670,7 @@ fn run_container(
     ensure_clipboard_proxy();
 
     let ssh_proxy_config = load_ssh_proxy_config();
-    if !ssh_proxy_config.allow.is_empty() {
+    if !ssh_proxy::is_empty(&ssh_proxy_config) {
         save_ssh_proxy_config(&ssh_proxy_config);
         ensure_ssh_proxy_symlink();
         ensure_ssh_proxy(&ssh_proxy_config);
