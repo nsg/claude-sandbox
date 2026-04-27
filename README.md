@@ -165,9 +165,9 @@ Run `gh -h` inside the container to see available commands.
 
 The container includes an SSH proxy that gives filtered SSH access without exposing your SSH keys to the container. The proxy runs on the host and communicates with the container over a Unix socket, the same pattern as the GitHub CLI proxy. Your SSH keys never enter the container.
 
-**How it works:** Inside the container, `/usr/local/bin/ssh` is a client that forwards SSH invocations through the proxy. The host-side proxy validates each request against a typed rule set and only spawns the real `/usr/bin/ssh` if there's a match. Everything else is denied. SSH flags (like `-L`, `-D`, `-o`) are never accepted from the container.
+**How it works:** The SSH proxy is opt-in. When a non-empty SSH proxy config exists, `/usr/local/bin/ssh` inside the container forwards SSH invocations through the proxy. The host-side proxy validates each request against a typed rule set and only spawns the real `/usr/bin/ssh` if there's a match. Everything else is denied. SSH flags (like `-L`, `-D`, `-o`) are never accepted from the container.
 
-**Default config** is empty — all SSH is denied until you configure it. The config is stored at `~/.config/claude-sandbox/projects/<project>/ssh-proxy.json` with a convenience symlink at `.claude-sandbox/ssh-proxy.json`.
+**Default config** is empty, so the SSH proxy is disabled by default and no SSH proxy process is started. To enable it, create a non-empty config at `~/.config/claude-sandbox/projects/<project>/ssh-proxy.json`. Once enabled, a convenience symlink is placed at `.claude-sandbox/ssh-proxy.json`.
 
 The config has three rule types:
 
@@ -188,7 +188,7 @@ The config has three rule types:
 
 ### `git` — allow git operations to a host
 
-Each entry is a hostname. The proxy structurally validates that the SSH invocation matches the exact shape git uses (`git-receive-pack`, `git-upload-pack`, `git-upload-archive`, `git-lfs-authenticate`). Only `git@<host>` destinations are accepted.
+Each entry is a hostname. The proxy structurally validates that the SSH invocation matches the exact shape git uses (`git-receive-pack`, `git-upload-pack`, `git-upload-archive`). Only `git@<host>` destinations are accepted.
 
 - `github.com` — all repos on GitHub
 - `github.com/myorg/*` — only repos under that org
@@ -212,7 +212,7 @@ Each entry is a `user@host` destination. Any remote command is allowed (but a co
 
 ### Discovering what to allow
 
-All requests are logged to `.claude-sandbox/ssh-proxy.log`:
+After the SSH proxy is enabled, all proxy requests are logged to `.claude-sandbox/ssh-proxy.log`:
 
 ```bash
 grep DENIED .claude-sandbox/ssh-proxy.log
@@ -221,7 +221,7 @@ grep DENIED .claude-sandbox/ssh-proxy.log
 # 2026-04-26T12:05:30Z DENIED  deploy@prod.example.com uptime
 ```
 
-Use the denied command line to determine which rule type and entry to add. The proxy must be restarted for config changes to take effect (restart the container).
+Use the denied command line to determine which rule type and entry to add. If the proxy is disabled because the config is empty or missing, no deny log is written. The proxy must be restarted for config changes to take effect (restart the container).
 
 ## Clipboard Image Bridge
 

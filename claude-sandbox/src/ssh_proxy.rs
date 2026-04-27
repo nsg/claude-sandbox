@@ -140,17 +140,58 @@ fn parse_request(args: &[String]) -> Result<ParsedRequest, String> {
     })
 }
 
+#[cfg(test)]
 fn is_git_command(command: &str) -> bool {
-    GIT_SERVICES
-        .iter()
-        .any(|svc| command == *svc || command.starts_with(&format!("{} ", svc)))
+    parse_git_command(command).is_some()
 }
 
-fn extract_repo(command: &str) -> Option<&str> {
-    let rest = command.split_once(' ')?.1;
-    let rest = rest.trim_matches('\'');
-    let rest = rest.strip_suffix(".git").unwrap_or(rest);
-    Some(rest.strip_prefix('/').unwrap_or(rest))
+fn is_valid_git_repo(repo: &str) -> bool {
+    !repo.is_empty()
+        && !repo.starts_with('-')
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+}
+
+fn parse_git_command(command: &str) -> Option<(&str, String)> {
+    let (service, rest) = command.split_once(' ')?;
+    if !GIT_SERVICES.contains(&service) {
+        return None;
+    }
+
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let repo = if rest.starts_with('\'') {
+        if !rest.ends_with('\'') || rest.len() < 2 {
+            return None;
+        }
+        let repo = &rest[1..rest.len() - 1];
+        if repo.contains('\'') {
+            return None;
+        }
+        repo
+    } else {
+        if rest.chars().any(char::is_whitespace) {
+            return None;
+        }
+        rest
+    };
+
+    let repo = repo.strip_prefix('/').unwrap_or(repo);
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    if is_valid_git_repo(repo) {
+        Some((service, repo.to_string()))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+fn extract_repo(command: &str) -> Option<String> {
+    parse_git_command(command).map(|(_, repo)| repo)
 }
 
 fn parse_git_entry(entry: &str) -> (&str, Option<&str>) {
@@ -167,9 +208,9 @@ fn check_git_rules(req: &ParsedRequest, rules: &[String]) -> bool {
     if req.user != "git" {
         return false;
     }
-    if !is_git_command(&req.command) {
+    let Some((_, repo)) = parse_git_command(&req.command) else {
         return false;
-    }
+    };
 
     for entry in rules {
         let (host_pattern, repo_pattern) = parse_git_entry(entry);
@@ -179,9 +220,7 @@ fn check_git_rules(req: &ParsedRequest, rules: &[String]) -> bool {
         }
 
         if let Some(pattern) = repo_pattern {
-            if let Some(repo) = extract_repo(&req.command)
-                && glob_match(pattern, repo)
-            {
+            if glob_match(pattern, &repo) {
                 return true;
             }
         } else {
@@ -559,15 +598,21 @@ mod tests {
         // SCP-style (no leading slash): git@github.com:org/repo.git
         assert_eq!(
             extract_repo("git-receive-pack 'org/repo.git'"),
-            Some("org/repo")
+            Some("org/repo".to_string())
         );
         // SSH URL-style (leading slash): ssh://git@github.com/org/repo.git
         assert_eq!(
             extract_repo("git-receive-pack '/org/repo.git'"),
-            Some("org/repo")
+            Some("org/repo".to_string())
         );
-        assert_eq!(extract_repo("git-upload-pack 'repo'"), Some("repo"));
-        assert_eq!(extract_repo("git-upload-pack '/repo'"), Some("repo"));
+        assert_eq!(
+            extract_repo("git-upload-pack 'repo'"),
+            Some("repo".to_string())
+        );
+        assert_eq!(
+            extract_repo("git-upload-pack '/repo'"),
+            Some("repo".to_string())
+        );
         assert_eq!(extract_repo("git-receive-pack"), None);
     }
 
@@ -1044,17 +1089,24 @@ mod tests {
 
     #[test]
     fn test_git_shell_injection_in_repo() {
-        // Repo path with shell metacharacters
         let config = Config {
             git: strs(&["github.com"]),
             command: vec![],
             host: vec![],
         };
         let args = strs(&["git@github.com", "git-receive-pack 'repo; rm -rf /'"]);
-        // Allowed by our proxy (it's a valid git command shape)
-        // but the remote server handles this — the command runs on GitHub's
-        // git server which only interprets git-receive-pack, not shell
-        assert!(check_allowed(&args, &config).is_ok());
+        assert!(check_allowed(&args, &config).is_err());
+    }
+
+    #[test]
+    fn test_git_denies_suffix_after_repo() {
+        let config = Config {
+            git: strs(&["github.com"]),
+            command: vec![],
+            host: vec![],
+        };
+        let args = strs(&["git@github.com", "git-upload-pack 'repo.git'; arbitrary"]);
+        assert!(check_allowed(&args, &config).is_err());
     }
 
     #[test]
