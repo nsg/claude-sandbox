@@ -157,6 +157,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Launch a hub t3code instance that connects to all running t3code instances
+    T3codes {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Run the Happy CLI in the container
     Happy {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -771,6 +776,140 @@ fn run_container(
     std::process::exit(1);
 }
 
+#[derive(Deserialize)]
+struct HubRegistryEntry {
+    label: String,
+    #[serde(rename = "environmentId")]
+    environment_id: String,
+    #[serde(rename = "httpBaseUrl")]
+    http_base_url: String,
+    #[serde(rename = "wsBaseUrl")]
+    ws_base_url: String,
+    #[serde(rename = "bearerToken")]
+    bearer_token: String,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+    port: u16,
+}
+
+fn read_hub_registry(registry_dir: &Path) -> Vec<HubRegistryEntry> {
+    let mut entries = Vec::new();
+    let Ok(dir) = fs::read_dir(registry_dir) else {
+        return entries;
+    };
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(contents) = fs::read_to_string(&path) {
+            match serde_json::from_str::<HubRegistryEntry>(&contents) {
+                Ok(reg) => entries.push(reg),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: skipping invalid registry entry {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+    entries
+}
+
+fn generate_hub_bootstrap_html(environments: &[&HubRegistryEntry]) -> String {
+    let records: Vec<serde_json::Value> = environments
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "environmentId": e.environment_id,
+                "label": e.label,
+                "httpBaseUrl": e.http_base_url,
+                "wsBaseUrl": e.ws_base_url,
+                "bearerToken": e.bearer_token,
+                "createdAt": e.created_at,
+                "lastConnectedAt": null
+            })
+        })
+        .collect();
+
+    let registry_json =
+        serde_json::to_string(&serde_json::json!({"version": 1, "records": records}))
+            .expect("Failed to serialize registry");
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>T3 Code Hub</title>
+<style>
+  html,body {{ margin:0; height:100%; background:#161616; color:#f5f5f5;
+    font-family:"DM Sans",-apple-system,BlinkMacSystemFont,system-ui,sans-serif; }}
+  .c {{ display:flex; flex-direction:column; align-items:center; justify-content:center;
+    height:100%; gap:1rem; }}
+  .spinner {{ width:24px; height:24px; border:3px solid #333; border-top-color:#818cf8;
+    border-radius:50%; animation:spin .8s linear infinite; }}
+  @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+  p {{ color:#a3a3a3; font-size:0.9rem; }}
+</style>
+</head>
+<body>
+<div class="c">
+  <div class="spinner"></div>
+  <p>Registering remote environments…</p>
+</div>
+<script>
+(function() {{
+  var R = {registry_json};
+  var K = "t3code:saved-environment-registry:v1";
+  try {{
+    var e = JSON.parse(localStorage.getItem(K) || '{{"version":1,"records":[]}}');
+    var m = new Map(e.records.map(function(r) {{ return [r.environmentId, r]; }}));
+    R.records.forEach(function(r) {{ m.set(r.environmentId, r); }});
+    localStorage.setItem(K, JSON.stringify({{ version: 1, records: Array.from(m.values()) }}));
+  }} catch (_) {{
+    localStorage.setItem(K, JSON.stringify(R));
+  }}
+  fetch("/bootstrap-done", {{ method: "POST" }}).catch(function() {{}});
+  (function poll() {{
+    setTimeout(function() {{
+      fetch("/.well-known/t3/environment").then(function(r) {{
+        if (r.ok) location.reload(); else poll();
+      }}).catch(poll);
+    }}, 500);
+  }})();
+}})();
+</script>
+</body>
+</html>"#,
+        registry_json = registry_json,
+    )
+}
+
+fn generate_hub_bootstrap_server() -> String {
+    r#"const http = require("http");
+const fs = require("fs");
+const html = fs.readFileSync("/tmp/hub-bootstrap.html");
+const server = http.createServer((req, res) => {
+  if (req.method === "POST" && req.url === "/bootstrap-done") {
+    res.writeHead(200); res.end();
+    fs.writeFileSync("/tmp/bootstrap-done", "");
+    setTimeout(() => { server.close(); process.exit(0); }, 200);
+    return;
+  }
+  res.writeHead(200, {"Content-Type": "text/html"});
+  res.end(html);
+});
+server.listen(parseInt(process.env.PORT), "0.0.0.0", () => {
+  fs.writeFileSync("/tmp/bootstrap-ready", "");
+});
+"#
+    .to_string()
+}
+
 fn main() {
     let cli = Cli::parse();
     let client = Client::new();
@@ -920,20 +1059,60 @@ fn main() {
         }
         Some(Commands::T3code { args }) => {
             let port = find_free_port(T3CODE_PORT);
-            // Each project gets its own base-dir so multiple instances don't
-            // share the same state.sqlite / environment-id.
             let cwd = env::current_dir().expect("Could not get current directory");
             let instance_name = project_instance_name(&cwd);
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
-            let base = format!(
-                "t3 --host 0.0.0.0 --port {} --base-dir {}",
-                port, instance_dir
-            );
-            let t3_cmd = if args.is_empty() {
-                base
+            let project_label = cwd
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project");
+
+            let extra_args = if args.is_empty() {
+                String::new()
             } else {
-                format!("{} {}", base, args.join(" "))
+                format!(" {}", args.join(" "))
             };
+
+            let t3_cmd = format!(
+                r#"
+cleanup() {{ rm -f "/root/.t3/hub-registry/{instance_name}.json"; }}
+trap cleanup EXIT
+
+t3 serve --host 0.0.0.0 --port {port} --base-dir {instance_dir} --auto-bootstrap-project-from-cwd{extra_args} &
+T3_PID=$!
+
+for i in $(seq 1 30); do
+  curl -sf http://localhost:{port}/.well-known/t3/environment >/dev/null 2>&1 && break
+  sleep 1
+done
+
+TOKEN=$(t3 auth session issue --ttl 30d --role owner --token-only --base-dir {instance_dir} 2>/dev/null)
+ENV_ID=$(curl -sf http://localhost:{port}/.well-known/t3/environment | jq -r '.environmentId // empty')
+
+if [ -n "$TOKEN" ] && [ -n "$ENV_ID" ]; then
+  mkdir -p /root/.t3/hub-registry
+  cat > "/root/.t3/hub-registry/{instance_name}.json" << REGEOF
+{{
+  "label": "{project_label}",
+  "environmentId": "$ENV_ID",
+  "httpBaseUrl": "http://localhost:{port}",
+  "wsBaseUrl": "ws://localhost:{port}",
+  "bearerToken": "$TOKEN",
+  "createdAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "port": {port}
+}}
+REGEOF
+fi
+
+wait $T3_PID
+"#,
+                port = port,
+                instance_dir = instance_dir,
+                instance_name = instance_name,
+                project_label = project_label,
+                extra_args = extra_args,
+            );
+
             let mut ports = cli.ports.clone();
             if !ports.contains(&port) {
                 ports.push(port);
@@ -945,6 +1124,86 @@ fn main() {
                 );
             }
             eprintln!("t3code available at http://localhost:{}", port);
+            run_container(
+                &["bash", "-lc", &t3_cmd],
+                should_pull,
+                &ports,
+                &cli.host_env,
+                cli.quiet,
+                ssh_config.as_ref(),
+                !cli.no_audio,
+            );
+        }
+        Some(Commands::T3codes { args }) => {
+            let hub_port = find_free_port(T3CODE_PORT);
+            let home = home_dir();
+            let registry_dir = home.join(".t3/hub-registry");
+            let hub_dir = home.join(".t3/instances/hub");
+            let _ = fs::create_dir_all(&registry_dir);
+            let _ = fs::create_dir_all(&hub_dir);
+
+            let environments = read_hub_registry(&registry_dir);
+            let live: Vec<&HubRegistryEntry> = environments
+                .iter()
+                .filter(|e| TcpListener::bind(("127.0.0.1", e.port)).is_err())
+                .collect();
+
+            if live.is_empty() {
+                eprintln!("No running t3code instances found.");
+                eprintln!("Start instances with: claude-sandbox t3code");
+                std::process::exit(1);
+            }
+
+            eprintln!("Found {} running t3code instance(s):", live.len());
+            for env in &live {
+                eprintln!("  - {} (port {})", env.label, env.port);
+            }
+
+            let bootstrap_html = generate_hub_bootstrap_html(&live);
+            let bootstrap_server = generate_hub_bootstrap_server();
+            fs::write(hub_dir.join("bootstrap.html"), bootstrap_html)
+                .expect("Failed to write hub bootstrap HTML");
+            fs::write(hub_dir.join("bootstrap-server.js"), bootstrap_server)
+                .expect("Failed to write hub bootstrap server");
+
+            let extra_args = if args.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", args.join(" "))
+            };
+
+            let hub_base_dir = "/root/.t3/instances/hub";
+            let t3_cmd = format!(
+                r#"
+cp {hub_base_dir}/bootstrap.html /tmp/hub-bootstrap.html
+rm -f /tmp/bootstrap-ready /tmp/bootstrap-done
+
+PORT={hub_port} node {hub_base_dir}/bootstrap-server.js &
+BOOTSTRAP_PID=$!
+
+while [ ! -f /tmp/bootstrap-ready ]; do sleep 0.1; done
+while [ ! -f /tmp/bootstrap-done ]; do sleep 0.5; done
+
+wait $BOOTSTRAP_PID 2>/dev/null
+
+exec t3 --host 0.0.0.0 --port {hub_port} --base-dir {hub_base_dir}{extra_args}
+"#,
+                hub_port = hub_port,
+                hub_base_dir = hub_base_dir,
+                extra_args = extra_args,
+            );
+
+            let mut ports = cli.ports.clone();
+            if !ports.contains(&hub_port) {
+                ports.push(hub_port);
+            }
+            if hub_port != T3CODE_PORT {
+                eprintln!(
+                    "Port {} is in use, using port {} instead",
+                    T3CODE_PORT, hub_port
+                );
+            }
+            eprintln!("t3codes hub at http://localhost:{}", hub_port);
             run_container(
                 &["bash", "-lc", &t3_cmd],
                 should_pull,
