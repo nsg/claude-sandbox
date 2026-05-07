@@ -889,27 +889,6 @@ fn generate_hub_bootstrap_html(environments: &[&HubRegistryEntry]) -> String {
     )
 }
 
-fn generate_hub_bootstrap_server() -> String {
-    r#"const http = require("http");
-const fs = require("fs");
-const html = fs.readFileSync("/tmp/hub-bootstrap.html");
-const server = http.createServer((req, res) => {
-  if (req.method === "POST" && req.url === "/bootstrap-done") {
-    res.writeHead(200); res.end();
-    fs.writeFileSync("/tmp/bootstrap-done", "");
-    setTimeout(() => { server.close(); process.exit(0); }, 200);
-    return;
-  }
-  res.writeHead(200, {"Content-Type": "text/html"});
-  res.end(html);
-});
-server.listen(parseInt(process.env.PORT), "0.0.0.0", () => {
-  fs.writeFileSync("/tmp/bootstrap-ready", "");
-});
-"#
-    .to_string()
-}
-
 fn main() {
     let cli = Cli::parse();
     let client = Client::new();
@@ -1067,51 +1046,7 @@ fn main() {
                 .and_then(|n| n.to_str())
                 .unwrap_or("project");
 
-            let extra_args = if args.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", args.join(" "))
-            };
-
-            let t3_cmd = format!(
-                r#"
-cleanup() {{ rm -f "/root/.t3/hub-registry/{instance_name}.json"; }}
-trap cleanup EXIT
-
-t3 serve --host 0.0.0.0 --port {port} --base-dir {instance_dir} --auto-bootstrap-project-from-cwd{extra_args} &
-T3_PID=$!
-
-for i in $(seq 1 30); do
-  curl -sf http://localhost:{port}/.well-known/t3/environment >/dev/null 2>&1 && break
-  sleep 1
-done
-
-TOKEN=$(t3 auth session issue --ttl 30d --role owner --token-only --base-dir {instance_dir} 2>/dev/null)
-ENV_ID=$(curl -sf http://localhost:{port}/.well-known/t3/environment | jq -r '.environmentId // empty')
-
-if [ -n "$TOKEN" ] && [ -n "$ENV_ID" ]; then
-  mkdir -p /root/.t3/hub-registry
-  cat > "/root/.t3/hub-registry/{instance_name}.json" << REGEOF
-{{
-  "label": "{project_label}",
-  "environmentId": "$ENV_ID",
-  "httpBaseUrl": "http://localhost:{port}",
-  "wsBaseUrl": "ws://localhost:{port}",
-  "bearerToken": "$TOKEN",
-  "createdAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "port": {port}
-}}
-REGEOF
-fi
-
-wait $T3_PID
-"#,
-                port = port,
-                instance_dir = instance_dir,
-                instance_name = instance_name,
-                project_label = project_label,
-                extra_args = extra_args,
-            );
+            let t3_cmd = format!("t3code-register {}", args.join(" "));
 
             let mut ports = cli.ports.clone();
             if !ports.contains(&port) {
@@ -1124,11 +1059,18 @@ wait $T3_PID
                 );
             }
             eprintln!("t3code available at http://localhost:{}", port);
+
+            let mut host_env = cli.host_env.clone();
+            host_env.push(format!("T3CODE_PORT={}", port));
+            host_env.push(format!("T3CODE_BASE_DIR={}", instance_dir));
+            host_env.push(format!("T3CODE_INSTANCE_NAME={}", instance_name));
+            host_env.push(format!("T3CODE_PROJECT_LABEL={}", project_label));
+
             run_container(
                 &["bash", "-lc", &t3_cmd],
                 should_pull,
                 &ports,
-                &cli.host_env,
+                &host_env,
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
@@ -1160,38 +1102,11 @@ wait $T3_PID
             }
 
             let bootstrap_html = generate_hub_bootstrap_html(&live);
-            let bootstrap_server = generate_hub_bootstrap_server();
             fs::write(hub_dir.join("bootstrap.html"), bootstrap_html)
                 .expect("Failed to write hub bootstrap HTML");
-            fs::write(hub_dir.join("bootstrap-server.js"), bootstrap_server)
-                .expect("Failed to write hub bootstrap server");
-
-            let extra_args = if args.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", args.join(" "))
-            };
 
             let hub_base_dir = "/root/.t3/instances/hub";
-            let t3_cmd = format!(
-                r#"
-cp {hub_base_dir}/bootstrap.html /tmp/hub-bootstrap.html
-rm -f /tmp/bootstrap-ready /tmp/bootstrap-done
-
-PORT={hub_port} node {hub_base_dir}/bootstrap-server.js &
-BOOTSTRAP_PID=$!
-
-while [ ! -f /tmp/bootstrap-ready ]; do sleep 0.1; done
-while [ ! -f /tmp/bootstrap-done ]; do sleep 0.5; done
-
-wait $BOOTSTRAP_PID 2>/dev/null
-
-exec t3 --host 0.0.0.0 --port {hub_port} --base-dir {hub_base_dir}{extra_args}
-"#,
-                hub_port = hub_port,
-                hub_base_dir = hub_base_dir,
-                extra_args = extra_args,
-            );
+            let t3_cmd = format!("t3codes-hub {}", args.join(" "));
 
             let mut ports = cli.ports.clone();
             if !ports.contains(&hub_port) {
@@ -1204,11 +1119,20 @@ exec t3 --host 0.0.0.0 --port {hub_port} --base-dir {hub_base_dir}{extra_args}
                 );
             }
             eprintln!("t3codes hub at http://localhost:{}", hub_port);
+
+            let mut host_env = cli.host_env.clone();
+            host_env.push(format!("T3CODE_PORT={}", hub_port));
+            host_env.push(format!("T3CODE_BASE_DIR={}", hub_base_dir));
+            host_env.push(format!(
+                "T3CODE_BOOTSTRAP_HTML={}/bootstrap.html",
+                hub_base_dir
+            ));
+
             run_container(
                 &["bash", "-lc", &t3_cmd],
                 should_pull,
                 &ports,
-                &cli.host_env,
+                &host_env,
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
