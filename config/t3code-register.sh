@@ -15,13 +15,13 @@ t3 serve --host 0.0.0.0 --port "$PORT" --base-dir "$BASE_DIR" \
 T3_PID=$!
 
 for _ in $(seq 1 30); do
-  curl -sf "http://localhost:${PORT}/.well-known/t3/environment" >/dev/null 2>&1 && break
+  curl -sf --max-time 2 "http://localhost:${PORT}/.well-known/t3/environment" >/dev/null 2>&1 && break
   sleep 1
 done
 
 TOKEN=$(t3 auth session issue --ttl 30d --role owner --token-only \
   --base-dir "$BASE_DIR" 2>/dev/null) || true
-ENV_ID=$(curl -sf "http://localhost:${PORT}/.well-known/t3/environment" \
+ENV_ID=$(curl -sf --max-time 30 "http://localhost:${PORT}/.well-known/t3/environment" \
   | jq -r '.environmentId // empty') || true
 
 if [ -n "${TOKEN:-}" ] && [ -n "${ENV_ID:-}" ]; then
