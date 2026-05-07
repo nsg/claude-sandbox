@@ -5,7 +5,7 @@
 
 ## About
 
-claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai), [t3code](https://github.com/pingdotgg/t3code), and [Happy](https://github.com/slopus/happy) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude`, `~/.codex`, and `~/.config/opencode` configs into the container, keeping your host system clean while giving each agent access to everything it needs.
+claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai), and [t3code](https://github.com/pingdotgg/t3code) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude`, `~/.codex`, and `~/.config/opencode` configs into the container, keeping your host system clean while giving each agent access to everything it needs.
 
 The binary handles container image pulls, self-updates, and skill updates automatically.
 
@@ -64,10 +64,6 @@ claude-sandbox codex exec "fix the failing test"
 # Run the t3code web GUI (auto-publishes port 3773 to the host)
 claude-sandbox t3code
 # Then open http://localhost:3773
-
-# Run Happy — mobile/web client for Claude Code and Codex
-claude-sandbox happy claude
-claude-sandbox happy codex
 
 # Run opencode TUI
 claude-sandbox opencode
@@ -284,7 +280,6 @@ The container includes:
 - OpenAI Codex CLI
 - [opencode](https://opencode.ai) TUI coding agent
 - [t3code](https://github.com/pingdotgg/t3code) web GUI for coding agents
-- [Happy](https://github.com/slopus/happy) mobile/web client for Claude Code and Codex
 - Node.js & npm
 - Rust (via rustup) + cargo-audit
 - Playwright MCP with Chromium and ffmpeg

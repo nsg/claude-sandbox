@@ -69,9 +69,6 @@ RUN npm install -g @openai/codex
 # t3code — web GUI for coding agents (https://github.com/pingdotgg/t3code)
 RUN npm install -g t3
 
-# Happy — mobile/web client for Claude Code and Codex (https://github.com/slopus/happy)
-RUN npm install -g happy
-
 # opencode — TUI coding agent (https://opencode.ai)
 RUN npm install -g opencode-ai
 

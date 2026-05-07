@@ -162,11 +162,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run the Happy CLI in the container
-    Happy {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Run the opencode CLI in the container
     Opencode {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -689,13 +684,11 @@ fn run_container(
     let codex_dir = home.join(".codex");
     let agents_dir = home.join(".agents");
     let t3_dir = home.join(".t3");
-    let happy_dir = home.join(".happy");
     let opencode_config_dir = home.join(".config/opencode");
     let opencode_data_dir = home.join(".local/share/opencode");
     let _ = fs::create_dir_all(&codex_dir);
     let _ = fs::create_dir_all(&agents_dir);
     let _ = fs::create_dir_all(&t3_dir);
-    let _ = fs::create_dir_all(&happy_dir);
     let _ = fs::create_dir_all(&opencode_config_dir);
     let _ = fs::create_dir_all(&opencode_data_dir);
 
@@ -727,8 +720,6 @@ fn run_container(
         .arg(format!("{}:/root/.agents", agents_dir.display()))
         .arg("-v")
         .arg(format!("{}:/root/.t3", t3_dir.display()))
-        .arg("-v")
-        .arg(format!("{}:/root/.happy", happy_dir.display()))
         .arg("-v")
         .arg(format!(
             "{}:/root/.config/opencode",
@@ -1004,23 +995,6 @@ fn main() {
             };
             run_container(
                 &["bash", "-lc", &codex_cmd],
-                should_pull,
-                &cli.ports,
-                &cli.host_env,
-                &[],
-                cli.quiet,
-                ssh_config.as_ref(),
-                !cli.no_audio,
-            );
-        }
-        Some(Commands::Happy { args }) => {
-            let happy_cmd = if args.is_empty() {
-                "happy".to_string()
-            } else {
-                format!("happy {}", args.join(" "))
-            };
-            run_container(
-                &["bash", "-lc", &happy_cmd],
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
