@@ -662,11 +662,13 @@ struct SshConfig {
     host_port: u16,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_container(
     extra_args: &[&str],
     pull_image: bool,
     ports: &[u16],
     host_env: &[String],
+    container_env: &[String],
     quiet: bool,
     ssh: Option<&SshConfig>,
     audio: bool,
@@ -748,6 +750,10 @@ fn run_container(
         .args(["-e", "IS_SANDBOX=1"])
         .args(["-v", "/etc/localtime:/etc/localtime:ro"])
         .args(["-v", "/etc/timezone:/etc/timezone:ro"]);
+
+    for entry in container_env {
+        cmd.arg("-e").arg(entry);
+    }
 
     if audio
         && let Some(pulse_path) = env::var_os("XDG_RUNTIME_DIR")
@@ -945,6 +951,7 @@ fn main() {
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
+                &[],
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
@@ -983,6 +990,7 @@ fn main() {
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
+                &[],
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
@@ -999,6 +1007,7 @@ fn main() {
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
+                &[],
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
@@ -1015,6 +1024,7 @@ fn main() {
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
+                &[],
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
@@ -1031,6 +1041,7 @@ fn main() {
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
+                &[],
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
@@ -1060,17 +1071,19 @@ fn main() {
             }
             eprintln!("t3code available at http://localhost:{}", port);
 
-            let mut host_env = cli.host_env.clone();
-            host_env.push(format!("T3CODE_PORT={}", port));
-            host_env.push(format!("T3CODE_BASE_DIR={}", instance_dir));
-            host_env.push(format!("T3CODE_INSTANCE_NAME={}", instance_name));
-            host_env.push(format!("T3CODE_PROJECT_LABEL={}", project_label));
+            let container_env = vec![
+                format!("T3CODE_PORT={}", port),
+                format!("T3CODE_BASE_DIR={}", instance_dir),
+                format!("T3CODE_INSTANCE_NAME={}", instance_name),
+                format!("T3CODE_PROJECT_LABEL={}", project_label),
+            ];
 
             run_container(
                 &["bash", "-lc", &t3_cmd],
                 should_pull,
                 &ports,
-                &host_env,
+                &cli.host_env,
+                &container_env,
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
@@ -1120,19 +1133,18 @@ fn main() {
             }
             eprintln!("t3codes hub at http://localhost:{}", hub_port);
 
-            let mut host_env = cli.host_env.clone();
-            host_env.push(format!("T3CODE_PORT={}", hub_port));
-            host_env.push(format!("T3CODE_BASE_DIR={}", hub_base_dir));
-            host_env.push(format!(
-                "T3CODE_BOOTSTRAP_HTML={}/bootstrap.html",
-                hub_base_dir
-            ));
+            let container_env = vec![
+                format!("T3CODE_PORT={}", hub_port),
+                format!("T3CODE_BASE_DIR={}", hub_base_dir),
+                format!("T3CODE_BOOTSTRAP_HTML={}/bootstrap.html", hub_base_dir),
+            ];
 
             run_container(
                 &["bash", "-lc", &t3_cmd],
                 should_pull,
                 &ports,
-                &host_env,
+                &cli.host_env,
+                &container_env,
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
@@ -1150,6 +1162,7 @@ fn main() {
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
+                &[],
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
