@@ -557,7 +557,7 @@ fn ssh_proxy_host_config_path() -> PathBuf {
     let cwd = env::current_dir().expect("Could not get current directory");
     let instance = project_instance_name(&cwd);
     home_dir()
-        .join(".config/claude-sandbox/projects")
+        .join(".claude-sandbox/projects")
         .join(instance)
         .join(SSH_PROXY_CONFIG_FILE)
 }
@@ -673,11 +673,12 @@ fn run_container(
     ensure_clipboard_proxy();
 
     let ssh_proxy_config = load_ssh_proxy_config();
-    if !ssh_proxy::is_empty(&ssh_proxy_config) {
+    if ssh_proxy::is_empty(&ssh_proxy_config) {
         save_ssh_proxy_config(&ssh_proxy_config);
-        ensure_ssh_proxy_symlink();
+    } else {
         ensure_ssh_proxy(&ssh_proxy_config);
     }
+    ensure_ssh_proxy_symlink();
 
     let cwd = env::current_dir().expect("Could not get current directory");
     let home = home_dir();
