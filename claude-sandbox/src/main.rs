@@ -667,6 +667,7 @@ fn run_container(
     quiet: bool,
     ssh: Option<&SshConfig>,
     audio: bool,
+    mount_workspace: bool,
 ) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
@@ -710,9 +711,11 @@ fn run_container(
     if pull_image {
         cmd.arg("--pull=newer");
     }
+    if mount_workspace {
+        cmd.arg("-v")
+            .arg(format!("{}:/workspace", cwd.display()));
+    }
     cmd.arg("-v")
-        .arg(format!("{}:/workspace", cwd.display()))
-        .arg("-v")
         .arg(format!("{}:/root/.claude", claude_dir.display()))
         .arg("-v")
         .arg(format!("{}:/root/.codex", codex_dir.display()))
@@ -946,6 +949,7 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
+                true,
             );
         }
         Some(Commands::Install { target }) => {
@@ -985,6 +989,7 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
+                true,
             );
         }
         Some(Commands::Codex { args }) => {
@@ -1002,6 +1007,7 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
+                true,
             );
         }
         Some(Commands::Opencode { args }) => {
@@ -1019,6 +1025,7 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
+                true,
             );
         }
         Some(Commands::T3code { args }) => {
@@ -1061,6 +1068,7 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
+                true,
             );
         }
         Some(Commands::T3codes { args }) => {
@@ -1122,6 +1130,7 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
+                false,
             );
         }
         None => {
@@ -1140,6 +1149,7 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
+                true,
             );
         }
     }
