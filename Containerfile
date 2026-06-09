@@ -59,10 +59,10 @@ COPY --from=builder /usr/local/bin/starship /usr/local/bin/
 COPY --from=builder /usr/local/bin/zola /usr/local/bin/
 COPY --from=builder /root/.local/bin/claude /root/.local/bin/
 
-# Install Playwright MCP server and Chrome with OS dependencies
+# Install Playwright MCP server and headless Chromium with OS dependencies
 RUN npm install -g @playwright/mcp && \
     cd "$(npm root -g)/@playwright/mcp" && \
-    npx playwright install --with-deps chromium
+    timeout 300 npx playwright install --with-deps --only-shell chromium
 
 # OpenAI Codex CLI
 RUN npm install -g @openai/codex
