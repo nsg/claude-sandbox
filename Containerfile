@@ -25,6 +25,8 @@ RUN apt-get update && apt-get upgrade -y && \
         tree \
         patchutils \
         jq \
+        yq \
+        ruby \
         ffmpeg \
         openssh-server \
         rustup \
