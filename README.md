@@ -65,9 +65,6 @@ claude-sandbox codex exec "fix the failing test"
 claude-sandbox t3code
 # Then open http://localhost:3773
 
-# Run the t3codes hub to connect all running t3code instances
-claude-sandbox t3codes
-
 # Run opencode TUI
 claude-sandbox opencode
 claude-sandbox opencode "explain this code"
@@ -124,25 +121,6 @@ Pass without a value to unset a variable:
 ```bash
 claude-sandbox --host-env XDG_DATA_HOME
 ```
-
----
-
-## t3codes Hub
-
-When you run `claude-sandbox t3code` in multiple project directories, each instance registers itself in `~/.t3/hub-registry/` with its port, environment ID, and a bearer session token. The `t3codes` command launches a hub that discovers all live instances and presents them in a single browser tab.
-
-```bash
-# Start t3code in different project directories
-cd ~/project-a && claude-sandbox t3code
-cd ~/project-b && claude-sandbox t3code
-
-# Launch the hub — opens all running instances
-claude-sandbox t3codes
-```
-
-The hub auto-discovers a free port starting from 3773 and seeds the browser with the registered environments on first load. Instance registrations are cleaned up when each t3code container exits.
-
----
 
 ## GitHub CLI Proxy
 

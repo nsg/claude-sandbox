@@ -95,11 +95,9 @@ RUN ln -s /usr/local/bin/xclip /usr/local/bin/wl-paste
 COPY config/ssh-proxy-client.js /usr/local/bin/ssh
 RUN chmod +x /usr/local/bin/ssh
 
-# t3code instance registration and hub scripts
+# t3code instance launcher
 COPY config/t3code-register.sh /usr/local/bin/t3code-register
-COPY config/t3codes-hub.sh /usr/local/bin/t3codes-hub
-COPY config/t3codes-bootstrap-server.js /usr/local/lib/t3codes-bootstrap-server.js
-RUN chmod +x /usr/local/bin/t3code-register /usr/local/bin/t3codes-hub
+RUN chmod +x /usr/local/bin/t3code-register
 
 # Managed configs (merged at runtime by entrypoint)
 COPY config/mcp.json /etc/claude/mcp.json

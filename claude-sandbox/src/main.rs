@@ -157,11 +157,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Launch a hub t3code instance that connects to all running t3code instances
-    T3codes {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Run the opencode CLI in the container
     Opencode {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -713,8 +708,7 @@ fn run_container(
         cmd.arg("--pull=newer");
     }
     if mount_workspace {
-        cmd.arg("-v")
-            .arg(format!("{}:/workspace", cwd.display()));
+        cmd.arg("-v").arg(format!("{}:/workspace", cwd.display()));
     }
     cmd.arg("-v")
         .arg(format!("{}:/root/.claude", claude_dir.display()))
@@ -775,119 +769,6 @@ fn run_container(
     let err = cmd.exec();
     eprintln!("Failed to exec podman: {}", err);
     std::process::exit(1);
-}
-
-#[derive(Deserialize)]
-struct HubRegistryEntry {
-    label: String,
-    #[serde(rename = "environmentId")]
-    environment_id: String,
-    #[serde(rename = "httpBaseUrl")]
-    http_base_url: String,
-    #[serde(rename = "wsBaseUrl")]
-    ws_base_url: String,
-    #[serde(rename = "bearerToken")]
-    bearer_token: String,
-    #[serde(rename = "createdAt")]
-    created_at: String,
-    port: u16,
-}
-
-fn read_hub_registry(registry_dir: &Path) -> Vec<HubRegistryEntry> {
-    let mut entries = Vec::new();
-    let Ok(dir) = fs::read_dir(registry_dir) else {
-        return entries;
-    };
-    for entry in dir.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        if let Ok(contents) = fs::read_to_string(&path) {
-            match serde_json::from_str::<HubRegistryEntry>(&contents) {
-                Ok(reg) => entries.push(reg),
-                Err(e) => {
-                    eprintln!(
-                        "Warning: skipping invalid registry entry {}: {}",
-                        path.display(),
-                        e
-                    );
-                }
-            }
-        }
-    }
-    entries
-}
-
-fn generate_hub_bootstrap_html(environments: &[&HubRegistryEntry]) -> String {
-    let records: Vec<serde_json::Value> = environments
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "environmentId": e.environment_id,
-                "label": e.label,
-                "httpBaseUrl": e.http_base_url,
-                "wsBaseUrl": e.ws_base_url,
-                "bearerToken": e.bearer_token,
-                "createdAt": e.created_at,
-                "lastConnectedAt": null
-            })
-        })
-        .collect();
-
-    let registry_json =
-        serde_json::to_string(&serde_json::json!({"version": 1, "records": records}))
-            .expect("Failed to serialize registry");
-
-    format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>T3 Code Hub</title>
-<style>
-  html,body {{ margin:0; height:100%; background:#161616; color:#f5f5f5;
-    font-family:"DM Sans",-apple-system,BlinkMacSystemFont,system-ui,sans-serif; }}
-  .c {{ display:flex; flex-direction:column; align-items:center; justify-content:center;
-    height:100%; gap:1rem; }}
-  .spinner {{ width:24px; height:24px; border:3px solid #333; border-top-color:#818cf8;
-    border-radius:50%; animation:spin .8s linear infinite; }}
-  @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-  p {{ color:#a3a3a3; font-size:0.9rem; }}
-</style>
-</head>
-<body>
-<div class="c">
-  <div class="spinner"></div>
-  <p>Registering remote environments…</p>
-</div>
-<script>
-(function() {{
-  var R = {registry_json};
-  var K = "t3code:saved-environment-registry:v1";
-  try {{
-    var e = JSON.parse(localStorage.getItem(K) || '{{"version":1,"records":[]}}');
-    var m = new Map(e.records.map(function(r) {{ return [r.environmentId, r]; }}));
-    R.records.forEach(function(r) {{ m.set(r.environmentId, r); }});
-    localStorage.setItem(K, JSON.stringify({{ version: 1, records: Array.from(m.values()) }}));
-  }} catch (_) {{
-    localStorage.setItem(K, JSON.stringify(R));
-  }}
-  fetch("/bootstrap-done", {{ method: "POST" }}).catch(function() {{}});
-  (function poll() {{
-    setTimeout(function() {{
-      fetch("/.well-known/t3/environment").then(function(r) {{
-        if (r.ok) location.reload(); else poll();
-      }}).catch(poll);
-    }}, 500);
-  }})();
-}})();
-</script>
-</body>
-</html>"#,
-        registry_json = registry_json,
-    )
 }
 
 fn main() {
@@ -1034,10 +915,6 @@ fn main() {
             let cwd = env::current_dir().expect("Could not get current directory");
             let instance_name = project_instance_name(&cwd);
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
-            let project_label = cwd
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("project");
 
             let t3_cmd = format!("t3code-register {}", args.join(" "));
 
@@ -1056,8 +933,6 @@ fn main() {
             let container_env = vec![
                 format!("T3CODE_PORT={}", port),
                 format!("T3CODE_BASE_DIR={}", instance_dir),
-                format!("T3CODE_INSTANCE_NAME={}", instance_name),
-                format!("T3CODE_PROJECT_LABEL={}", project_label),
             ];
 
             run_container(
@@ -1070,68 +945,6 @@ fn main() {
                 ssh_config.as_ref(),
                 !cli.no_audio,
                 true,
-            );
-        }
-        Some(Commands::T3codes { args }) => {
-            let hub_port = find_free_port(T3CODE_PORT);
-            let home = home_dir();
-            let registry_dir = home.join(".t3/hub-registry");
-            let hub_dir = home.join(".t3/instances/hub");
-            let _ = fs::create_dir_all(&registry_dir);
-            let _ = fs::create_dir_all(&hub_dir);
-
-            let environments = read_hub_registry(&registry_dir);
-            let live: Vec<&HubRegistryEntry> = environments
-                .iter()
-                .filter(|e| TcpListener::bind(("127.0.0.1", e.port)).is_err())
-                .collect();
-
-            if live.is_empty() {
-                eprintln!("No running t3code instances found.");
-                eprintln!("Start instances with: claude-sandbox t3code");
-                std::process::exit(1);
-            }
-
-            eprintln!("Found {} running t3code instance(s):", live.len());
-            for env in &live {
-                eprintln!("  - {} (port {})", env.label, env.port);
-            }
-
-            let bootstrap_html = generate_hub_bootstrap_html(&live);
-            fs::write(hub_dir.join("bootstrap.html"), bootstrap_html)
-                .expect("Failed to write hub bootstrap HTML");
-
-            let hub_base_dir = "/root/.t3/instances/hub";
-            let t3_cmd = format!("t3codes-hub {}", args.join(" "));
-
-            let mut ports = cli.ports.clone();
-            if !ports.contains(&hub_port) {
-                ports.push(hub_port);
-            }
-            if hub_port != T3CODE_PORT {
-                eprintln!(
-                    "Port {} is in use, using port {} instead",
-                    T3CODE_PORT, hub_port
-                );
-            }
-            eprintln!("t3codes hub at http://localhost:{}", hub_port);
-
-            let container_env = vec![
-                format!("T3CODE_PORT={}", hub_port),
-                format!("T3CODE_BASE_DIR={}", hub_base_dir),
-                format!("T3CODE_BOOTSTRAP_HTML={}/bootstrap.html", hub_base_dir),
-            ];
-
-            run_container(
-                &["bash", "-lc", &t3_cmd],
-                should_pull,
-                &ports,
-                &cli.host_env,
-                &container_env,
-                cli.quiet,
-                ssh_config.as_ref(),
-                !cli.no_audio,
-                false,
             );
         }
         None => {
