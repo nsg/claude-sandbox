@@ -18,7 +18,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{thread, time::Duration};
+use std::{
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tar::Archive;
 
 const SCRIPT_URL: &str =
@@ -32,6 +35,7 @@ const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
 const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
 const SSHD_CONFIG_FILE: &str = "sshd.json";
+const WRAP_TMUX_SESSION: &str = "claude-sandbox";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct SshdConfig {
@@ -108,6 +112,10 @@ struct Cli {
     #[arg(long = "ssh-port")]
     ssh_port: Option<u16>,
 
+    /// Run the command in a named tmux session so keys can be injected
+    #[arg(long, global = true)]
+    wrap: bool,
+
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -162,6 +170,25 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Type text into the currently wrapped terminal
+    WrapType {
+        /// Press Enter after typing the text
+        #[arg(long)]
+        enter: bool,
+        /// Minimum delay between typed characters in milliseconds
+        #[arg(long, default_value_t = 25)]
+        delay_min_ms: u64,
+        /// Maximum delay between typed characters in milliseconds
+        #[arg(long, default_value_t = 120)]
+        delay_max_ms: u64,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        text: Vec<String>,
+    },
+    /// Press a key in the currently wrapped terminal
+    WrapKey {
+        /// tmux key name, for example Enter, Escape, BSpace, C-c
+        key: String,
+    },
 }
 
 const T3CODE_PORT: u16 = 3773;
@@ -193,6 +220,127 @@ fn project_instance_name(path: &Path) -> String {
     let hash = hasher.finish();
 
     format!("{}-{:08x}", sanitised, hash as u32)
+}
+
+fn wrap_container_name(path: &Path) -> String {
+    format!("claude-sandbox-{}", project_instance_name(path))
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+".contains(c))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn shell_command(args: &[&str]) -> String {
+    args.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn run_tmux_send_keys(container_name: &str, literal: bool, args: &[&str]) {
+    let mut cmd = Command::new("podman");
+    cmd.args([
+        "exec",
+        container_name,
+        "tmux",
+        "send-keys",
+        "-t",
+        WRAP_TMUX_SESSION,
+    ]);
+    if literal {
+        cmd.arg("-l");
+    }
+    let status = cmd.args(args).status().unwrap_or_else(|e| {
+        eprintln!("Error: failed to run podman exec: {}", e);
+        std::process::exit(1);
+    });
+
+    if !status.success() {
+        eprintln!(
+            "Error: could not send keys. Start a wrapped session first, for example: claude-sandbox --wrap shell"
+        );
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+struct RandomDelay {
+    state: u64,
+    min_ms: u64,
+    max_ms: u64,
+}
+
+impl RandomDelay {
+    fn new(min_ms: u64, max_ms: u64) -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e37_79b9_7f4a_7c15);
+        Self {
+            state: seed ^ 0xa076_1d64_78bd_642f,
+            min_ms,
+            max_ms,
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state ^= self.state << 7;
+        self.state ^= self.state >> 9;
+        self.state ^= self.state << 8;
+        self.state
+    }
+
+    fn range(&mut self, min: u64, max: u64) -> u64 {
+        if min >= max {
+            return min;
+        }
+        min + (self.next_u64() % (max - min + 1))
+    }
+
+    fn delay_for(&mut self, ch: char) -> Duration {
+        let mut ms = self.range(self.min_ms, self.max_ms);
+        if ch == ' ' {
+            ms += self.range(10, 55);
+        } else if matches!(ch, '.' | ',' | ';' | ':' | '?' | '!') {
+            ms += self.range(90, 260);
+        }
+        Duration::from_millis(ms)
+    }
+}
+
+fn write_wrap_type(text: &[String], enter: bool, delay_min_ms: u64, delay_max_ms: u64) {
+    if delay_min_ms > delay_max_ms {
+        eprintln!("Error: --delay-min-ms must be less than or equal to --delay-max-ms");
+        std::process::exit(1);
+    }
+
+    let cwd = env::current_dir().expect("Could not get current directory");
+    let container_name = wrap_container_name(&cwd);
+    let joined = text.join(" ");
+    let mut delay = RandomDelay::new(delay_min_ms, delay_max_ms);
+
+    for ch in joined.chars() {
+        let typed = ch.to_string();
+        run_tmux_send_keys(&container_name, true, &[&typed]);
+        thread::sleep(delay.delay_for(ch));
+    }
+
+    if enter {
+        thread::sleep(delay.delay_for('\n'));
+        run_tmux_send_keys(&container_name, false, &["Enter"]);
+    }
+}
+
+fn write_wrap_key(key: &str) {
+    let cwd = env::current_dir().expect("Could not get current directory");
+    let container_name = wrap_container_name(&cwd);
+    run_tmux_send_keys(&container_name, false, &[key]);
 }
 
 fn find_free_port(preferred: u16) -> u16 {
@@ -663,6 +811,7 @@ fn run_container(
     ssh: Option<&SshConfig>,
     audio: bool,
     mount_workspace: bool,
+    wrap: bool,
 ) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
@@ -701,6 +850,10 @@ fn run_container(
         }
     }
     cmd.args(["run", "--rm", "-it", "--init"]);
+    let container_name = wrap_container_name(&cwd);
+    if wrap {
+        cmd.arg("--name").arg(&container_name);
+    }
     if quiet {
         cmd.arg("--quiet");
     }
@@ -764,7 +917,29 @@ fn run_container(
         cmd.args(["-p", &format!("{}:22", ssh_cfg.host_port)]);
     }
 
-    cmd.args(["-w", "/workspace"]).arg(IMAGE).args(extra_args);
+    let mut wrapped_args: Option<Vec<String>> = None;
+    if wrap {
+        wrapped_args = Some(vec![
+            "tmux".to_string(),
+            "new-session".to_string(),
+            "-A".to_string(),
+            "-s".to_string(),
+            WRAP_TMUX_SESSION.to_string(),
+            shell_command(extra_args),
+        ]);
+    }
+
+    cmd.args(["-w", "/workspace"]).arg(IMAGE);
+    if let Some(ref wa) = wrapped_args {
+        cmd.args(wa);
+    } else {
+        cmd.args(extra_args);
+    }
+
+    if wrap && !quiet {
+        eprintln!("Wrapped tmux session: {}", container_name);
+        eprintln!("Type into it with: claude-sandbox wrap-type --enter \"hello\"");
+    }
 
     let err = cmd.exec();
     eprintln!("Failed to exec podman: {}", err);
@@ -832,6 +1007,7 @@ fn main() {
                 ssh_config.as_ref(),
                 !cli.no_audio,
                 true,
+                cli.wrap,
             );
         }
         Some(Commands::Install { target }) => {
@@ -872,6 +1048,7 @@ fn main() {
                 ssh_config.as_ref(),
                 !cli.no_audio,
                 true,
+                cli.wrap,
             );
         }
         Some(Commands::Codex { args }) => {
@@ -890,6 +1067,7 @@ fn main() {
                 ssh_config.as_ref(),
                 !cli.no_audio,
                 true,
+                cli.wrap,
             );
         }
         Some(Commands::Opencode { args }) => {
@@ -908,6 +1086,7 @@ fn main() {
                 ssh_config.as_ref(),
                 !cli.no_audio,
                 true,
+                cli.wrap,
             );
         }
         Some(Commands::T3code { args }) => {
@@ -945,7 +1124,19 @@ fn main() {
                 ssh_config.as_ref(),
                 !cli.no_audio,
                 true,
+                cli.wrap,
             );
+        }
+        Some(Commands::WrapType {
+            enter,
+            delay_min_ms,
+            delay_max_ms,
+            text,
+        }) => {
+            write_wrap_type(&text, enter, delay_min_ms, delay_max_ms);
+        }
+        Some(Commands::WrapKey { key }) => {
+            write_wrap_key(&key);
         }
         None => {
             let tool = default_tool();
@@ -964,6 +1155,7 @@ fn main() {
                 ssh_config.as_ref(),
                 !cli.no_audio,
                 true,
+                cli.wrap,
             );
         }
     }

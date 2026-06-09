@@ -32,6 +32,7 @@ RUN apt-get update && apt-get upgrade -y && \
         bubblewrap \
         alsa-utils \
         libasound2-plugins \
+        tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Route ALSA default device to PulseAudio so arecord/aplay work without a
