@@ -56,15 +56,21 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     rm -rf /var/lib/apt/lists/* && \
     node -v && npm -v
 
+# Google Chrome for Playwright MCP
+RUN curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+        -o /tmp/google-chrome-stable_current_amd64.deb && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends /tmp/google-chrome-stable_current_amd64.deb && \
+    rm -f /tmp/google-chrome-stable_current_amd64.deb && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy binaries from builder
 COPY --from=builder /usr/local/bin/starship /usr/local/bin/
 COPY --from=builder /usr/local/bin/zola /usr/local/bin/
 COPY --from=builder /root/.local/bin/claude /root/.local/bin/
 
-# Install Playwright MCP server and headless Chromium with OS dependencies
-RUN npm install -g @playwright/mcp && \
-    cd "$(npm root -g)/@playwright/mcp" && \
-    timeout 300 npx playwright install --with-deps --only-shell chromium
+# Install Playwright MCP server without downloading bundled browsers.
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g @playwright/mcp
 
 # OpenAI Codex CLI
 RUN npm install -g @openai/codex
