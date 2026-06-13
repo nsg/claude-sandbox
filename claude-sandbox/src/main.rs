@@ -890,8 +890,13 @@ fn run_container(
         .arg("-e")
         .arg(format!("GIT_USER_EMAIL={}", git_user_email))
         .args(["-e", "IS_SANDBOX=1"])
-        .args(["-v", "/etc/localtime:/etc/localtime:ro"])
-        .args(["-v", "/etc/timezone:/etc/timezone:ro"]);
+        .args(["-v", "/etc/localtime:/etc/localtime:ro"]);
+
+    // /etc/timezone was removed in newer distros (e.g. Ubuntu 26.04); only
+    // bind-mount it when present, otherwise Docker fails to statfs the source.
+    if Path::new("/etc/timezone").exists() {
+        cmd.args(["-v", "/etc/timezone:/etc/timezone:ro"]);
+    }
 
     for entry in container_env {
         cmd.arg("-e").arg(entry);
