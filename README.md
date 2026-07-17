@@ -17,6 +17,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 - **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
 - **MCP servers** — pre-configured Playwright with headless Chromium
+- **Virtual X display** — headless Xvfb + openbox on `DISPLAY=:99`, so agents can run and test GUI apps (screenshots via `scrot`, input via `xdotool`)
 - **Auto-updates** — binary, skills, and container image updates are checked on every launch
 - **Port exposure** — forward ports from the container with `-p`
 

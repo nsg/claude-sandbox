@@ -170,5 +170,12 @@ SSHEOF
     /usr/sbin/sshd
 fi
 
+# Start the virtual X display (Xvfb + openbox) and inherit its environment
+# (DISPLAY, DBUS_SESSION_BUS_ADDRESS). Non-fatal: GUI support is optional.
+if /usr/local/bin/start-display; then
+    # shellcheck source=/dev/null
+    [ -f /run/claude-display.env ] && source /run/claude-display.env
+fi
+
 # Execute the command passed to the container
 exec "$@"

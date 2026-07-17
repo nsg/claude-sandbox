@@ -35,6 +35,14 @@ RUN apt-get update && apt-get upgrade -y && \
         alsa-utils \
         libasound2-plugins \
         tmux \
+        xvfb \
+        openbox \
+        dbus-x11 \
+        xdotool \
+        wmctrl \
+        x11-utils \
+        scrot \
+        xterm \
     && rm -rf /var/lib/apt/lists/*
 
 # Route ALSA default device to PulseAudio so arecord/aplay work without a
@@ -107,6 +115,11 @@ RUN chmod +x /usr/local/bin/ssh
 # t3code instance launcher
 COPY config/t3code-register.sh /usr/local/bin/t3code-register
 RUN chmod +x /usr/local/bin/t3code-register
+
+# Virtual X display (Xvfb + openbox) for GUI app testing
+COPY config/start-display.sh /usr/local/bin/start-display
+RUN chmod +x /usr/local/bin/start-display && \
+    echo '[ -f /run/claude-display.env ] && . /run/claude-display.env' > /etc/profile.d/claude-display.sh
 
 # Managed configs (merged at runtime by entrypoint)
 COPY config/mcp.json /etc/claude/mcp.json

@@ -8,6 +8,12 @@
 
 - Never add Co-Authored-By lines to commit messages
 
+## GUI Apps / Virtual Display
+
+- A virtual X display (Xvfb + openbox) runs on `DISPLAY=:99` — GUI apps work
+  without a physical screen. Load the `gui` skill before testing GUI apps
+  (screenshots via `scrot`, mouse/keyboard via `xdotool`).
+
 ## Clipboard / Screenshots
 
 - "Screenshot" refers to the clipboard image. To read it: `xclip -selection clipboard -t image/png -o > /tmp/clipboard.png` then read the file
