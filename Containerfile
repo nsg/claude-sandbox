@@ -44,6 +44,7 @@ RUN apt-get update && apt-get upgrade -y && \
         scrot \
         xterm \
         mesa-utils \
+        vulkan-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Route ALSA default device to PulseAudio so arecord/aplay work without a

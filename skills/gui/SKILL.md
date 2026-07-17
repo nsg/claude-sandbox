@@ -38,6 +38,13 @@ test with `vblank_mode=0 glxgears` (~300 FPS software-rendered). Apps that
 probe for a GPU may need `LIBGL_ALWAYS_SOFTWARE=1`. Expect harmless
 "DRI3 device" / libEGL warnings on Xvfb.
 
+## Vulkan
+
+Vulkan 1.4 works via lavapipe (Mesa's CPU implementation, device type CPU,
+auto-selected since no GPU is passed through). Verify with
+`vulkaninfo --summary`; smoke test with `vkcube`. The loader needs
+`XDG_RUNTIME_DIR`, which `start-display` sets.
+
 ## Tips
 
 - Screen is 1280x800 by default (override with `XVFB_SCREEN` before

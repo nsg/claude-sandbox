@@ -35,6 +35,14 @@ fi
 
 export DISPLAY="$XVFB_DISPLAY"
 
+# The Vulkan loader (and some Wayland/GTK code paths) want XDG_RUNTIME_DIR
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    export XDG_RUNTIME_DIR
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+fi
+
 # Session D-Bus keeps GTK apps from warning/failing on the session bus
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ -f "$ENV_FILE" ]; then
     # Reuse the bus from a previous invocation if it is still alive
@@ -54,6 +62,7 @@ fi
 
 {
     echo "export DISPLAY=$DISPLAY"
+    echo "export XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR'"
     [ -n "$DBUS_SESSION_BUS_ADDRESS" ] && echo "export DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS'"
     [ -n "$DBUS_SESSION_BUS_PID" ] && echo "export DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID"
 } > "$ENV_FILE"
