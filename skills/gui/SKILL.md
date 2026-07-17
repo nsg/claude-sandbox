@@ -30,6 +30,14 @@ and source `/run/claude-display.env`.
 - `xdotool getactivewindow getwindowname` — verify which window has focus
 - `wmctrl -l` — list all windows
 
+## OpenGL
+
+OpenGL works via Mesa's llvmpipe software rasterizer (no GPU needed): OpenGL
+4.5 core/compat, GLES 3.2, direct rendering. Verify with `glxinfo -B`; smoke
+test with `vblank_mode=0 glxgears` (~300 FPS software-rendered). Apps that
+probe for a GPU may need `LIBGL_ALWAYS_SOFTWARE=1`. Expect harmless
+"DRI3 device" / libEGL warnings on Xvfb.
+
 ## Tips
 
 - Screen is 1280x800 by default (override with `XVFB_SCREEN` before

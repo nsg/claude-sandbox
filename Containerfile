@@ -43,6 +43,7 @@ RUN apt-get update && apt-get upgrade -y && \
         x11-utils \
         scrot \
         xterm \
+        mesa-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Route ALSA default device to PulseAudio so arecord/aplay work without a
