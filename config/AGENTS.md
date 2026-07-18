@@ -18,6 +18,13 @@
 
 - "Screenshot" refers to the clipboard image. To read it: `xclip -selection clipboard -t image/png -o > /tmp/clipboard.png` then read the file
 
+## Git Push
+
+- Plain `git push` and `git push --tags` (no other arguments) may be bridged to
+  the host and run with the user's credentials. If a push fails with a hint
+  about `--allow-push`, pushing is disabled for this session — ask the user to
+  relaunch with `claude-sandbox --allow-push`.
+
 ## Bash Commands
 
 - Avoid compound commands with `cd` (e.g., `cd /tmp && cmd`) as they require manual approval. Use absolute paths instead.

@@ -1,5 +1,6 @@
 mod clipboard_proxy;
 mod gh_proxy;
+mod git_proxy;
 mod logging;
 mod ssh_proxy;
 
@@ -31,6 +32,7 @@ const SKILLS_URL: &str =
 const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
 const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
 const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
+const GIT_PROXY_SOCKET_NAME: &str = "git-proxy.sock";
 const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
 const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
@@ -100,6 +102,10 @@ struct Cli {
     #[arg(long)]
     no_audio: bool,
 
+    /// Allow the agent to run `git push` / `git push --tags`, executed on the host
+    #[arg(long = "allow-push")]
+    allow_push: bool,
+
     /// Enable SSH server in the container
     #[arg(long)]
     ssh: bool,
@@ -134,6 +140,15 @@ enum Commands {
         /// Socket path (absolute)
         #[arg(long)]
         socket: String,
+    },
+    /// Start the git push proxy (internal, spawned automatically)
+    GitProxy {
+        /// Socket path (absolute)
+        #[arg(long)]
+        socket: String,
+        /// Origin remote URL snapshotted at launch
+        #[arg(long)]
+        origin_url: String,
     },
     /// Start the clipboard image proxy (internal, spawned automatically)
     ClipboardProxy {
@@ -689,6 +704,62 @@ fn ensure_clipboard_proxy() {
     eprintln!("Warning: clipboard-proxy did not start in time");
 }
 
+fn git_proxy_socket_path() -> PathBuf {
+    env::current_dir()
+        .expect("Could not get current directory")
+        .join(GH_PROXY_SUBDIR)
+        .join(GIT_PROXY_SOCKET_NAME)
+}
+
+fn ensure_git_proxy(origin_url: &str) {
+    let socket_path = git_proxy_socket_path();
+
+    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+        return;
+    }
+
+    let exe = env::current_exe().expect("Could not get executable path");
+    let socket_str = socket_path.to_str().expect("Invalid socket path");
+    match Command::new(&exe)
+        .args([
+            "git-proxy",
+            "--socket",
+            socket_str,
+            "--origin-url",
+            origin_url,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Warning: failed to start git-proxy: {}", e);
+            return;
+        }
+    }
+
+    for _ in 0..30 {
+        thread::sleep(Duration::from_millis(100));
+        if socket_path.exists() {
+            return;
+        }
+    }
+
+    eprintln!("Warning: git-proxy did not start in time");
+}
+
+/// Without --allow-push a leftover dead socket would make the container's
+/// git shim try (and confusingly fail) to bridge pushes — remove it. A live
+/// socket from a concurrent --allow-push session is left alone.
+fn remove_stale_git_proxy_socket() {
+    let socket_path = git_proxy_socket_path();
+    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_err() {
+        let _ = fs::remove_file(&socket_path);
+    }
+}
+
 fn ssh_proxy_socket_path() -> PathBuf {
     env::current_dir()
         .expect("Could not get current directory")
@@ -812,9 +883,22 @@ fn run_container(
     audio: bool,
     mount_workspace: bool,
     wrap: bool,
+    allow_push: bool,
 ) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
+
+    if allow_push {
+        match git_proxy::origin_url() {
+            Some(url) => ensure_git_proxy(&url),
+            None => {
+                eprintln!("Error: --allow-push requires a git repository with an 'origin' remote");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        remove_stale_git_proxy_socket();
+    }
 
     let ssh_proxy_config = load_ssh_proxy_config();
     if ssh_proxy::is_empty(&ssh_proxy_config) {
@@ -1013,6 +1097,7 @@ fn main() {
                 !cli.no_audio,
                 true,
                 cli.wrap,
+                cli.allow_push,
             );
         }
         Some(Commands::Install { target }) => {
@@ -1026,6 +1111,9 @@ fn main() {
         }
         Some(Commands::GhProxy { socket }) => {
             gh_proxy::run(&socket);
+        }
+        Some(Commands::GitProxy { socket, origin_url }) => {
+            git_proxy::run(&socket, &origin_url);
         }
         Some(Commands::ClipboardProxy { socket }) => {
             clipboard_proxy::run(&socket);
@@ -1054,6 +1142,7 @@ fn main() {
                 !cli.no_audio,
                 true,
                 cli.wrap,
+                cli.allow_push,
             );
         }
         Some(Commands::Codex { args }) => {
@@ -1073,6 +1162,7 @@ fn main() {
                 !cli.no_audio,
                 true,
                 cli.wrap,
+                cli.allow_push,
             );
         }
         Some(Commands::Opencode { args }) => {
@@ -1092,6 +1182,7 @@ fn main() {
                 !cli.no_audio,
                 true,
                 cli.wrap,
+                cli.allow_push,
             );
         }
         Some(Commands::T3code { args }) => {
@@ -1130,6 +1221,7 @@ fn main() {
                 !cli.no_audio,
                 true,
                 cli.wrap,
+                cli.allow_push,
             );
         }
         Some(Commands::WrapType {
@@ -1161,6 +1253,7 @@ fn main() {
                 !cli.no_audio,
                 true,
                 cli.wrap,
+                cli.allow_push,
             );
         }
     }

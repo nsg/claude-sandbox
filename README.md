@@ -13,6 +13,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 
 - **Sandboxed GitHub CLI** — proxied `gh` access with an audited allowlist of safe commands
 - **SSH proxy** — filtered SSH access without exposing keys to the container
+- **Git push bridge** — opt-in `--allow-push` lets the agent trigger `git push` / `git push --tags`, executed on the host with your credentials
 - **Clipboard image bridge** — paste screenshots from your host into the container via `xclip`/`wl-paste`
 - **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
@@ -50,6 +51,9 @@ claude-sandbox "explain this code"
 # Expose ports from the container
 claude-sandbox -p 8080
 claude-sandbox -p 8080 -p 3000 -p 5173
+
+# Allow the agent to git push (executed on the host, see "Git Push Bridge")
+claude-sandbox --allow-push
 
 # Open an interactive shell
 claude-sandbox shell
@@ -217,6 +221,33 @@ grep DENIED .claude-sandbox/ssh-proxy.log
 ```
 
 Use the denied command line to determine which rule type and entry to add. If the proxy is disabled because the config is empty or missing, no deny log is written. The proxy must be restarted for config changes to take effect (restart the container).
+
+## Git Push Bridge
+
+The container has no git credentials, so pushes fail by default. Launch with `--allow-push` to let the agent trigger a push that is executed **on the host** with your credentials:
+
+```bash
+claude-sandbox --allow-push
+```
+
+Only two exact commands are bridged, with no arguments accepted from the container:
+
+- `git push`
+- `git push --tags`
+
+The container's `git` is a thin shim that forwards those two invocations to the host proxy and `exec`s the real `/usr/bin/git` for everything else — rebases, `git push --force`, `git push origin main`, and all other git commands behave exactly as normal (a force push simply fails inside the container, since it has no credentials).
+
+The workspace is agent-writable, so the host-side proxy treats the repository as untrusted when pushing:
+
+- Hooks are disabled (`core.hooksPath=/dev/null`, `--no-verify`), so a planted `.git/hooks/pre-push` never runs on the host
+- The `origin` URL is snapshotted at launch; the push is refused if `origin` has been repointed since, and the push always targets `origin` explicitly (`remote.pushDefault` / `branch.*.pushRemote` are ignored)
+- The push is refused if the repo's local config sets keys the host would execute or that would redirect the push (`credential.*`, `core.sshCommand`, `core.fsmonitor`, `url.*`, `http.*`, `remote.origin.pushurl`, …)
+- Credential helpers are reset on the push command line and rebuilt from the host's system/global git config only, so a helper injected into the workspace repo's config is never executed
+- Terminal credential prompts are disabled (`GIT_TERMINAL_PROMPT=0`) — pushes that would require interactive auth fail fast instead of hanging
+
+The grant applies to that launch only and is never persisted — start the next session without the flag and pushes are off again. Every request is logged to `.claude-sandbox/git-proxy.log`.
+
+`--allow-push` requires the working directory to be a git repository with an `origin` remote.
 
 ## Clipboard Image Bridge
 
