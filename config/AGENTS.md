@@ -6,7 +6,8 @@
 
 ## Git Commits
 
-- Never add Co-Authored-By lines to commit messages
+- Never add Co-Authored-By, Claude-Session, or any other Claude/AI metadata
+  trailers to commit messages — subject and body only
 
 ## GUI Apps / Virtual Display
 
