@@ -147,6 +147,7 @@ The container includes a sandboxed `gh` proxy that gives Claude safe access to G
 |-------|----------|
 | `pr` | `create`, `comment` |
 | `issue` | `create`, `comment`, `close`, `edit` |
+| `run` | `rerun` |
 
 **Extension commands** add custom functionality:
 

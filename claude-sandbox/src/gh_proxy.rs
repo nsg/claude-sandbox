@@ -340,6 +340,12 @@ const COMMANDS: &[CommandDef] = &[
         allowed_flags: &["--comment", "-c", "--reason", "-r", "--duplicate-of"],
     },
     CommandDef {
+        group: "run",
+        subcommand: "rerun",
+        is_write: true,
+        allowed_flags: &["--failed", "--job", "-j", "--debug"],
+    },
+    CommandDef {
         group: "issue",
         subcommand: "edit",
         is_write: true,
@@ -1112,6 +1118,8 @@ mod tests {
         assert!(reject_reason(&strs(&["issue", "close", "42", "--reason", "completed"])).is_none());
         assert!(reject_reason(&strs(&["issue", "close", "42", "--comment", "done"])).is_none());
         assert!(reject_reason(&strs(&["issue", "edit", "42", "--title", "new"])).is_none());
+        assert!(reject_reason(&strs(&["run", "rerun", "12345"])).is_none());
+        assert!(reject_reason(&strs(&["run", "rerun", "12345", "--failed"])).is_none());
         assert!(
             reject_reason(&strs(&[
                 "issue",
@@ -1145,6 +1153,7 @@ mod tests {
         assert!(reject_reason(&strs(&["issue", "comment", "1", "-R", "other/repo"])).is_some());
         assert!(reject_reason(&strs(&["issue", "close", "42", "-R", "other/repo"])).is_some());
         assert!(reject_reason(&strs(&["issue", "edit", "42", "--repo", "other/repo"])).is_some());
+        assert!(reject_reason(&strs(&["run", "rerun", "1", "-R", "other/repo"])).is_some());
     }
 
     #[test]
@@ -1211,7 +1220,6 @@ mod tests {
         assert!(reject_reason(&strs(&["repo", "delete"])).is_some());
         assert!(reject_reason(&strs(&["release", "create"])).is_some());
         assert!(reject_reason(&strs(&["release", "delete"])).is_some());
-        assert!(reject_reason(&strs(&["run", "rerun"])).is_some());
         assert!(reject_reason(&strs(&["run", "cancel"])).is_some());
     }
 
