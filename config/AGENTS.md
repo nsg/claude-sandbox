@@ -21,10 +21,14 @@
 
 ## Git Push
 
-- Plain `git push` and `git push --tags` (no other arguments) may be bridged to
-  the host and run with the user's credentials. If a push fails with a hint
-  about `--allow-push`, pushing is disabled for this session — ask the user to
-  relaunch with `claude-sandbox --allow-push`.
+- The exact commands `git push` and `git push --tags` may be bridged to the
+  host and run with the user's credentials. No other arguments or flags are
+  allowed — not even global ones like `-C`. Anything else (`git -C x push`,
+  `git push origin main`, `git push --force`, …) runs the container's git,
+  which has no credentials and will fail. The bridged push always operates on
+  the workspace repository, so `-C` is never needed.
+- If a push fails with a hint about `--allow-push`, pushing is disabled for
+  this session — ask the user to relaunch with `claude-sandbox --allow-push`.
 
 ## Bash Commands
 
