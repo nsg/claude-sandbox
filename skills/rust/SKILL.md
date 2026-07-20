@@ -5,6 +5,19 @@ description: Rust development guidelines and workflow
 
 # Rust Development
 
+## Target Maintenance (on skill load)
+
+Once per session, if `target/` exists:
+
+```bash
+du -sh target && find target -type f -mtime +30 -print -quit
+```
+
+If size > ~1 GB AND find printed a path (it stops at the first hit): run
+`cargo clean` before building (the bloat is orphaned artifacts from old
+toolchains). Otherwise leave the warm cache alone. A rebuild resets the
+30-day clock, so this self-limits.
+
 ## Commands
 
 - `cargo build` - Build (debug only)
