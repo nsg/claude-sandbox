@@ -43,6 +43,18 @@ Follow this exact format:
 - Explain what and why, not how
 - Use bullet points for multiple items
 
+### Write for the reader in 100 years
+
+A commit message should still tell its story when every piece of
+infrastructure it was built on is gone — the repository and its history
+are what survive. Never reference ephemeral, access-restricted data: CI
+run IDs, build/job URLs, runner logs, dashboard links. Few people can
+access them today and nobody can in a decade. Describe the problem
+itself instead:
+
+- Bad: `Fix the failure in run 29682060344`
+- Good: `Fix image build OOM when exporting layers`
+
 ## Staging Techniques
 
 ### Stage entire files:
