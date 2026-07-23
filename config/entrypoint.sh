@@ -69,13 +69,14 @@ if [ -f "$MANAGED_CODEX_CONFIG_SOURCE" ]; then
     merge_managed_toml "$MANAGED_CODEX_CONFIG_SOURCE" "$MANAGED_CODEX_CONFIG_TARGET"
 fi
 
-# Merge managed AGENTS.md from image into user-level Claude and Codex files
+# Merge managed AGENTS.md from image into user-level Claude and Codex files.
+# The managed part is the H1 section from the source file (# Global
+# Instructions): it is replaced on every start, up to the next H1 or EOF.
+# Users can add their own H1 sections below; those are preserved.
 MANAGED_SOURCE=/etc/AGENTS.md
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 CODEX_AGENTS_MD="$HOME/.codex/AGENTS.md"
 OPENCODE_AGENTS_MD="$HOME/.config/opencode/AGENTS.md"
-MANAGED_START="<!-- MANAGED START -->"
-MANAGED_END="<!-- MANAGED END -->"
 merge_managed_file() {
     local target_file="$1"
     local user_content=""
@@ -83,19 +84,28 @@ merge_managed_file() {
     mkdir -p "$(dirname "$target_file")"
 
     if [ -f "$target_file" ]; then
-        user_content=$(sed "/$MANAGED_START/,/$MANAGED_END/d" "$target_file")
+        user_content=$(awk -v h1="$MANAGED_H1" '
+            # Clean up legacy <!-- MANAGED --> marker blocks
+            $0 == "<!-- MANAGED START -->" { legacy = 1; next }
+            legacy { if ($0 == "<!-- MANAGED END -->") legacy = 0; next }
+            # Drop the managed H1 section (until the next H1)
+            $0 == h1 { managed = 1; next }
+            managed { if ($0 ~ /^# /) managed = 0; else next }
+            # Skip blank lines before the first kept line
+            !started && $0 == "" { next }
+            { started = 1; print }
+        ' "$target_file")
     fi
 
     printf '%s\n' "$MANAGED_BLOCK" > "$target_file"
     if [ -n "$user_content" ]; then
-        printf '%s' "$user_content" >> "$target_file"
+        printf '\n%s\n' "$user_content" >> "$target_file"
     fi
 }
 
 if [ -f "$MANAGED_SOURCE" ]; then
-    MANAGED_BLOCK="$MANAGED_START
-$(cat "$MANAGED_SOURCE")
-$MANAGED_END"
+    MANAGED_H1=$(head -n 1 "$MANAGED_SOURCE")
+    MANAGED_BLOCK=$(cat "$MANAGED_SOURCE")
     merge_managed_file "$CLAUDE_MD"
     merge_managed_file "$CODEX_AGENTS_MD"
     merge_managed_file "$OPENCODE_AGENTS_MD"
