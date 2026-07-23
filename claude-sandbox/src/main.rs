@@ -207,6 +207,7 @@ enum Commands {
 }
 
 const T3CODE_PORT: u16 = 3773;
+const T3CODE_PAIR_ADMIN_PORT: u16 = 3774;
 
 /// Derive a stable, filesystem-safe identifier from a project path.
 /// Returns `"name-abcd1234"` where `name` is the directory basename
@@ -359,16 +360,29 @@ fn write_wrap_key(key: &str) {
 }
 
 fn find_free_port(preferred: u16) -> u16 {
+    find_free_port_avoiding(preferred, &[])
+}
+
+fn find_free_port_avoiding(preferred: u16, excluded: &[u16]) -> u16 {
     for port in preferred..=preferred.saturating_add(100) {
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if !excluded.contains(&port) && TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
     }
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("Failed to find a free port")
-        .local_addr()
-        .expect("Failed to get local address")
-        .port()
+    loop {
+        let port = TcpListener::bind(("127.0.0.1", 0))
+            .expect("Failed to find a free port")
+            .local_addr()
+            .expect("Failed to get local address")
+            .port();
+        if !excluded.contains(&port) {
+            return port;
+        }
+    }
+}
+
+fn is_valid_pair_admin_pin(pin: &str) -> bool {
+    (4..=12).contains(&pin.len()) && pin.chars().all(|character| character.is_ascii_digit())
 }
 
 fn default_tool() -> &'static str {
@@ -1187,6 +1201,20 @@ fn main() {
         }
         Some(Commands::T3code { args }) => {
             let port = find_free_port(T3CODE_PORT);
+            let pair_admin_pin = env::var("T3CODE_PAIR_ADMIN_PIN")
+                .ok()
+                .filter(|pin| !pin.is_empty());
+            if let Some(pin) = pair_admin_pin.as_deref()
+                && !is_valid_pair_admin_pin(pin)
+            {
+                eprintln!("T3CODE_PAIR_ADMIN_PIN must contain 4 to 12 digits");
+                std::process::exit(2);
+            }
+            let pair_admin_port = pair_admin_pin.as_ref().map(|_| {
+                let mut excluded_ports = cli.ports.clone();
+                excluded_ports.push(port);
+                find_free_port_avoiding(T3CODE_PAIR_ADMIN_PORT, &excluded_ports)
+            });
             let cwd = env::current_dir().expect("Could not get current directory");
             let instance_name = project_instance_name(&cwd);
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
@@ -1197,6 +1225,11 @@ fn main() {
             if !ports.contains(&port) {
                 ports.push(port);
             }
+            if let Some(pair_admin_port) = pair_admin_port
+                && !ports.contains(&pair_admin_port)
+            {
+                ports.push(pair_admin_port);
+            }
             if port != T3CODE_PORT {
                 eprintln!(
                     "Port {} is in use, using port {} instead",
@@ -1204,11 +1237,22 @@ fn main() {
                 );
             }
             eprintln!("t3code available at http://localhost:{}", port);
+            if let Some(pair_admin_port) = pair_admin_port {
+                eprintln!(
+                    "t3code pairing portal available at http://localhost:{}",
+                    pair_admin_port
+                );
+            }
 
-            let container_env = vec![
+            let mut container_env = vec![
                 format!("T3CODE_PORT={}", port),
                 format!("T3CODE_BASE_DIR={}", instance_dir),
             ];
+            if let (Some(pair_admin_port), Some(pair_admin_pin)) = (pair_admin_port, pair_admin_pin)
+            {
+                container_env.push(format!("T3CODE_PAIR_ADMIN_PORT={}", pair_admin_port));
+                container_env.push(format!("T3CODE_PAIR_ADMIN_PIN={}", pair_admin_pin));
+            }
 
             run_container(
                 &["bash", "-lc", &t3_cmd],
@@ -1256,5 +1300,27 @@ fn main() {
                 cli.allow_push,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_pair_admin_pins() {
+        assert!(is_valid_pair_admin_pin("0000"));
+        assert!(is_valid_pair_admin_pin("123456789012"));
+        assert!(!is_valid_pair_admin_pin(""));
+        assert!(!is_valid_pair_admin_pin("123"));
+        assert!(!is_valid_pair_admin_pin("1234567890123"));
+        assert!(!is_valid_pair_admin_pin("12a4"));
+    }
+
+    #[test]
+    fn free_port_selection_honors_exclusions() {
+        let available = find_free_port_avoiding(45_000, &[45_000, 45_001]);
+        assert_ne!(available, 45_000);
+        assert_ne!(available, 45_001);
     }
 }

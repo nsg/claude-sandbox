@@ -66,9 +66,10 @@ claude-sandbox codex
 claude-sandbox codex "explain this code"
 claude-sandbox codex exec "fix the failing test"
 
-# Run the t3code web GUI (auto-publishes port 3773 to the host)
+# Run the t3code web GUI
 claude-sandbox t3code
-# Then open http://localhost:3773
+# Optionally enable its pairing portal with a PIN
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
 
 # Run opencode TUI
 claude-sandbox opencode
@@ -126,6 +127,26 @@ Pass without a value to unset a variable:
 ```bash
 claude-sandbox --host-env XDG_DATA_HOME
 ```
+
+### T3 Code pairing portal
+
+The pairing portal is disabled by default. Set `T3CODE_PAIR_ADMIN_PIN` to a
+4–12 digit PIN when starting T3 Code to enable it:
+
+```bash
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
+```
+
+The portal uses a distinct port, defaulting to 3774. Open the exact URL printed
+at startup and enter the PIN in its sign-in page. It creates five-minute,
+single-use pairing links on demand and automatically uses the running server's
+instance database. The PIN is neither generated nor stored by claude-sandbox;
+provide it again on every launch.
+
+The portal uses plain HTTP. Anyone able to observe the traffic can recover both
+the PIN and generated pairing token, and a short PIN can be guessed. Never
+expose it to the internet; use it over an encrypted trusted path such as a VPN
+or SSH tunnel.
 
 ## GitHub CLI Proxy
 
