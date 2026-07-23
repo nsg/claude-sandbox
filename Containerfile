@@ -54,7 +54,7 @@ RUN printf 'pcm.!default pulse\nctl.!default pulse\n' > /etc/asound.conf
 # Rust toolchain
 RUN rustup default stable
 RUN rustup target add wasm32-unknown-unknown
-RUN cargo install cargo-audit trunk
+RUN cargo install --locked cargo-audit trunk
 
 # Make cargo binaries available in all login shells (e.g. SSH sessions)
 RUN echo 'export PATH="$HOME/.cargo/bin:$PATH"' > /etc/profile.d/cargo.sh
