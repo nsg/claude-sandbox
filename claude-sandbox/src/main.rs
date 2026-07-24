@@ -204,6 +204,12 @@ enum Commands {
         /// tmux key name, for example Enter, Escape, BSpace, C-c
         key: String,
     },
+    /// Print the screen contents of the currently wrapped terminal
+    WrapRead {
+        /// Number of scrollback lines to include above the visible screen
+        #[arg(long)]
+        lines: Option<u32>,
+    },
 }
 
 const T3CODE_PORT: u16 = 3773;
@@ -272,7 +278,7 @@ fn run_in_container(container_name: &str, args: &[&str]) {
 
     if !status.success() {
         eprintln!(
-            "Error: could not send keys. Start a wrapped session first, for example: claude-sandbox --wrap shell"
+            "Error: could not reach the wrapped session. Start one first, for example: claude-sandbox --wrap shell"
         );
         std::process::exit(status.code().unwrap_or(1));
     }
@@ -359,6 +365,18 @@ fn write_wrap_key(key: &str) {
         &container_name,
         &["tmux", "send-keys", "-t", WRAP_TMUX_SESSION, key],
     );
+}
+
+fn print_wrap_screen(lines: Option<u32>) {
+    let cwd = env::current_dir().expect("Could not get current directory");
+    let container_name = wrap_container_name(&cwd);
+    let mut args = vec!["tmux", "capture-pane", "-p", "-t", WRAP_TMUX_SESSION];
+    let scrollback;
+    if let Some(n) = lines {
+        scrollback = format!("-{}", n);
+        args.extend(["-S", scrollback.as_str()]);
+    }
+    run_in_container(&container_name, &args);
 }
 
 fn find_free_port(preferred: u16) -> u16 {
@@ -1280,6 +1298,9 @@ fn main() {
         }
         Some(Commands::WrapKey { key }) => {
             write_wrap_key(&key);
+        }
+        Some(Commands::WrapRead { lines }) => {
+            print_wrap_screen(lines);
         }
         None => {
             let tool = default_tool();
