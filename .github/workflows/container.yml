@@ -77,15 +77,16 @@ jobs:
       packages: write
 
     steps:
-      - name: Free disk space on the runner
+      - name: Add swap for the image export
         run: |
-          # Exporting the built image needs a second on-disk copy of it,
-          # which intermittently exhausts the runner's free space. Drop
-          # large preinstalled toolchains we never use.
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet \
-            /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
-            /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
+          # The layer-export phase kills the job abruptly on stock
+          # runners: no error, logs cut off mid-export, while disk has
+          # 100+ GB free — the runner OOMs. Swap absorbs the spike.
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
           df -h /
 
       - name: Checkout repository
