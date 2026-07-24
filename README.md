@@ -354,6 +354,8 @@ claude-sandbox install skills
 | `/git` | Git operations with atomic commits following conventional commit standards |
 | `/github-actions` | GitHub Actions workflow development with official actions preference |
 | `/readme` | README writing and maintenance guidelines |
+| `/gui` | Run and test GUI applications on the virtual X display |
+| `/wrap` | Run and drive interactive terminal programs in a tmux session |
 
 Invoke skills manually with `/skill-name` inside Claude. Codex discovers the same skills from `~/.agents/skills/`.
 
