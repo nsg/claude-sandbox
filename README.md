@@ -328,7 +328,7 @@ Set `CLIPBOARD_SCREENSHOTS_DIR` on the host to override the default screenshot d
 
 ## Managed Configuration
 
-The container ships default `AGENTS.md` instructions (skills guidance, commit conventions) at `/etc/AGENTS.md`. At startup, that managed block is merged into `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, and `~/.config/opencode/AGENTS.md`, preserving any content you keep outside the `<!-- MANAGED START -->` / `<!-- MANAGED END -->` markers in each file.
+The container ships default `AGENTS.md` instructions (skills guidance, commit conventions) at `/etc/AGENTS.md`, plus optional per-harness overlays at `/etc/AGENTS.claude.md`, `/etc/AGENTS.codex.md`, and `/etc/AGENTS.opencode.md` (sourced from `config/AGENTS.md` and `config/AGENTS.<harness>.md`). At startup, each harness gets the shared base with its overlay appended, merged into `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, and `~/.config/opencode/AGENTS.md` respectively. The managed part is the `# Global Instructions` H1 section — it is replaced on every start, and any H1 sections you add below it are preserved. Overlays must therefore contain only `##` sections (no H1), so their content stays inside the managed section; CI enforces this.
 
 Claude MCP server config (`/etc/claude/mcp.json`) is merged into the project's `.mcp.json` — image defaults take precedence for shared server names, project-level config is preserved otherwise.
 

@@ -73,6 +73,9 @@ fi
 # The managed part is the H1 section from the source file (# Global
 # Instructions): it is replaced on every start, up to the next H1 or EOF.
 # Users can add their own H1 sections below; those are preserved.
+# Each harness gets the shared base plus an optional overlay
+# (/etc/AGENTS.<harness>.md). Overlays must contain only ## sections — no
+# H1 — so their content stays inside the managed H1 section (enforced in CI).
 MANAGED_SOURCE=/etc/AGENTS.md
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 CODEX_AGENTS_MD="$HOME/.codex/AGENTS.md"
@@ -103,11 +106,23 @@ merge_managed_file() {
     fi
 }
 
+compose_managed_block() {
+    local overlay="/etc/AGENTS.$1.md"
+    MANAGED_BLOCK=$(cat "$MANAGED_SOURCE")
+    if [ -s "$overlay" ]; then
+        MANAGED_BLOCK="$MANAGED_BLOCK
+
+$(cat "$overlay")"
+    fi
+}
+
 if [ -f "$MANAGED_SOURCE" ]; then
     MANAGED_H1=$(head -n 1 "$MANAGED_SOURCE")
-    MANAGED_BLOCK=$(cat "$MANAGED_SOURCE")
+    compose_managed_block claude
     merge_managed_file "$CLAUDE_MD"
+    compose_managed_block codex
     merge_managed_file "$CODEX_AGENTS_MD"
+    compose_managed_block opencode
     merge_managed_file "$OPENCODE_AGENTS_MD"
 fi
 

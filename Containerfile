@@ -140,7 +140,7 @@ RUN chmod +x /usr/local/bin/start-display && \
 COPY config/mcp.json /etc/claude/mcp.json
 COPY config/codex.toml /etc/codex/config.toml
 COPY config/opencode.json /etc/opencode/opencode.json
-COPY config/AGENTS.md /etc/AGENTS.md
+COPY config/AGENTS.md config/AGENTS.*.md /etc/
 
 # Entrypoint script for runtime configuration
 COPY config/entrypoint.sh /usr/local/bin/entrypoint.sh
