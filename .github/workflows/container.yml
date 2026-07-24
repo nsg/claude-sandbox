@@ -77,15 +77,16 @@ jobs:
       packages: write
 
     steps:
-      - name: Add swap for the image export
+      - name: Grow swap for the image export
         run: |
           # The layer-export phase kills the job abruptly on stock
           # runners: no error, logs cut off mid-export, while disk has
-          # 100+ GB free — the runner OOMs. Swap absorbs the spike.
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # 100+ GB free — the runner OOMs. The stock 4 GB /swapfile is
+          # not enough; add another 16 GB.
+          sudo fallocate -l 16G /swapfile2
+          sudo chmod 600 /swapfile2
+          sudo mkswap /swapfile2
+          sudo swapon /swapfile2
           free -h
           df -h /
 
