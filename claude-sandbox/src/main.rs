@@ -260,23 +260,15 @@ fn shell_command(args: &[&str]) -> String {
         .join(" ")
 }
 
-fn run_tmux_send_keys(container_name: &str, literal: bool, args: &[&str]) {
-    let mut cmd = Command::new("podman");
-    cmd.args([
-        "exec",
-        container_name,
-        "tmux",
-        "send-keys",
-        "-t",
-        WRAP_TMUX_SESSION,
-    ]);
-    if literal {
-        cmd.arg("-l");
-    }
-    let status = cmd.args(args).status().unwrap_or_else(|e| {
-        eprintln!("Error: failed to run podman exec: {}", e);
-        std::process::exit(1);
-    });
+fn run_in_container(container_name: &str, args: &[&str]) {
+    let status = Command::new("podman")
+        .args(["exec", container_name])
+        .args(args)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Error: failed to run podman exec: {}", e);
+            std::process::exit(1);
+        });
 
     if !status.success() {
         eprintln!(
@@ -341,22 +333,32 @@ fn write_wrap_type(text: &[String], enter: bool, delay_min_ms: u64, delay_max_ms
     let joined = text.join(" ");
     let mut delay = RandomDelay::new(delay_min_ms, delay_max_ms);
 
+    // Send everything in one podman exec: per-character exec startup
+    // overhead otherwise dwarfs the typing delays.
+    let mut script = String::from("set -e\n");
     for ch in joined.chars() {
-        let typed = ch.to_string();
-        run_tmux_send_keys(&container_name, true, &[&typed]);
-        thread::sleep(delay.delay_for(ch));
+        script.push_str(&format!(
+            "tmux send-keys -t {} -l -- {}\n",
+            WRAP_TMUX_SESSION,
+            shell_quote(&ch.to_string())
+        ));
+        script.push_str(&format!("sleep {:.3}\n", delay.delay_for(ch).as_secs_f64()));
     }
 
     if enter {
-        thread::sleep(delay.delay_for('\n'));
-        run_tmux_send_keys(&container_name, false, &["Enter"]);
+        script.push_str(&format!("tmux send-keys -t {} Enter\n", WRAP_TMUX_SESSION));
     }
+
+    run_in_container(&container_name, &["sh", "-c", &script]);
 }
 
 fn write_wrap_key(key: &str) {
     let cwd = env::current_dir().expect("Could not get current directory");
     let container_name = wrap_container_name(&cwd);
-    run_tmux_send_keys(&container_name, false, &[key]);
+    run_in_container(
+        &container_name,
+        &["tmux", "send-keys", "-t", WRAP_TMUX_SESSION, key],
+    );
 }
 
 fn find_free_port(preferred: u16) -> u16 {
