@@ -76,6 +76,17 @@ jobs:
       packages: write
 
     steps:
+      - name: Free disk space on the runner
+        run: |
+          # Exporting the built image needs a second on-disk copy of it,
+          # which intermittently exhausts the runner's free space. Drop
+          # large preinstalled toolchains we never use.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
