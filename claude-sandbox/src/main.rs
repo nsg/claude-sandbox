@@ -34,7 +34,7 @@ const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
 const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
 const SSHD_CONFIG_FILE: &str = "sshd.json";
-// Must match the session name in config/wrap.sh.
+// Must match the default session name in config/wrap.sh.
 const WRAP_TMUX_SESSION: &str = "claude-sandbox";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -183,8 +183,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Type text into the currently wrapped terminal
+    /// Type text into a wrapped terminal
     WrapType {
+        /// Target session name (needed when several sessions are running)
+        #[arg(long)]
+        session: Option<String>,
         /// Press Enter after typing the text
         #[arg(long)]
         enter: bool,
@@ -197,17 +200,25 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         text: Vec<String>,
     },
-    /// Press a key in the currently wrapped terminal
+    /// Press a key in a wrapped terminal
     WrapKey {
+        /// Target session name (needed when several sessions are running)
+        #[arg(long)]
+        session: Option<String>,
         /// tmux key name, for example Enter, Escape, BSpace, C-c
         key: String,
     },
-    /// Print the screen contents of the currently wrapped terminal
+    /// Print the screen contents of a wrapped terminal
     WrapRead {
+        /// Target session name (needed when several sessions are running)
+        #[arg(long)]
+        session: Option<String>,
         /// Number of scrollback lines to include above the visible screen
         #[arg(long)]
         lines: Option<u32>,
     },
+    /// List running wrapped terminal sessions
+    WrapList,
 }
 
 const T3CODE_PORT: u16 = 3773;
@@ -288,7 +299,13 @@ fn run_in_container(container_name: &str, args: &[&str]) {
     }
 }
 
-fn write_wrap_type(text: &[String], enter: bool, delay_min_ms: u64, delay_max_ms: u64) {
+fn write_wrap_type(
+    text: &[String],
+    session: Option<&str>,
+    enter: bool,
+    delay_min_ms: u64,
+    delay_max_ms: u64,
+) {
     let cwd = env::current_dir().expect("Could not get current directory");
     let container_name = wrap_container_name(&cwd);
     let delay_min = delay_min_ms.to_string();
@@ -300,6 +317,9 @@ fn write_wrap_type(text: &[String], enter: bool, delay_min_ms: u64, delay_max_ms
         "--delay-max-ms",
         &delay_max,
     ];
+    if let Some(name) = session {
+        args.extend(["--session", name]);
+    }
     if enter {
         args.push("--enter");
     }
@@ -308,22 +328,36 @@ fn write_wrap_type(text: &[String], enter: bool, delay_min_ms: u64, delay_max_ms
     run_in_container(&container_name, &args);
 }
 
-fn write_wrap_key(key: &str) {
+fn write_wrap_key(key: &str, session: Option<&str>) {
     let cwd = env::current_dir().expect("Could not get current directory");
     let container_name = wrap_container_name(&cwd);
-    run_in_container(&container_name, &["wrap-key", key]);
+    let mut args = vec!["wrap-key"];
+    if let Some(name) = session {
+        args.extend(["--session", name]);
+    }
+    args.push(key);
+    run_in_container(&container_name, &args);
 }
 
-fn print_wrap_screen(lines: Option<u32>) {
+fn print_wrap_screen(lines: Option<u32>, session: Option<&str>) {
     let cwd = env::current_dir().expect("Could not get current directory");
     let container_name = wrap_container_name(&cwd);
     let mut args = vec!["wrap-read"];
+    if let Some(name) = session {
+        args.extend(["--session", name]);
+    }
     let lines_arg;
     if let Some(n) = lines {
         lines_arg = n.to_string();
         args.extend(["--lines", lines_arg.as_str()]);
     }
     run_in_container(&container_name, &args);
+}
+
+fn print_wrap_sessions() {
+    let cwd = env::current_dir().expect("Could not get current directory");
+    let container_name = wrap_container_name(&cwd);
+    run_in_container(&container_name, &["wrap", "--list"]);
 }
 
 fn find_free_port(preferred: u16) -> u16 {
@@ -1236,18 +1270,22 @@ fn main() {
             );
         }
         Some(Commands::WrapType {
+            session,
             enter,
             delay_min_ms,
             delay_max_ms,
             text,
         }) => {
-            write_wrap_type(&text, enter, delay_min_ms, delay_max_ms);
+            write_wrap_type(&text, session.as_deref(), enter, delay_min_ms, delay_max_ms);
         }
-        Some(Commands::WrapKey { key }) => {
-            write_wrap_key(&key);
+        Some(Commands::WrapKey { session, key }) => {
+            write_wrap_key(&key, session.as_deref());
         }
-        Some(Commands::WrapRead { lines }) => {
-            print_wrap_screen(lines);
+        Some(Commands::WrapRead { session, lines }) => {
+            print_wrap_screen(lines, session.as_deref());
+        }
+        Some(Commands::WrapList) => {
+            print_wrap_sessions();
         }
         None => {
             let tool = default_tool();

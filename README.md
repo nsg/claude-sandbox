@@ -175,7 +175,7 @@ claude-sandbox wrap-read --lines 200
 
 `wrap-type` types character by character with a random delay between keystrokes (25–120 ms by default, adjustable with `--delay-min-ms` / `--delay-max-ms`). The target container is derived from the current directory, so `wrap-type` and `wrap-key` must be run from the same directory the wrapped session was started in.
 
-The same commands are available inside the container as `wrap-type`, `wrap-key` and `wrap-read` — the host-side commands are thin forwarders to them. This lets an agent running in the sandbox drive a wrapped session too. Inside the container an agent can also start and stop the session itself:
+The same commands are available inside the container as `wrap-type`, `wrap-key` and `wrap-read` — the host-side commands are thin forwarders to them. This lets an agent running in the sandbox drive a wrapped session too. Inside the container an agent can also start and stop sessions itself:
 
 ```bash
 # Start a command in a detached wrapped session
@@ -188,6 +188,21 @@ wrap-read
 # Stop the session
 wrap --kill
 ```
+
+Several sessions can run at once — give each one a name with `--session` and pass the same flag to the other commands to pick a target. When only one session is running the flag can be omitted:
+
+```bash
+wrap --session repl python3 -i
+wrap-type --session repl --enter "1+2"
+wrap-read --session repl
+
+# List running sessions (also available as: claude-sandbox wrap-list)
+wrap --list
+
+wrap --kill --session repl
+```
+
+A session started with `claude-sandbox --wrap` uses the default name `claude-sandbox`.
 
 ## GitHub CLI Proxy
 

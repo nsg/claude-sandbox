@@ -28,7 +28,7 @@
 
 ## Wrapped Terminal Sessions
 
-- The `wrap` commands run and drive interactive terminal programs (TUIs, REPLs, other agents) in a tmux session. Load the `wrap` skill before using them.
+- The `wrap` commands run and drive interactive terminal programs (TUIs, REPLs, other agents) in named tmux sessions. Load the `wrap` skill before using them.
 
 ## Bash Commands
 
