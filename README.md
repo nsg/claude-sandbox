@@ -342,7 +342,7 @@ All containers mount at `/workspace`, which means Claude's auto-memory would nor
 
 ## Skills
 
-Install optional skills to both `~/.claude/skills/` for Claude Code and `~/.agents/skills/` for Codex. Updates are checked automatically on each launch.
+Install optional skills to `~/.claude/skills/` and `~/.agents/skills/` — between them, all three harnesses discover the skills natively (Claude Code reads the former; Codex and opencode read the latter, and opencode reads the former too). Updates are checked automatically on each launch.
 
 ```bash
 claude-sandbox install skills
@@ -357,7 +357,7 @@ claude-sandbox install skills
 | `/gui` | Run and test GUI applications on the virtual X display |
 | `/wrap` | Run and drive interactive terminal programs in a tmux session |
 
-Invoke skills manually with `/skill-name` inside Claude. Codex discovers the same skills from `~/.agents/skills/`.
+Invoke skills manually with `/skill-name` inside Claude, `$skill-name` (or the `/skills` picker) inside Codex, and via the `skill` tool in opencode; all three also load skills on their own when a task matches a skill's description.
 
 ## MCP Servers
 
