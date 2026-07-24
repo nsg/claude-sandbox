@@ -351,7 +351,7 @@ claude-sandbox install skills
 | Skill | Description |
 |-------|-------------|
 | `/rust` | Rust development guidelines and workflow |
-| `/git` | Git operations with atomic commits following conventional commit standards |
+| `/git` | Git operations with small, atomic commits and clean history |
 | `/github-actions` | GitHub Actions workflow development with official actions preference |
 | `/readme` | README writing and maintenance guidelines |
 | `/gui` | Run and test GUI applications on the virtual X display |
