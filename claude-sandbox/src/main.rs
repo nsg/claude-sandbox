@@ -903,16 +903,15 @@ fn run_container(
     ensure_gh_proxy();
     ensure_clipboard_proxy();
 
-    if allow_push {
-        match git_proxy::origin_url() {
-            Some(url) => ensure_git_proxy(&url),
-            None => {
-                eprintln!("Error: --allow-push requires a git repository with an 'origin' remote");
-                std::process::exit(1);
-            }
+    match (allow_push, git_proxy::origin_url()) {
+        (true, Some(url)) => ensure_git_proxy(&url),
+        (true, None) => {
+            eprintln!(
+                "Warning: --allow-push ignored, requires a git repository with an 'origin' remote"
+            );
+            remove_stale_git_proxy_socket();
         }
-    } else {
-        remove_stale_git_proxy_socket();
+        (false, _) => remove_stale_git_proxy_socket(),
     }
 
     let ssh_proxy_config = load_ssh_proxy_config();
