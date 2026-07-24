@@ -26,6 +26,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check AGENTS.md has exactly one H1 on the first line
+        run: |
+          # The entrypoint uses the base file's first line as the managed
+          # section marker and replaces everything up to the next H1. A
+          # second H1 in the base would end up outside the managed section
+          # and get duplicated on every container start.
+          awk '
+            /^```/ { fence = !fence; next }
+            fence { next }
+            /^# / { if (FNR != 1) {
+              printf "::error file=%s,line=%d::extra H1 heading (only line 1 may be an H1): %s\n", FILENAME, FNR, $0
+              bad = 1
+            } }
+            FNR == 1 && $0 !~ /^# / {
+              printf "::error file=%s,line=1::first line must be an H1 heading\n", FILENAME
+              bad = 1
+            }
+            END { exit bad }
+          ' config/AGENTS.md
+
       - name: Check AGENTS overlays contain no H1 headings
         run: |
           # Overlay content is appended inside the managed H1 section of the
