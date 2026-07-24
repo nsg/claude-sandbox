@@ -16,9 +16,42 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  validate-agents-overlays:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check AGENTS overlays contain no H1 headings
+        run: |
+          # Overlay content is appended inside the managed H1 section of the
+          # shared config/AGENTS.md; an H1 in an overlay would end that
+          # section and leak into user-owned content. Fenced code blocks
+          # are skipped so shell comments in examples don't false-positive.
+          status=0
+          for f in config/AGENTS.*.md; do
+            [ -e "$f" ] || continue
+            if ! awk '
+              /^```/ { fence = !fence; next }
+              !fence && /^# / {
+                printf "::error file=%s,line=%d::H1 heading in overlay (use ## sections only): %s\n", FILENAME, FNR, $0
+                bad = 1
+              }
+              END { exit bad }
+            ' "$f"; then
+              status=1
+            fi
+          done
+          exit "$status"
+
   build-and-push-image:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: validate-agents-overlays
     permissions:
       packages: write
 
