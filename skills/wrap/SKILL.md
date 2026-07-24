@@ -11,8 +11,7 @@ interactive terminal programs the Bash tool can't handle directly.
 ## Commands
 
 - `wrap <command>` — start the program in a detached tmux session
-- `wrap-type [--enter] <text>` — type text with a human-like cadence
-  (25–120 ms per keystroke; tune with `--delay-min-ms` / `--delay-max-ms`)
+- `wrap-type [--enter] <text>` — type text
 - `wrap-key <key>` — send one tmux key name (Enter, Escape, BSpace, C-c, ...)
 - `wrap-read [--lines N]` — print the screen; `--lines N` includes the last
   N scrollback lines above the visible screen
