@@ -19,10 +19,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{thread, time::Duration};
 use tar::Archive;
 
 const SCRIPT_URL: &str =
@@ -37,6 +34,7 @@ const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
 const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
 const SSHD_CONFIG_FILE: &str = "sshd.json";
+// Must match the session name in config/wrap.sh.
 const WRAP_TMUX_SESSION: &str = "claude-sandbox";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -266,6 +264,8 @@ fn shell_command(args: &[&str]) -> String {
         .join(" ")
 }
 
+/// Forward a wrap command to its in-container implementation
+/// (/usr/local/bin/wrap and friends, from config/wrap.sh).
 fn run_in_container(container_name: &str, args: &[&str]) {
     let status = Command::new("podman")
         .args(["exec", container_name])
@@ -277,104 +277,51 @@ fn run_in_container(container_name: &str, args: &[&str]) {
         });
 
     if !status.success() {
-        eprintln!(
-            "Error: could not reach the wrapped session. Start one first, for example: claude-sandbox --wrap shell"
-        );
+        // podman exec exits 125 when it cannot reach the container; other
+        // codes come from the wrap script, which prints its own error.
+        if status.code() == Some(125) {
+            eprintln!(
+                "Error: could not reach the wrapped session. Start one first, for example: claude-sandbox --wrap shell"
+            );
+        }
         std::process::exit(status.code().unwrap_or(1));
     }
 }
 
-struct RandomDelay {
-    state: u64,
-    min_ms: u64,
-    max_ms: u64,
-}
-
-impl RandomDelay {
-    fn new(min_ms: u64, max_ms: u64) -> Self {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9e37_79b9_7f4a_7c15);
-        Self {
-            state: seed ^ 0xa076_1d64_78bd_642f,
-            min_ms,
-            max_ms,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state ^= self.state << 7;
-        self.state ^= self.state >> 9;
-        self.state ^= self.state << 8;
-        self.state
-    }
-
-    fn range(&mut self, min: u64, max: u64) -> u64 {
-        if min >= max {
-            return min;
-        }
-        min + (self.next_u64() % (max - min + 1))
-    }
-
-    fn delay_for(&mut self, ch: char) -> Duration {
-        let mut ms = self.range(self.min_ms, self.max_ms);
-        if ch == ' ' {
-            ms += self.range(10, 55);
-        } else if matches!(ch, '.' | ',' | ';' | ':' | '?' | '!') {
-            ms += self.range(90, 260);
-        }
-        Duration::from_millis(ms)
-    }
-}
-
 fn write_wrap_type(text: &[String], enter: bool, delay_min_ms: u64, delay_max_ms: u64) {
-    if delay_min_ms > delay_max_ms {
-        eprintln!("Error: --delay-min-ms must be less than or equal to --delay-max-ms");
-        std::process::exit(1);
-    }
-
     let cwd = env::current_dir().expect("Could not get current directory");
     let container_name = wrap_container_name(&cwd);
-    let joined = text.join(" ");
-    let mut delay = RandomDelay::new(delay_min_ms, delay_max_ms);
-
-    // Send everything in one podman exec: per-character exec startup
-    // overhead otherwise dwarfs the typing delays.
-    let mut script = String::from("set -e\n");
-    for ch in joined.chars() {
-        script.push_str(&format!(
-            "tmux send-keys -t {} -l -- {}\n",
-            WRAP_TMUX_SESSION,
-            shell_quote(&ch.to_string())
-        ));
-        script.push_str(&format!("sleep {:.3}\n", delay.delay_for(ch).as_secs_f64()));
-    }
-
+    let delay_min = delay_min_ms.to_string();
+    let delay_max = delay_max_ms.to_string();
+    let mut args = vec![
+        "wrap-type",
+        "--delay-min-ms",
+        &delay_min,
+        "--delay-max-ms",
+        &delay_max,
+    ];
     if enter {
-        script.push_str(&format!("tmux send-keys -t {} Enter\n", WRAP_TMUX_SESSION));
+        args.push("--enter");
     }
-
-    run_in_container(&container_name, &["sh", "-c", &script]);
+    args.push("--");
+    args.extend(text.iter().map(String::as_str));
+    run_in_container(&container_name, &args);
 }
 
 fn write_wrap_key(key: &str) {
     let cwd = env::current_dir().expect("Could not get current directory");
     let container_name = wrap_container_name(&cwd);
-    run_in_container(
-        &container_name,
-        &["tmux", "send-keys", "-t", WRAP_TMUX_SESSION, key],
-    );
+    run_in_container(&container_name, &["wrap-key", key]);
 }
 
 fn print_wrap_screen(lines: Option<u32>) {
     let cwd = env::current_dir().expect("Could not get current directory");
     let container_name = wrap_container_name(&cwd);
-    let mut args = vec!["tmux", "capture-pane", "-p", "-t", WRAP_TMUX_SESSION];
-    let scrollback;
+    let mut args = vec!["wrap-read"];
+    let lines_arg;
     if let Some(n) = lines {
-        scrollback = format!("-{}", n);
-        args.extend(["-S", scrollback.as_str()]);
+        lines_arg = n.to_string();
+        args.extend(["--lines", lines_arg.as_str()]);
     }
     run_in_container(&container_name, &args);
 }

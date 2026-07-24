@@ -30,6 +30,18 @@
 - If a push fails with a hint about `--allow-push`, pushing is disabled for
   this session — ask the user to relaunch with `claude-sandbox --allow-push`.
 
+## Wrapped Terminal Sessions
+
+- To run and drive an interactive terminal program (TUI, REPL, another agent),
+  use the wrap commands: `wrap <command>` starts it in a detached tmux session,
+  `wrap-type [--enter] <text>` types into it with a human-like cadence,
+  `wrap-key <key>` sends a tmux key name (Enter, Escape, BSpace, C-c, ...),
+  `wrap-read [--lines N]` prints its screen, and `wrap --kill` stops it.
+- Only one wrapped session exists at a time, and it may already be in use: if
+  the sandbox was started with `--wrap`, the session is the user's own
+  terminal. If `wrap` reports a session already running and you did not start
+  it, do not type into or kill it without being asked.
+
 ## Bash Commands
 
 - Avoid compound commands with `cd` (e.g., `cd /tmp && cmd`) as they require manual approval. Use absolute paths instead.

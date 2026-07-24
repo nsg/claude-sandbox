@@ -175,6 +175,20 @@ claude-sandbox wrap-read --lines 200
 
 `wrap-type` types character by character with a random delay between keystrokes (25–120 ms by default, adjustable with `--delay-min-ms` / `--delay-max-ms`). The target container is derived from the current directory, so `wrap-type` and `wrap-key` must be run from the same directory the wrapped session was started in.
 
+The same commands are available inside the container as `wrap-type`, `wrap-key` and `wrap-read` — the host-side commands are thin forwarders to them. This lets an agent running in the sandbox drive a wrapped session too. Inside the container an agent can also start and stop the session itself:
+
+```bash
+# Start a command in a detached wrapped session
+wrap opencode
+
+# Interact with it
+wrap-type --enter "explain this repo"
+wrap-read
+
+# Stop the session
+wrap --kill
+```
+
 ## GitHub CLI Proxy
 
 The container includes a sandboxed `gh` proxy that gives Claude safe access to GitHub without exposing your credentials directly. The proxy runs on the host and communicates with the container over a Unix socket.

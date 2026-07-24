@@ -124,6 +124,13 @@ COPY config/t3code-register.sh /usr/local/bin/t3code-register
 COPY config/t3code-pair-admin.js /usr/local/lib/t3code-pair-admin.js
 RUN chmod +x /usr/local/bin/t3code-register /usr/local/lib/t3code-pair-admin.js
 
+# Wrapped tmux session helpers (wrap, wrap-type, wrap-key, wrap-read)
+COPY config/wrap.sh /usr/local/bin/wrap
+RUN chmod +x /usr/local/bin/wrap && \
+    ln -s /usr/local/bin/wrap /usr/local/bin/wrap-type && \
+    ln -s /usr/local/bin/wrap /usr/local/bin/wrap-key && \
+    ln -s /usr/local/bin/wrap /usr/local/bin/wrap-read
+
 # Virtual X display (Xvfb + openbox) for GUI app testing
 COPY config/start-display.sh /usr/local/bin/start-display
 RUN chmod +x /usr/local/bin/start-display && \
