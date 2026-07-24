@@ -19,6 +19,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
 - **MCP servers** — pre-configured Playwright with headless Chromium
 - **Virtual X display** — headless Xvfb + openbox on `DISPLAY=:99`, so agents can run and test GUI apps (screenshots via `scrot`, input via `xdotool`)
+- **Wrapped sessions** — run the command in a tmux session and inject keystrokes from outside with `wrap-type` / `wrap-key`
 - **Auto-updates** — binary, skills, and container image updates are checked on every launch
 - **Port exposure** — forward ports from the container with `-p`
 
@@ -147,6 +148,26 @@ The portal uses plain HTTP. Anyone able to observe the traffic can recover both
 the PIN and generated pairing token, and a short PIN can be guessed. Never
 expose it to the internet; use it over an encrypted trusted path such as a VPN
 or SSH tunnel.
+
+### Wrapped sessions
+
+Pass `--wrap` to run the command inside a named tmux session in the container, so keystrokes can be injected from another terminal:
+
+```bash
+claude-sandbox --wrap shell
+```
+
+Then, from a second terminal in the same project directory:
+
+```bash
+# Type text with a human-like typing cadence, then press Enter
+claude-sandbox wrap-type --enter "ls -la"
+
+# Send a single tmux key name (Enter, Escape, BSpace, C-c, ...)
+claude-sandbox wrap-key C-c
+```
+
+`wrap-type` types character by character with a random delay between keystrokes (25–120 ms by default, adjustable with `--delay-min-ms` / `--delay-max-ms`). The target container is derived from the current directory, so `wrap-type` and `wrap-key` must be run from the same directory the wrapped session was started in.
 
 ## GitHub CLI Proxy
 
