@@ -37,14 +37,21 @@ Follow this exact format:
 - Use imperative mood ("add" not "added" or "adds")
 - No period at the end
 - No conventional-commit type prefixes (`fix:`, `feat(scope):`) — plain sentences
+- The subject alone should give a good understanding of what happened
 
 ### Body (when needed)
+- Only add a body when there is genuinely more to explain than the subject conveys
 - Blank line after subject
 - Wrap at 72 characters
 - Explain what and why, not how
 - Use bullet points for multiple items
 - Describe the problem and the fix, not the troubleshooting journey that led there
+- No session context: what you discovered along the way belongs nowhere in the message
 - Don't restate the diff; a reader who wants details will open it
+
+### Footer
+- Never add `Co-Authored-By`, "Generated with", or any other AI/agent metadata
+  trailer unless the user explicitly asks for it — subject and body only
 
 ### Write for the reader in 100 years
 
@@ -125,10 +132,22 @@ When multiple unrelated commits are needed, use the Task tool to spawn subagents
 - Subagents can analyze their portion of changes independently
 - Coordinate staging order to avoid conflicts (sequential commits, parallel analysis)
 
+## Pushing
+
+**Never push unless the user explicitly asks.** Commit locally and stop there.
+
+When asked, note how the sandbox bridges pushes to the host:
+
+- Only the exact commands `git push` and `git push --tags` are bridged to the
+  host with the user's credentials. Any other form — extra args or flags, even
+  `-C` — runs the container's credential-less git and fails.
+- The bridged push always targets the workspace repository.
+- If a push fails with a hint about `--allow-push`, pushing is disabled for this
+  session: ask the user to relaunch with `claude-sandbox --allow-push`.
+
 ## Critical Rules
 
-- **NEVER push code** - Only stage and commit locally
-- **NEVER use `git push`** under any circumstances
+- **Never push on your own initiative** - stage and commit locally; push only when asked
 - **Separate unrelated changes** into distinct commits
 - **Verify before committing** - Always check `git diff --cached` before committing
 - **Ask for clarification** if unsure about commit boundaries or messages
