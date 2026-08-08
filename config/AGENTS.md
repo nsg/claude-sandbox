@@ -20,6 +20,7 @@
 
 - The `wrap` commands run and drive interactive terminal programs (TUIs, REPLs, other agents) in named tmux sessions. Load the `wrap` skill before using them.
 
-## Bash Commands
+## The Sandbox
 
-- For complex processing, write reusable scripts in `/workspace/.claude-sandbox/tools/` — check there for existing tools first.
+- Every instance runs in its own container, sharing the agent config in `$HOME` while seeing its own project as `/workspace`. Nothing at runtime tells the instances apart.
+- Per-instance state goes in `/workspace/.claude-sandbox` — not `$HOME`, not `/tmp`. For complex processing, write reusable scripts to `/workspace/.claude-sandbox/tools/` and check there for existing ones first.
