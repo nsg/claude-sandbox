@@ -36,3 +36,21 @@ before continuing. TUIs redraw asynchronously — never assume input landed.
   without being asked.
 - `wrap-type` sends literal text; use `wrap-key` for control keys and
   `--enter` (or `wrap-key Enter`) to submit.
+
+## Driving the user's own Claude session
+
+The `claude-sandbox` session is the user's terminal. When you have been asked
+to drive it:
+
+- Submit with `wrap-type --enter '<text>'` in one call, not a separate
+  `wrap-key Enter`. A trailing Enter can be swallowed by the slash-command
+  autocomplete menu, which consumes the first press to accept its highlighted
+  suggestion.
+- Close whatever you opened. A panel or dialog left up blocks the user's input
+  box until they dismiss it themselves. `wrap-key Escape`, then `wrap-read` to
+  confirm the prompt is back before ending the turn.
+- Escape is also Claude Code's interrupt key — it is safe only while a dialog
+  holds focus.
+- Only type into an empty input box, and remember the box is not the whole
+  story: text composed in Remote Control (the mobile app) never appears in the
+  pane, so an empty box does not prove the user is idle.
