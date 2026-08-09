@@ -371,6 +371,11 @@ claude-sandbox install skills
 | `/readme` | README writing and maintenance guidelines |
 | `/gui` | Run and test GUI applications on the virtual X display |
 | `/wrap` | Run and drive interactive terminal programs in a tmux session |
+| `/claude` | Delegate work to Anthropic models through the Claude Code CLI |
+| `/codex` | Delegate work to OpenAI models through the Codex CLI |
+| `/opencode` | Delegate non-code work to open-weight models through opencode |
+| `/delegate` | Choose between Anthropic, OpenAI, and open-weight model pools |
+| `/consensus-review` | Run a cross-vendor code review and reconcile the findings |
 
 Invoke skills manually with `/skill-name` inside Claude, `$skill-name` (or the `/skills` picker) inside Codex, and via the `skill` tool in opencode; all three also load skills on their own when a task matches a skill's description.
 
