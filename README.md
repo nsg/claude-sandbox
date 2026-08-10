@@ -13,7 +13,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 
 - **Sandboxed GitHub CLI** — proxied `gh` access with an audited allowlist of safe commands
 - **SSH proxy** — filtered SSH access without exposing keys to the container
-- **Git push bridge** — opt-in `--allow-push` lets the agent trigger `git push` / `git push --tags`, executed on the host with your credentials
+- **Git push bridge** — opt-in single-repository pushes plus portal-approved repositories for long-running T3 services
 - **Clipboard image bridge** — paste screenshots from your host into the container via `xclip`/`wl-paste`
 - **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
@@ -71,6 +71,8 @@ claude-sandbox codex exec "fix the failing test"
 claude-sandbox t3code
 # Optionally enable its pairing portal with a PIN
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
+# For a long-running T3 service, approve push repositories from that portal
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-push t3code
 
 # Run opencode TUI
 claude-sandbox opencode
@@ -129,20 +131,35 @@ Pass without a value to unset a variable:
 claude-sandbox --host-env XDG_DATA_HOME
 ```
 
-### T3 Code pairing portal
+### T3 Code admin portal
 
-The pairing portal is disabled by default. Set `T3CODE_PAIR_ADMIN_PIN` to a
+The admin portal is disabled by default. Set `T3CODE_PAIR_ADMIN_PIN` to a
 4–12 digit PIN when starting T3 Code to enable it:
 
 ```bash
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
 ```
 
-The portal uses a distinct port, defaulting to 3774. Open the exact URL printed
-at startup and enter the PIN in its sign-in page. It creates five-minute,
-single-use pairing links on demand and automatically uses the running server's
-instance database. The PIN is neither generated nor stored by claude-sandbox;
-provide it again on every launch.
+The host-side portal uses a distinct port, defaulting to 3774. Open the exact
+URL printed at startup and enter the PIN in its sign-in page. It creates
+five-minute, single-use pairing links on demand and automatically uses the
+running server's instance database. The PIN stays on the host, is neither
+generated nor stored by claude-sandbox, and must be provided again on every
+launch.
+
+For a long-running T3 service whose workspace contains several repositories,
+enable managed pushes:
+
+```bash
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-push t3code
+```
+
+The first `git push` from an unapproved repository is denied and adds a pending
+candidate to the portal. The page shows the repository's workspace-relative
+path, branch, and `origin`; choose **Approve once**, **Always allow**, or
+**Dismiss**. An origin change suspends an existing approval and requires a new
+review. Approvals are stored outside the mounted workspace under
+`~/.claude-sandbox/projects/`, where the container cannot modify them.
 
 The portal uses plain HTTP. Anyone able to observe the traffic can recover both
 the PIN and generated pairing token, and a short PIN can be guessed. Never
@@ -318,7 +335,7 @@ The container's `git` is a thin shim that forwards those two invocations to the 
 The workspace is agent-writable, so the host-side proxy treats the repository as untrusted when pushing:
 
 - Hooks are disabled (`core.hooksPath=/dev/null`, `--no-verify`), so a planted `.git/hooks/pre-push` never runs on the host
-- The `origin` URL is snapshotted at launch; the push is refused if `origin` has been repointed since, and the push always targets `origin` explicitly (`remote.pushDefault` / `branch.*.pushRemote` are ignored)
+- The `origin` URL is snapshotted at launch; the push is refused if `origin` has been repointed since, and the snapshotted URL is passed directly to Git (`remote.pushDefault` / `branch.*.pushRemote` are ignored)
 - The push is refused if the repo's local config sets keys the host would execute or that would redirect the push (`credential.*`, `core.sshCommand`, `core.fsmonitor`, `url.*`, `http.*`, `remote.origin.pushurl`, …)
 - Credential helpers are reset on the push command line and rebuilt from the host's system/global git config only, so a helper injected into the workspace repo's config is never executed
 - Terminal credential prompts are disabled (`GIT_TERMINAL_PROMPT=0`) — pushes that would require interactive auth fail fast instead of hanging
@@ -326,6 +343,12 @@ The workspace is agent-writable, so the host-side proxy treats the repository as
 The grant applies to that launch only and is never persisted — start the next session without the flag and pushes are off again. Every request is logged to `.claude-sandbox/git-proxy.log`.
 
 `--allow-push` requires the working directory to be a git repository with an `origin` remote.
+
+T3's `--t3-managed-push` mode instead routes each request from its container
+working directory to a canonical repository beneath the mounted workspace.
+Paths outside that workspace and repositories not approved in the host-side
+admin portal are rejected. Persistent approvals survive service restarts;
+one-time approvals are consumed by the next push attempt.
 
 ## Clipboard Image Bridge
 

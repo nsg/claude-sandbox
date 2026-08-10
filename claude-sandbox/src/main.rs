@@ -2,7 +2,9 @@ mod clipboard_proxy;
 mod gh_proxy;
 mod git_proxy;
 mod logging;
+mod managed_push;
 mod ssh_proxy;
+mod t3_admin;
 
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
@@ -104,6 +106,10 @@ struct Cli {
     #[arg(long = "allow-push")]
     allow_push: bool,
 
+    /// Let the T3 admin portal approve repositories for host-side pushes
+    #[arg(long = "t3-managed-push", conflicts_with = "allow_push")]
+    t3_managed_push: bool,
+
     /// Enable SSH server in the container
     #[arg(long)]
     ssh: bool,
@@ -144,9 +150,32 @@ enum Commands {
         /// Socket path (absolute)
         #[arg(long)]
         socket: String,
-        /// Origin remote URL snapshotted at launch
+        /// Origin remote URL snapshotted at launch (single-repository mode)
         #[arg(long)]
-        origin_url: String,
+        origin_url: Option<String>,
+        /// Host workspace root (managed T3 mode)
+        #[arg(long)]
+        workspace_root: Option<PathBuf>,
+        /// Host-only managed push state directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Start the host-side T3 administration portal (internal)
+    T3Admin {
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        t3_port: u16,
+        #[arg(long)]
+        container_name: String,
+        #[arg(long)]
+        t3_base_dir: String,
+        #[arg(long)]
+        workspace_root: PathBuf,
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        managed_push: bool,
     },
     /// Start the clipboard image proxy (internal, spawned automatically)
     ClipboardProxy {
@@ -382,6 +411,52 @@ fn find_free_port_avoiding(preferred: u16, excluded: &[u16]) -> u16 {
     }
 }
 
+struct T3AdminConfig<'a> {
+    portal_port: u16,
+    t3_port: u16,
+    container_name: &'a str,
+    t3_base_dir: &'a str,
+    workspace_root: &'a Path,
+    state_dir: &'a Path,
+    managed_push: bool,
+}
+
+fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
+    let exe = env::current_exe().expect("Could not get executable path");
+    let mut command = Command::new(exe);
+    command
+        .arg("t3-admin")
+        .arg("--port")
+        .arg(config.portal_port.to_string())
+        .arg("--t3-port")
+        .arg(config.t3_port.to_string())
+        .arg("--container-name")
+        .arg(config.container_name)
+        .arg("--t3-base-dir")
+        .arg(config.t3_base_dir)
+        .arg("--workspace-root")
+        .arg(config.workspace_root)
+        .arg("--state-dir")
+        .arg(config.state_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if config.managed_push {
+        command.arg("--managed-push");
+    }
+    if let Err(error) = command.spawn() {
+        eprintln!("Warning: failed to start T3 admin portal: {error}");
+        return;
+    }
+    for _ in 0..30 {
+        thread::sleep(Duration::from_millis(100));
+        if std::net::TcpStream::connect(("127.0.0.1", config.portal_port)).is_ok() {
+            return;
+        }
+    }
+    eprintln!("Warning: T3 admin portal did not start in time");
+}
+
 fn is_valid_pair_admin_pin(pin: &str) -> bool {
     (4..=12).contains(&pin.len()) && pin.chars().all(|character| character.is_ascii_digit())
 }
@@ -460,10 +535,8 @@ fn check_available_updates(client: &Client) -> UpdateStatus {
         }
     });
 
-    let skills_available = read_cache_file(&skills_cache).and_then(|local| {
-        get_last_modified(client, SKILLS_URL)
-            .and_then(|remote| if local != remote { Some(remote) } else { None })
-    });
+    let skills_available = read_cache_file(&skills_cache)
+        .and_then(|local| get_last_modified(client, SKILLS_URL).filter(|remote| local != *remote));
 
     UpdateStatus {
         binary_available,
@@ -726,7 +799,7 @@ fn git_proxy_socket_path() -> PathBuf {
         .join(GIT_PROXY_SOCKET_NAME)
 }
 
-fn ensure_git_proxy(origin_url: &str) {
+fn ensure_git_proxy_single(origin_url: &str) {
     let socket_path = git_proxy_socket_path();
 
     if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
@@ -763,6 +836,39 @@ fn ensure_git_proxy(origin_url: &str) {
     }
 
     eprintln!("Warning: git-proxy did not start in time");
+}
+
+fn ensure_git_proxy_managed(workspace_root: &Path, state_dir: &Path) {
+    let socket_path = git_proxy_socket_path();
+    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+        return;
+    }
+
+    let exe = env::current_exe().expect("Could not get executable path");
+    let mut command = Command::new(&exe);
+    command
+        .arg("git-proxy")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--workspace-root")
+        .arg(workspace_root)
+        .arg("--state-dir")
+        .arg(state_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Err(error) = command.spawn() {
+        eprintln!("Warning: failed to start managed git-proxy: {error}");
+        return;
+    }
+
+    for _ in 0..30 {
+        thread::sleep(Duration::from_millis(100));
+        if socket_path.exists() {
+            return;
+        }
+    }
+    eprintln!("Warning: managed git-proxy did not start in time");
 }
 
 /// Without --allow-push a leftover dead socket would make the container's
@@ -899,19 +1005,25 @@ fn run_container(
     mount_workspace: bool,
     wrap: bool,
     allow_push: bool,
+    managed_push_state: Option<&Path>,
+    explicit_container_name: Option<&str>,
 ) {
     ensure_gh_proxy();
     ensure_clipboard_proxy();
 
-    match (allow_push, git_proxy::origin_url()) {
-        (true, Some(url)) => ensure_git_proxy(&url),
-        (true, None) => {
+    match (managed_push_state, allow_push, git_proxy::origin_url()) {
+        (Some(state_dir), true, _) => {
+            let workspace_root = env::current_dir().expect("Could not get current directory");
+            ensure_git_proxy_managed(&workspace_root, state_dir);
+        }
+        (None, true, Some(url)) => ensure_git_proxy_single(&url),
+        (None, true, None) => {
             eprintln!(
                 "Warning: --allow-push ignored, requires a git repository with an 'origin' remote"
             );
             remove_stale_git_proxy_socket();
         }
-        (false, _) => remove_stale_git_proxy_socket(),
+        (_, false, _) => remove_stale_git_proxy_socket(),
     }
 
     let ssh_proxy_config = load_ssh_proxy_config();
@@ -948,9 +1060,10 @@ fn run_container(
         }
     }
     cmd.args(["run", "--rm", "-it", "--init"]);
-    let container_name = wrap_container_name(&cwd);
-    if wrap {
-        cmd.arg("--name").arg(&container_name);
+    let default_container_name = wrap_container_name(&cwd);
+    let container_name = explicit_container_name.unwrap_or(&default_container_name);
+    if wrap || explicit_container_name.is_some() {
+        cmd.arg("--name").arg(container_name);
     }
     if quiet {
         cmd.arg("--quiet");
@@ -1051,6 +1164,10 @@ fn run_container(
 
 fn main() {
     let cli = Cli::parse();
+    if cli.t3_managed_push && !matches!(&cli.command, Some(Commands::T3code { .. })) {
+        eprintln!("Error: --t3-managed-push can only be used with the t3code command");
+        std::process::exit(2);
+    }
     let client = Client::new();
 
     let update_status = check_available_updates(&client);
@@ -1112,6 +1229,8 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                None,
+                None,
             );
         }
         Some(Commands::Install { target }) => {
@@ -1126,8 +1245,48 @@ fn main() {
         Some(Commands::GhProxy { socket }) => {
             gh_proxy::run(&socket);
         }
-        Some(Commands::GitProxy { socket, origin_url }) => {
-            git_proxy::run(&socket, &origin_url);
+        Some(Commands::GitProxy {
+            socket,
+            origin_url,
+            workspace_root,
+            state_dir,
+        }) => {
+            let mode = match (origin_url, workspace_root, state_dir) {
+                (Some(origin), None, None) => git_proxy::Mode::Single {
+                    repository: env::current_dir().expect("Could not get current directory"),
+                    origin,
+                },
+                (None, Some(workspace_root), Some(state_dir)) => git_proxy::Mode::Managed {
+                    workspace_root,
+                    state_dir,
+                },
+                _ => {
+                    eprintln!(
+                        "git-proxy requires either --origin-url or both --workspace-root and --state-dir"
+                    );
+                    std::process::exit(2);
+                }
+            };
+            git_proxy::run(&socket, mode);
+        }
+        Some(Commands::T3Admin {
+            port,
+            t3_port,
+            container_name,
+            t3_base_dir,
+            workspace_root,
+            state_dir,
+            managed_push,
+        }) => {
+            t3_admin::run(t3_admin::RunOptions {
+                portal_port: port,
+                t3_port,
+                container_name: &container_name,
+                t3_base_dir: &t3_base_dir,
+                workspace_root: &workspace_root,
+                state_dir: &state_dir,
+                managed_push,
+            });
         }
         Some(Commands::ClipboardProxy { socket }) => {
             clipboard_proxy::run(&socket);
@@ -1157,6 +1316,8 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                None,
+                None,
             );
         }
         Some(Commands::Codex { args }) => {
@@ -1177,6 +1338,8 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                None,
+                None,
             );
         }
         Some(Commands::Opencode { args }) => {
@@ -1197,6 +1360,8 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                None,
+                None,
             );
         }
         Some(Commands::T3code { args }) => {
@@ -1210,6 +1375,12 @@ fn main() {
                 eprintln!("T3CODE_PAIR_ADMIN_PIN must contain 4 to 12 digits");
                 std::process::exit(2);
             }
+            if cli.t3_managed_push && pair_admin_pin.is_none() {
+                eprintln!(
+                    "Error: --t3-managed-push requires T3CODE_PAIR_ADMIN_PIN so repositories can be approved"
+                );
+                std::process::exit(2);
+            }
             let pair_admin_port = pair_admin_pin.as_ref().map(|_| {
                 let mut excluded_ports = cli.ports.clone();
                 excluded_ports.push(port);
@@ -1218,17 +1389,35 @@ fn main() {
             let cwd = env::current_dir().expect("Could not get current directory");
             let instance_name = project_instance_name(&cwd);
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
+            let mut push_state_dir = managed_push::state_dir(&home_dir(), &instance_name);
+            if cli.t3_managed_push {
+                push_state_dir =
+                    managed_push::prepare_state_dir(&push_state_dir).unwrap_or_else(|error| {
+                        eprintln!("Error: could not prepare managed push state: {error}");
+                        std::process::exit(1);
+                    });
+                let canonical_workspace = fs::canonicalize(&cwd).unwrap_or_else(|error| {
+                    eprintln!("Error: could not resolve T3 workspace: {error}");
+                    std::process::exit(1);
+                });
+                if push_state_dir.starts_with(&canonical_workspace) {
+                    eprintln!(
+                        "Error: managed push state must be outside the agent-mounted T3 workspace"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let container_name = if cli.wrap {
+                wrap_container_name(&cwd)
+            } else {
+                format!("{}-t3-{}", wrap_container_name(&cwd), std::process::id())
+            };
 
             let t3_cmd = format!("t3code-register {}", args.join(" "));
 
             let mut ports = cli.ports.clone();
             if !ports.contains(&port) {
                 ports.push(port);
-            }
-            if let Some(pair_admin_port) = pair_admin_port
-                && !ports.contains(&pair_admin_port)
-            {
-                ports.push(pair_admin_port);
             }
             if port != T3CODE_PORT {
                 eprintln!(
@@ -1239,20 +1428,26 @@ fn main() {
             eprintln!("t3code available at http://localhost:{}", port);
             if let Some(pair_admin_port) = pair_admin_port {
                 eprintln!(
-                    "t3code pairing portal available at http://localhost:{}",
+                    "t3code admin portal available at http://localhost:{}",
                     pair_admin_port
                 );
+                ensure_t3_admin(&T3AdminConfig {
+                    portal_port: pair_admin_port,
+                    t3_port: port,
+                    container_name: &container_name,
+                    t3_base_dir: &instance_dir,
+                    workspace_root: &cwd,
+                    state_dir: &push_state_dir,
+                    managed_push: cli.t3_managed_push,
+                });
             }
 
-            let mut container_env = vec![
+            let container_env = vec![
                 format!("T3CODE_PORT={}", port),
                 format!("T3CODE_BASE_DIR={}", instance_dir),
             ];
-            if let (Some(pair_admin_port), Some(pair_admin_pin)) = (pair_admin_port, pair_admin_pin)
-            {
-                container_env.push(format!("T3CODE_PAIR_ADMIN_PORT={}", pair_admin_port));
-                container_env.push(format!("T3CODE_PAIR_ADMIN_PIN={}", pair_admin_pin));
-            }
+            let managed_state = cli.t3_managed_push.then_some(push_state_dir.as_path());
+            let named_container = pair_admin_pin.as_ref().map(|_| container_name.as_str());
 
             run_container(
                 &["bash", "-lc", &t3_cmd],
@@ -1265,7 +1460,9 @@ fn main() {
                 !cli.no_audio,
                 true,
                 cli.wrap,
-                cli.allow_push,
+                cli.allow_push || cli.t3_managed_push,
+                managed_state,
+                named_container,
             );
         }
         Some(Commands::WrapType {
@@ -1305,6 +1502,8 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                None,
+                None,
             );
         }
     }

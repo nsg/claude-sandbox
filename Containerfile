@@ -121,8 +121,7 @@ RUN chmod +x /usr/local/bin/git-proxy-client /usr/local/bin/git
 
 # t3code instance launcher
 COPY config/t3code-register.sh /usr/local/bin/t3code-register
-COPY config/t3code-pair-admin.js /usr/local/lib/t3code-pair-admin.js
-RUN chmod +x /usr/local/bin/t3code-register /usr/local/lib/t3code-pair-admin.js
+RUN chmod +x /usr/local/bin/t3code-register
 
 # Wrapped tmux session helpers (wrap, wrap-type, wrap-key, wrap-read)
 COPY config/wrap.sh /usr/local/bin/wrap

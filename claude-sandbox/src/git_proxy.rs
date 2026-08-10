@@ -2,18 +2,22 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{fs, process, thread};
 
 use crate::logging::log_line;
+use crate::managed_push;
 
 #[derive(Deserialize)]
 struct Request {
     args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -27,6 +31,18 @@ struct Response {
 enum Push {
     Branch,
     Tags,
+}
+
+#[derive(Clone, Debug)]
+pub enum Mode {
+    Single {
+        repository: PathBuf,
+        origin: String,
+    },
+    Managed {
+        workspace_root: PathBuf,
+        state_dir: PathBuf,
+    },
 }
 
 fn parse_push_args(args: &[String]) -> Option<Push> {
@@ -130,8 +146,10 @@ fn trusted_credential_config() -> Vec<(String, String)> {
     trusted
 }
 
-fn denied_local_config() -> Result<Vec<String>, String> {
+fn denied_local_config(repository: &Path) -> Result<Vec<String>, String> {
     let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
         .args(["config", "--local", "--list", "-z", "--includes"])
         .output()
         .map_err(|e| format!("failed to run git config: {}", e))?;
@@ -150,15 +168,8 @@ fn denied_local_config() -> Result<Vec<String>, String> {
 }
 
 pub fn origin_url() -> Option<String> {
-    let output = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if url.is_empty() { None } else { Some(url) }
+    let cwd = std::env::current_dir().ok()?;
+    managed_push::origin_url_at(&cwd)
 }
 
 fn deny(stderr: String) -> Response {
@@ -169,7 +180,67 @@ fn deny(stderr: String) -> Response {
     }
 }
 
-fn handle_request(req: Request, expected_origin: &str, log: &Arc<Mutex<File>>) -> Response {
+fn resolve_request_repository(
+    req: &Request,
+    mode: &Mode,
+    log: &Arc<Mutex<File>>,
+) -> Result<(PathBuf, String), Response> {
+    match mode {
+        Mode::Single { repository, origin } => Ok((repository.clone(), origin.clone())),
+        Mode::Managed {
+            workspace_root,
+            state_dir,
+        } => {
+            let cwd = req.cwd.as_deref().ok_or_else(|| {
+                deny(
+                    "git-proxy: managed push request did not include a working directory"
+                        .to_string(),
+                )
+            })?;
+            let (repository_path, repository) =
+                managed_push::resolve_repository(workspace_root, cwd)
+                    .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
+            let approval = managed_push::read_approval(state_dir, &repository.relative_path)
+                .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
+
+            match approval {
+                Some(approval) if approval.repository.origin == repository.origin => {
+                    match managed_push::consume_once(state_dir, &approval) {
+                        Ok(true) => Ok((repository_path, repository.origin)),
+                        Ok(false) => Err(deny(
+                            "git-proxy: the one-time approval was already consumed; approve this repository again"
+                                .to_string(),
+                        )),
+                        Err(error) => Err(deny(format!("git-proxy: push refused: {error}"))),
+                    }
+                }
+                approval => {
+                    let previous = approval.map(|value| value.repository.origin);
+                    let id = managed_push::record_candidate(state_dir, &repository, previous.clone())
+                        .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
+                    let reason = if let Some(previous) = previous {
+                        format!("origin changed from {previous} to {}", repository.origin)
+                    } else {
+                        "repository is not approved".to_string()
+                    };
+                    log_line(
+                        log,
+                        &format!(
+                            "PENDING {} ({}; candidate {})",
+                            repository.relative_path, reason, id
+                        ),
+                    );
+                    Err(deny(format!(
+                        "git-proxy: push pending approval for '{}' ({})\nOpen the T3 admin portal, approve the repository, and retry.",
+                        repository.relative_path, repository.origin
+                    )))
+                }
+            }
+        }
+    }
+}
+
+fn handle_request(req: Request, mode: &Mode, log: &Arc<Mutex<File>>) -> Response {
     let cmd_str = req.args.join(" ");
 
     let push = match parse_push_args(&req.args) {
@@ -184,7 +255,29 @@ fn handle_request(req: Request, expected_origin: &str, log: &Arc<Mutex<File>>) -
         }
     };
 
-    match denied_local_config() {
+    let (repository, expected_origin) = match resolve_request_repository(&req, mode, log) {
+        Ok(repository) => repository,
+        Err(response) => return response,
+    };
+    let repository_label = repository.display();
+    // Keep the validated directory open and address it through procfs for all
+    // subsequent Git commands. Replacing the workspace path with a symlink
+    // cannot redirect this request after authorization.
+    let repository_handle = match File::open(&repository) {
+        Ok(handle) => handle,
+        Err(error) => {
+            return deny(format!(
+                "git-proxy: could not open approved repository: {error}"
+            ));
+        }
+    };
+    let repository_command_path = PathBuf::from(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        repository_handle.as_raw_fd()
+    ));
+
+    match denied_local_config(&repository_command_path) {
         Ok(keys) if keys.is_empty() => {}
         Ok(keys) => {
             let list = keys.join(", ");
@@ -205,7 +298,7 @@ fn handle_request(req: Request, expected_origin: &str, log: &Arc<Mutex<File>>) -
         }
     }
 
-    match origin_url() {
+    match managed_push::origin_url_at(&repository_command_path) {
         Some(url) if url == expected_origin => {}
         current => {
             let now = current.unwrap_or_else(|| "<unset>".to_string());
@@ -224,11 +317,15 @@ fn handle_request(req: Request, expected_origin: &str, log: &Arc<Mutex<File>>) -
         }
     }
 
-    log_line(log, &format!("ALLOWED git {}", cmd_str));
+    log_line(
+        log,
+        &format!("ALLOWED git {} ({})", cmd_str, repository_label),
+    );
 
     // -c has command-line precedence, so these pins survive even a raced
     // rewrite of the workspace .git/config after the audit above.
     let mut cmd = Command::new("git");
+    cmd.current_dir(&repository_command_path);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.args([
         "-c",
@@ -251,14 +348,20 @@ fn handle_request(req: Request, expected_origin: &str, log: &Arc<Mutex<File>>) -
     if push == Push::Tags {
         cmd.arg("--tags");
     }
-    // Explicit remote: ignores remote.pushDefault / branch.*.pushRemote,
-    // so the audited+pinned origin is the only possible destination.
-    cmd.arg("origin");
+    // Use the snapshotted URL itself. Passing the remote name here would let
+    // an agent race a rewrite of remote.origin.url after the audit above.
+    cmd.arg(&expected_origin);
 
     match cmd.output() {
         Ok(output) => {
             let exit_code = output.status.code().unwrap_or(1);
-            log_line(log, &format!("EXIT    git {} -> {}", cmd_str, exit_code));
+            log_line(
+                log,
+                &format!(
+                    "EXIT    git {} ({}) -> {}",
+                    cmd_str, repository_label, exit_code
+                ),
+            );
             Response {
                 exit_code,
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -272,7 +375,7 @@ fn handle_request(req: Request, expected_origin: &str, log: &Arc<Mutex<File>>) -
     }
 }
 
-pub fn run(socket_path: &str, origin: &str) {
+pub fn run(socket_path: &str, mode: Mode) {
     let path = Path::new(socket_path);
 
     // Remove stale socket if it exists
@@ -306,10 +409,7 @@ pub fn run(socket_path: &str, origin: &str) {
         });
     let log = Arc::new(Mutex::new(log_file));
 
-    log_line(
-        &log,
-        &format!("listening on {} (origin: {})", socket_path, origin),
-    );
+    log_line(&log, &format!("listening on {} ({mode:?})", socket_path));
 
     // Watchdog: exit when parent process (podman after exec) dies.
     // After exec(), our ppid is podman's PID. When podman exits, ppid
@@ -335,12 +435,12 @@ pub fn run(socket_path: &str, origin: &str) {
         }
     });
 
-    let origin = Arc::new(origin.to_string());
+    let mode = Arc::new(mode);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let log = Arc::clone(&log);
-                let origin = Arc::clone(&origin);
+                let mode = Arc::clone(&mode);
                 thread::spawn(move || {
                     let reader = BufReader::new(&stream);
                     let mut writer = &stream;
@@ -352,7 +452,7 @@ pub fn run(socket_path: &str, origin: &str) {
                             return;
                         }
                         let response = match serde_json::from_str::<Request>(&line) {
-                            Ok(req) => handle_request(req, &origin, &log),
+                            Ok(req) => handle_request(req, &mode, &log),
                             Err(e) => {
                                 log_line(&log, &format!("INVALID ({})", e));
                                 deny(format!("git-proxy: invalid request: {}", e))
@@ -378,6 +478,20 @@ mod tests {
         s.iter().map(|x| x.to_string()).collect()
     }
 
+    fn run_git(directory: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     // ── Push argument allowlist ────────────────────────────────────
 
     #[test]
@@ -391,6 +505,117 @@ mod tests {
             parse_push_args(&strs(&["push", "--tags"])),
             Some(Push::Tags)
         );
+    }
+
+    #[test]
+    fn managed_push_requires_approval_then_routes_to_repository() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "claude-sandbox-managed-push-{}-{nonce}",
+            std::process::id()
+        ));
+        let workspace = root.join("workspace");
+        let repository = workspace.join("project");
+        let remote = root.join("remote.git");
+        let state = root.join("state");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        run_git(&root, &["init", "--bare", remote.to_str().unwrap()]);
+        run_git(&root, &["init", repository.to_str().unwrap()]);
+        run_git(&repository, &["config", "user.name", "Test"]);
+        run_git(
+            &repository,
+            &["config", "user.email", "test@example.invalid"],
+        );
+        run_git(&repository, &["config", "push.default", "current"]);
+        fs::write(repository.join("file.txt"), "content\n").unwrap();
+        run_git(&repository, &["add", "file.txt"]);
+        run_git(&repository, &["commit", "-m", "initial"]);
+        run_git(
+            &repository,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join("proxy.log"))
+            .unwrap();
+        let log = Arc::new(Mutex::new(log_file));
+        let mode = Mode::Managed {
+            workspace_root: workspace.clone(),
+            state_dir: state.clone(),
+        };
+        let request = || Request {
+            args: strs(&["push"]),
+            cwd: Some("/workspace/project".to_string()),
+        };
+
+        let denied = handle_request(request(), &mode, &log);
+        assert_eq!(denied.exit_code, 1);
+        assert!(denied.stderr.contains("pending approval"));
+
+        let candidates = managed_push::list_candidates(&state).unwrap();
+        assert_eq!(candidates.len(), 1);
+        let (candidate_id, candidate) = &candidates[0];
+        managed_push::approve(
+            &state,
+            &candidate.repository,
+            managed_push::ApprovalScope::Persistent,
+        )
+        .unwrap();
+        managed_push::remove_candidate(&state, candidate_id).unwrap();
+
+        let allowed = handle_request(request(), &mode, &log);
+        assert_eq!(allowed.exit_code, 0, "{}", allowed.stderr);
+        let output = Command::new("git")
+            .arg("--git-dir")
+            .arg(&remote)
+            .args(["for-each-ref", "--format=%(refname)", "refs/heads/"])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("refs/heads/"));
+
+        run_git(&repository, &["config", "--unset", "push.default"]);
+        run_git(&repository, &["config", "branch.master.remote", "origin"]);
+        run_git(
+            &repository,
+            &["config", "branch.master.merge", "refs/heads/master"],
+        );
+        fs::write(repository.join("file.txt"), "second\n").unwrap();
+        run_git(&repository, &["commit", "-am", "second"]);
+        let simple_push = handle_request(request(), &mode, &log);
+        assert_eq!(simple_push.exit_code, 0, "{}", simple_push.stderr);
+
+        managed_push::revoke(&state, &candidate.repository.relative_path).unwrap();
+        managed_push::approve(
+            &state,
+            &candidate.repository,
+            managed_push::ApprovalScope::Once,
+        )
+        .unwrap();
+        let one_time = handle_request(request(), &mode, &log);
+        assert_eq!(one_time.exit_code, 0, "{}", one_time.stderr);
+        assert!(
+            managed_push::read_approval(&state, &candidate.repository.relative_path)
+                .unwrap()
+                .is_none()
+        );
+        let consumed = handle_request(request(), &mode, &log);
+        assert!(consumed.stderr.contains("pending approval"));
+
+        std::os::unix::fs::symlink(&root, workspace.join("escape")).unwrap();
+        let escaped = managed_push::resolve_repository(&workspace, "/workspace/escape");
+        assert!(
+            escaped
+                .unwrap_err()
+                .contains("escapes the mounted workspace")
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
