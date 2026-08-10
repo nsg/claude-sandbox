@@ -40,6 +40,19 @@ struct ExtCommandDef {
 const COMMANDS: &[CommandDef] = &[
     // ── Read commands ──────────────────────────────────────────────
     CommandDef {
+        group: "auth",
+        subcommand: "status",
+        is_write: false,
+        allowed_flags: &[
+            "--active",
+            "-a",
+            "--hostname",
+            "--json",
+            "--jq",
+            "--template",
+        ],
+    },
+    CommandDef {
         group: "pr",
         subcommand: "list",
         is_write: false,
@@ -182,6 +195,28 @@ const COMMANDS: &[CommandDef] = &[
         ],
     },
     CommandDef {
+        group: "repo",
+        subcommand: "list",
+        is_write: false,
+        allowed_flags: &[
+            "--archived",
+            "--fork",
+            "--jq",
+            "-q",
+            "--json",
+            "--language",
+            "-l",
+            "--limit",
+            "-L",
+            "--no-archived",
+            "--source",
+            "--template",
+            "-t",
+            "--topic",
+            "--visibility",
+        ],
+    },
+    CommandDef {
         group: "release",
         subcommand: "list",
         is_write: false,
@@ -261,6 +296,223 @@ const COMMANDS: &[CommandDef] = &[
             "--attempt",
             "--repo",
             "-R",
+        ],
+    },
+    CommandDef {
+        group: "workflow",
+        subcommand: "list",
+        is_write: false,
+        allowed_flags: &[
+            "--all",
+            "-a",
+            "--jq",
+            "-q",
+            "--json",
+            "--limit",
+            "-L",
+            "--template",
+            "-t",
+            "--repo",
+            "-R",
+        ],
+    },
+    CommandDef {
+        group: "search",
+        subcommand: "code",
+        is_write: false,
+        allowed_flags: &[
+            "--extension",
+            "--filename",
+            "--jq",
+            "-q",
+            "--json",
+            "--language",
+            "--limit",
+            "-L",
+            "--match",
+            "--owner",
+            "--repo",
+            "-R",
+            "--size",
+            "--template",
+            "-t",
+            "--web",
+            "-w",
+        ],
+    },
+    CommandDef {
+        group: "search",
+        subcommand: "commits",
+        is_write: false,
+        allowed_flags: &[
+            "--author",
+            "--author-date",
+            "--author-email",
+            "--author-name",
+            "--committer",
+            "--committer-date",
+            "--committer-email",
+            "--committer-name",
+            "--hash",
+            "--jq",
+            "-q",
+            "--json",
+            "--limit",
+            "-L",
+            "--merge",
+            "--order",
+            "--owner",
+            "--parent",
+            "--repo",
+            "-R",
+            "--sort",
+            "--template",
+            "-t",
+            "--tree",
+            "--visibility",
+            "--web",
+            "-w",
+        ],
+    },
+    CommandDef {
+        group: "search",
+        subcommand: "issues",
+        is_write: false,
+        allowed_flags: &[
+            "--app",
+            "--archived",
+            "--assignee",
+            "--author",
+            "--closed",
+            "--commenter",
+            "--comments",
+            "--created",
+            "--include-prs",
+            "--interactions",
+            "--involves",
+            "--jq",
+            "-q",
+            "--json",
+            "--label",
+            "--language",
+            "--limit",
+            "-L",
+            "--locked",
+            "--match",
+            "--mentions",
+            "--milestone",
+            "--no-assignee",
+            "--no-label",
+            "--no-milestone",
+            "--no-project",
+            "--order",
+            "--owner",
+            "--project",
+            "--reactions",
+            "--repo",
+            "-R",
+            "--sort",
+            "--state",
+            "--team-mentions",
+            "--template",
+            "-t",
+            "--updated",
+            "--visibility",
+            "--web",
+            "-w",
+        ],
+    },
+    CommandDef {
+        group: "search",
+        subcommand: "prs",
+        is_write: false,
+        allowed_flags: &[
+            "--app",
+            "--archived",
+            "--assignee",
+            "--author",
+            "--base",
+            "-B",
+            "--checks",
+            "--closed",
+            "--commenter",
+            "--comments",
+            "--created",
+            "--draft",
+            "--head",
+            "-H",
+            "--interactions",
+            "--involves",
+            "--jq",
+            "-q",
+            "--json",
+            "--label",
+            "--language",
+            "--limit",
+            "-L",
+            "--locked",
+            "--match",
+            "--mentions",
+            "--merged",
+            "--merged-at",
+            "--milestone",
+            "--no-assignee",
+            "--no-label",
+            "--no-milestone",
+            "--no-project",
+            "--order",
+            "--owner",
+            "--project",
+            "--reactions",
+            "--repo",
+            "-R",
+            "--review",
+            "--review-requested",
+            "--reviewed-by",
+            "--sort",
+            "--state",
+            "--team-mentions",
+            "--template",
+            "-t",
+            "--updated",
+            "--visibility",
+            "--web",
+            "-w",
+        ],
+    },
+    CommandDef {
+        group: "search",
+        subcommand: "repos",
+        is_write: false,
+        allowed_flags: &[
+            "--archived",
+            "--created",
+            "--followers",
+            "--forks",
+            "--good-first-issues",
+            "--help-wanted-issues",
+            "--include-forks",
+            "--jq",
+            "-q",
+            "--json",
+            "--language",
+            "--license",
+            "--limit",
+            "-L",
+            "--match",
+            "--number-topics",
+            "--order",
+            "--owner",
+            "--size",
+            "--sort",
+            "--stars",
+            "--template",
+            "-t",
+            "--topic",
+            "--updated",
+            "--visibility",
+            "--web",
+            "-w",
         ],
     },
     // ── Write commands (no --repo/-R, no --body-file/-F) ───────────
@@ -892,6 +1144,10 @@ fn maybe_help(args: &[String]) -> Option<String> {
 }
 
 fn reject_reason(args: &[String]) -> Option<String> {
+    if args.len() == 1 && args[0] == "--version" {
+        return None;
+    }
+
     if args.len() < 2 {
         return Some(format!("command not allowed: gh {}", args.join(" ")));
     }
@@ -1083,6 +1339,9 @@ mod tests {
 
     #[test]
     fn test_read_commands_allowed() {
+        assert!(reject_reason(&strs(&["--version"])).is_none());
+        assert!(reject_reason(&strs(&["auth", "status"])).is_none());
+        assert!(reject_reason(&strs(&["auth", "status", "--hostname", "github.com"])).is_none());
         assert!(reject_reason(&strs(&["pr", "list"])).is_none());
         assert!(reject_reason(&strs(&["pr", "list", "--state", "open"])).is_none());
         assert!(reject_reason(&strs(&["pr", "view", "123", "--json", "title"])).is_none());
@@ -1091,10 +1350,26 @@ mod tests {
         assert!(reject_reason(&strs(&["issue", "list", "--limit", "10"])).is_none());
         assert!(reject_reason(&strs(&["issue", "view", "42", "--comments"])).is_none());
         assert!(reject_reason(&strs(&["repo", "view", "--json", "description"])).is_none());
+        assert!(reject_reason(&strs(&["repo", "list", "--limit", "30"])).is_none());
         assert!(reject_reason(&strs(&["release", "list"])).is_none());
         assert!(reject_reason(&strs(&["release", "view", "v1.0"])).is_none());
         assert!(reject_reason(&strs(&["run", "list"])).is_none());
         assert!(reject_reason(&strs(&["run", "view", "12345", "--log"])).is_none());
+        assert!(reject_reason(&strs(&["workflow", "list", "--all"])).is_none());
+        assert!(reject_reason(&strs(&["search", "code", "panic", "--repo", "cli/cli"])).is_none());
+        assert!(
+            reject_reason(&strs(&["search", "commits", "fix", "--author", "octocat"])).is_none()
+        );
+        assert!(reject_reason(&strs(&["search", "issues", "bug", "--state", "open"])).is_none());
+        assert!(reject_reason(&strs(&["search", "prs", "fix", "--draft"])).is_none());
+        assert!(reject_reason(&strs(&["search", "repos", "cli", "--stars", ">100"])).is_none());
+    }
+
+    #[test]
+    fn test_auth_status_blocks_token_output() {
+        assert!(reject_reason(&strs(&["auth", "status", "--show-token"])).is_some());
+        assert!(reject_reason(&strs(&["auth", "status", "-t"])).is_some());
+        assert!(reject_reason(&strs(&["auth", "token"])).is_some());
     }
 
     #[test]
@@ -1243,6 +1518,9 @@ mod tests {
         assert!(h.contains("repo"));
         assert!(h.contains("release"));
         assert!(h.contains("run"));
+        assert!(h.contains("auth"));
+        assert!(h.contains("workflow"));
+        assert!(h.contains("search"));
 
         // Also triggered by -h, --help, help
         assert!(maybe_help(&strs(&["--help"])).is_some());
