@@ -14,11 +14,28 @@ and source `/run/claude-display.env`.
 
 ## Core loop: see → act → verify
 
-1. Launch the app in the background: `some-app &` then `sleep` briefly.
-2. Screenshot: `scrot /tmp/shot.png` (full screen) or `scrot -u /tmp/shot.png`
-   (focused window), then view the PNG with the Read tool.
-3. Act with xdotool using coordinates from the screenshot.
-4. Screenshot again to verify the result. Never assume an action worked.
+1. Launch the app in the background: `some-app &`.
+2. Wait for its window with `timeout 10 xdotool search --sync --name 'Title'`,
+   then inspect windows with `wmctrl -lpxG`.
+3. Check semantic controls first: `gui-tree --application AppName`.
+4. Focus the target with
+   `xdotool search --name 'Title' windowactivate --sync`, then capture it with
+   `scrot -u /tmp/shot.png` and view the PNG with the Read tool.
+5. Act through an exposed accessibility action or use xdotool coordinates.
+6. Screenshot again to verify the result. Never assume an action worked.
+
+## Accessibility tree
+
+- `gui-tree [--application NAME] [--depth N] [--json]` — inspect the
+  AT-SPI accessibility tree, including actions and screen bounds
+- `gui-tree --invoke PATH ACTION` — run an AT-SPI action advertised for a
+  node in the tree
+
+AT-SPI is more stable than coordinate clicks when the application exposes a
+useful accessibility tree. Chromium/Electron apps may need
+`--force-renderer-accessibility` when launched. Node paths can change as
+applications start, exit, or update their UI, so invoke an action immediately
+after reading a fresh tree and verify the result.
 
 ## xdotool cheat sheet
 
@@ -54,6 +71,7 @@ auto-selected since no GPU is passed through). Verify with
 - Focus first, then type: activate the target window before `xdotool type`.
 - For animations or timing bugs, record with
   `ffmpeg -f x11grab -i :99 -t 5 out.mp4` and extract frames.
-- Kill test apps by PID (`kill %1` or `pkill -x appname`). Do not use
+- Close apps with `wmctrl -c 'Title'`, or kill the PID/job started by the
+  launch shell. Do not use
   `pkill -f` with a pattern that appears in your own command line — it kills
   your own shell.

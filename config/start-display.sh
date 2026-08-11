@@ -34,6 +34,9 @@ if [ ! -S "$socket_path" ]; then
 fi
 
 export DISPLAY="$XVFB_DISPLAY"
+export NO_AT_BRIDGE=0
+export QT_ACCESSIBILITY=1
+export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
 
 # The Vulkan loader (and some Wayland/GTK code paths) want XDG_RUNTIME_DIR
 if [ -z "$XDG_RUNTIME_DIR" ]; then
@@ -56,6 +59,12 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     eval "$(dbus-launch --sh-syntax)" >>"$LOG_FILE" 2>&1
 fi
 
+# Ask GTK/Chromium applications to register with the AT-SPI accessibility bus.
+# The setting is per-user and idempotent; failures do not prevent X11 use.
+if command -v gsettings >/dev/null; then
+    gsettings set org.gnome.desktop.interface toolkit-accessibility true >>"$LOG_FILE" 2>&1 || true
+fi
+
 if ! pgrep -x openbox >/dev/null; then
     openbox >>"$LOG_FILE" 2>&1 &
 fi
@@ -63,6 +72,9 @@ fi
 {
     echo "export DISPLAY=$DISPLAY"
     echo "export XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR'"
+    echo "export NO_AT_BRIDGE=$NO_AT_BRIDGE"
+    echo "export QT_ACCESSIBILITY=$QT_ACCESSIBILITY"
+    echo "export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=$QT_LINUX_ACCESSIBILITY_ALWAYS_ON"
     [ -n "$DBUS_SESSION_BUS_ADDRESS" ] && echo "export DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS'"
     [ -n "$DBUS_SESSION_BUS_PID" ] && echo "export DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID"
 } > "$ENV_FILE"

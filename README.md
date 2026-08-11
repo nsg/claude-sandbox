@@ -18,7 +18,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 - **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
 - **MCP servers** — pre-configured Playwright with headless Chromium
-- **Virtual X display** — headless Xvfb + openbox on `DISPLAY=:99`, so agents can run and test GUI apps (screenshots via `scrot`, input via `xdotool`)
+- **Agent-controlled GUI** — a headless Xvfb virtual display with Openbox, window management, screenshots, input, and accessibility-tree tools for Claude and Codex
 - **Wrapped sessions** — run the command in a tmux session, inject keystrokes and read the screen from outside with `wrap-type` / `wrap-key` / `wrap-read`
 - **Auto-updates** — binary, skills, and container image updates are checked on every launch
 - **Port exposure** — forward ports from the container with `-p`
@@ -130,6 +130,34 @@ Pass without a value to unset a variable:
 ```bash
 claude-sandbox --host-env XDG_DATA_HOME
 ```
+
+### Agent-controlled GUI
+
+Claude and Codex can operate graphical applications on a headless virtual display. Every sandbox starts Xvfb with the lightweight Openbox window manager and a session D-Bus. Standard X11 tools operate directly on that session, while `gui-tree` exposes controls through AT-SPI:
+
+```bash
+# Start any installed graphical application
+mkdir -p .claude-sandbox/gui
+xterm >.claude-sandbox/gui/xterm.log 2>&1 &
+google-chrome --no-sandbox --force-renderer-accessibility https://example.com \
+  >.claude-sandbox/gui/chrome.log 2>&1 &
+
+# Discover and manage its windows
+wmctrl -lpxG
+timeout 10 xdotool search --sync --name 'Google Chrome'
+wmctrl -a 'Google Chrome'
+scrot -u .claude-sandbox/gui/chrome.png
+
+# Inspect named controls, actions, and bounds when the app supports AT-SPI
+gui-tree --application Chrome --depth 8
+# Invoke an advertised action using the path printed by the tree
+gui-tree --invoke 0/2/1 click
+
+# Close the window when finished
+wmctrl -c 'Google Chrome'
+```
+
+Store application logs and screenshots under `.claude-sandbox/gui/`. The accessibility tree is preferable to coordinate clicks when an application exposes it; invoke actions immediately after reading a fresh tree because node paths can change. Screenshot → input → screenshot remains the fallback.
 
 ### T3 Code admin portal
 
@@ -426,6 +454,7 @@ The container includes:
 - Node.js & npm
 - Rust (via rustup) + cargo-audit
 - Playwright MCP with Chromium and ffmpeg
+- Headless Xvfb virtual display with Openbox, AT-SPI/`gui-tree`, xdotool, wmctrl, and scrot
 - Zola
 - Starship prompt
 - Git, curl, jq, tree, build-essential, patchutils, unzip

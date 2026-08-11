@@ -43,6 +43,9 @@ RUN apt-get update && apt-get upgrade -y && \
         x11-utils \
         scrot \
         xterm \
+        at-spi2-core \
+        libglib2.0-bin \
+        python3-pyatspi \
         mesa-utils \
         vulkan-tools \
     && rm -rf /var/lib/apt/lists/*
@@ -132,7 +135,8 @@ RUN chmod +x /usr/local/bin/wrap && \
 
 # Virtual X display (Xvfb + openbox) for GUI app testing
 COPY config/start-display.sh /usr/local/bin/start-display
-RUN chmod +x /usr/local/bin/start-display && \
+COPY config/gui-tree.py /usr/local/bin/gui-tree
+RUN chmod +x /usr/local/bin/start-display /usr/local/bin/gui-tree && \
     echo '[ -f /run/claude-display.env ] && . /run/claude-display.env' > /etc/profile.d/claude-display.sh
 
 # Managed configs (merged at runtime by entrypoint)

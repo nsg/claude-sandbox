@@ -10,7 +10,7 @@
 
 ## GUI Apps / Virtual Display
 
-- A virtual X display runs on `DISPLAY=:99` — GUI apps work without a physical screen. Load the `gui` skill before testing GUI apps.
+- A virtual X display runs on `DISPLAY=:99` — GUI apps work without a physical screen. Launch applications normally; use `wmctrl`, `xdotool`, `scrot`, and `gui-tree` to manage windows, provide input, capture screenshots, and inspect controls. Load the `gui` skill before testing GUI apps.
 
 ## Clipboard / Screenshots
 
