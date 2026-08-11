@@ -233,7 +233,7 @@ The container includes a sandboxed `gh` proxy that gives Claude safe access to G
 | `issue` | `list`, `view` |
 | `repo` | `view` |
 | `release` | `list`, `view` |
-| `run` | `list`, `view` |
+| `run` | `list`, `view`, `watch` |
 
 **Write commands** are restricted to the workspace repository (no `--repo`/`-R` flag):
 

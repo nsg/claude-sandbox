@@ -299,6 +299,19 @@ const COMMANDS: &[CommandDef] = &[
         ],
     },
     CommandDef {
+        group: "run",
+        subcommand: "watch",
+        is_write: false,
+        allowed_flags: &[
+            "--exit-status",
+            "--interval",
+            "-i",
+            "--compact",
+            "--repo",
+            "-R",
+        ],
+    },
+    CommandDef {
         group: "workflow",
         subcommand: "list",
         is_write: false,
@@ -1355,6 +1368,8 @@ mod tests {
         assert!(reject_reason(&strs(&["release", "view", "v1.0"])).is_none());
         assert!(reject_reason(&strs(&["run", "list"])).is_none());
         assert!(reject_reason(&strs(&["run", "view", "12345", "--log"])).is_none());
+        assert!(reject_reason(&strs(&["run", "watch", "12345", "--exit-status"])).is_none());
+        assert!(reject_reason(&strs(&["run", "watch", "12345", "-i", "15"])).is_none());
         assert!(reject_reason(&strs(&["workflow", "list", "--all"])).is_none());
         assert!(reject_reason(&strs(&["search", "code", "panic", "--repo", "cli/cli"])).is_none());
         assert!(
