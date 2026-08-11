@@ -335,8 +335,12 @@ The container's `git` is a thin shim that forwards those two invocations to the 
 The workspace is agent-writable, so the host-side proxy treats the repository as untrusted when pushing:
 
 - Hooks are disabled (`core.hooksPath=/dev/null`, `--no-verify`), so a planted `.git/hooks/pre-push` never runs on the host
-- The `origin` URL is snapshotted at launch; the push is refused if `origin` has been repointed since, and the snapshotted URL is passed directly to Git (`remote.pushDefault` / `branch.*.pushRemote` are ignored)
-- The push is refused if the repo's local config sets keys the host would execute or that would redirect the push (`credential.*`, `core.sshCommand`, `core.fsmonitor`, `url.*`, `http.*`, `remote.origin.pushurl`, …)
+- The worktree, Git directory, and shared Git common directory must remain beneath the approved repository or workspace. The proxy keeps each directory open and runs Git through those pinned handles, so replacing a path or pointing `.git` outside the approved root cannot redirect an authorized request
+- The approved `origin` URL is pinned (at launch for `--allow-push` and by portal approval in managed mode). Each push uses it as the push URL of an unguessable, command-scoped remote; validated `origin` fetch mappings are attached so successful pushes refresh matching `refs/remotes/origin/*` tracking refs without persisting the temporary remote
+- The final Git process reads immutable snapshots of the audited system, global, local, and per-worktree config, so replacing a config file after validation cannot redirect an approved push
+- Host Git writes tracking changes into private refs. The container client then applies those updates with compare-and-swap and without dereferencing symbolic refs, so an agent-controlled nested ref symlink cannot turn tracking updates into host filesystem writes
+- The push is refused if repository config could execute host-side code or redirect the push (`credential.*`, `core.sshCommand`, `core.worktree`, `url.*`, `http.*`, `remote.*.pushurl`, `remote.pushDefault`, `branch.*.pushRemote`, …). `origin` fetch mappings outside `refs/remotes/origin/` are also rejected, and `push.autoSetupRemote` is suppressed for the bridged command
+- Lazy promisor fetches and recursive submodule pushes are disabled, preventing a push from initiating secondary network requests to repository-controlled remotes
 - Credential helpers are reset on the push command line and rebuilt from the host's system/global git config only, so a helper injected into the workspace repo's config is never executed
 - Terminal credential prompts are disabled (`GIT_TERMINAL_PROMPT=0`) — pushes that would require interactive auth fail fast instead of hanging
 

@@ -1253,7 +1253,8 @@ fn main() {
         }) => {
             let mode = match (origin_url, workspace_root, state_dir) {
                 (Some(origin), None, None) => git_proxy::Mode::Single {
-                    repository: env::current_dir().expect("Could not get current directory"),
+                    repository: git_proxy::repository_root()
+                        .expect("git-proxy could not resolve the repository root"),
                     origin,
                 },
                 (None, Some(workspace_root), Some(state_dir)) => git_proxy::Mode::Managed {
