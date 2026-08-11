@@ -67,6 +67,7 @@ struct PinnedRepository {
     _common_dir: PinnedDirectory,
     objects: PinnedDirectory,
     refs: PinnedDirectory,
+    allowed_root: PathBuf,
     git_dir_command_path: PathBuf,
     common_dir_command_path: PathBuf,
 }
@@ -258,6 +259,7 @@ fn pin_repository(repository: &Path, allowed_root: &Path) -> Result<PinnedReposi
         _common_dir: common_dir,
         objects,
         refs,
+        allowed_root,
         git_dir_command_path,
         common_dir_command_path,
     })
@@ -626,11 +628,57 @@ fn write_config_snapshot(
     Ok(())
 }
 
+fn reject_object_store_redirection(repository: &PinnedRepository) -> Result<(), String> {
+    for name in ["info/alternates", "info/http-alternates"] {
+        let path = repository.objects.command_path.join(name);
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(format!(
+                "repository objects directory declares {name}, which could redirect the push to object stores outside the workspace"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_escaping_ref_symlinks(directory: &Path, allowed_root: &Path) -> Result<(), String> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        format!(
+            "could not inspect refs directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("could not read refs entry: {error}"))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("could not inspect ref {}: {error}", path.display()))?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            // A dangling symlink resolves to no object and is harmless; only a
+            // symlink whose target escapes the workspace can leak host objects.
+            if let Ok(target) = fs::canonicalize(&path)
+                && !target.starts_with(allowed_root)
+            {
+                return Err(format!(
+                    "ref {} is a symlink escaping the workspace: {}",
+                    path.display(),
+                    target.display()
+                ));
+            }
+        } else if file_type.is_dir() {
+            reject_escaping_ref_symlinks(&path, allowed_root)?;
+        }
+    }
+    Ok(())
+}
+
 impl RepositoryConfigSnapshot {
     fn create(
         repository: &PinnedRepository,
         local_entries: &[(String, String)],
     ) -> Result<Self, String> {
+        reject_object_store_redirection(repository)?;
+        reject_escaping_ref_symlinks(&repository.refs.command_path, &repository.allowed_root)?;
         let directory = TemporaryDirectory::create()?;
         let system_entries = host_config_entries(repository, "--system");
         let global_entries = host_config_entries(repository, "--global");
@@ -1607,13 +1655,68 @@ mod tests {
             &single_mode(&repository, &remote),
             &test_log(&root),
         );
-        assert_eq!(pushed.exit_code, 0, "{}", pushed.stderr);
-        assert_eq!(pushed.tracking_updates.len(), 1);
-        assert_eq!(
-            git_stdout(&repository, &["rev-parse", "HEAD"]),
-            git_stdout(&remote, &["rev-parse", "refs/heads/main"])
-        );
+        assert_ne!(pushed.exit_code, 0);
+        let remote_head = Command::new("git")
+            .arg("-C")
+            .arg(&remote)
+            .args(["rev-parse", "--verify", "refs/heads/main"])
+            .output()
+            .unwrap();
+        assert!(!remote_head.status.success());
         assert!(!outside.join("main").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn objects_info_alternates_redirection_is_rejected() {
+        let root = test_root("objects-alternates");
+        let (repository, remote) = initialize_repository(&root);
+        run_git(&repository, &["config", "push.default", "current"]);
+        let info = repository.join(".git/objects/info");
+        fs::create_dir_all(&info).unwrap();
+        fs::write(
+            info.join("alternates"),
+            format!("{}\n", root.join("outside-objects").display()),
+        )
+        .unwrap();
+
+        let pushed = handle_request(
+            push_request(false),
+            &single_mode(&repository, &remote),
+            &test_log(&root),
+        );
+        assert_ne!(pushed.exit_code, 0);
+        let approved_head = Command::new("git")
+            .arg("-C")
+            .arg(&remote)
+            .args(["rev-parse", "--verify", "refs/heads/main"])
+            .output()
+            .unwrap();
+        assert!(!approved_head.status.success());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn escaping_ref_symlink_is_rejected() {
+        let root = test_root("escaping-ref-symlink");
+        let (repository, remote) = initialize_repository(&root);
+        run_git(&repository, &["config", "push.default", "current"]);
+        let outside = root.join("outside-ref");
+        fs::write(
+            &outside,
+            format!("{}\n", git_stdout(&repository, &["rev-parse", "HEAD"])),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, repository.join(".git/refs/heads/loot")).unwrap();
+
+        let pushed = handle_request(
+            push_request(false),
+            &single_mode(&repository, &remote),
+            &test_log(&root),
+        );
+        assert_ne!(pushed.exit_code, 0);
 
         fs::remove_dir_all(root).unwrap();
     }
