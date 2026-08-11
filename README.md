@@ -399,6 +399,7 @@ claude-sandbox install skills
 | `/opencode` | Delegate non-code work to open-weight models through opencode |
 | `/delegate` | Choose between Anthropic, OpenAI, and open-weight model pools |
 | `/consensus-review` | Run a cross-vendor code review and reconcile the findings |
+| `/sandbox-environment` | Describe the container environment and safe tool installation |
 
 Invoke skills manually with `/skill-name` inside Claude, `$skill-name` (or the `/skills` picker) inside Codex, and via the `skill` tool in opencode; all three also load skills on their own when a task matches a skill's description.
 
