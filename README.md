@@ -261,7 +261,7 @@ The container includes an SSH proxy that gives filtered SSH access without expos
 
 **How it works:** The SSH proxy is opt-in. When a non-empty SSH proxy config exists, `/usr/local/bin/ssh` inside the container forwards SSH invocations through the proxy. The host-side proxy validates each request against a typed rule set and only spawns the real `/usr/bin/ssh` if there's a match. Everything else is denied. SSH flags (like `-L`, `-D`, `-o`) are never accepted from the container.
 
-**Default config** is empty, so the SSH proxy is disabled by default and no SSH proxy process is started. To enable it, create a non-empty config at `~/.config/claude-sandbox/projects/<project>/ssh-proxy.json`. Once enabled, a convenience symlink is placed at `.claude-sandbox/ssh-proxy.json`.
+**Default config** is empty, so the SSH proxy is disabled by default and no SSH proxy process is started. To enable it, create a non-empty config at `~/.claude-sandbox/projects/<project>/ssh-proxy.json`. Once enabled, a convenience symlink is placed at `.claude-sandbox/ssh-proxy.json`.
 
 The config has three rule types:
 
