@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Full capability/cost ranking of every delegation target across the three budget pools (Anthropic/claude, OpenAI/codex, Ollama/opencode), with the tradeoffs behind each pick. Managed harness instructions carry routing good enough for the common case; use this skill when the choice is genuinely contested, when selecting a judge or cross-vendor review pair, when a pool is pressed, or when the user asks what should run where.
+description: Load before any piece of work big enough to hand off — a multi-step build, a broad sweep, a review worth a second opinion — and whenever the model or vendor pick is contested, needs a judge or a cross-vendor pair, or needs a fallback because the intended model is unavailable.
 ---
 
 # Model Selection for Delegated Work
