@@ -26,10 +26,31 @@ Scores 0–10, higher is better
 Runner mechanics: use a native same-vendor subagent when the harness provides
 one; otherwise load the `claude`, `codex`, or `opencode` skill for that CLI.
 
+## Live Headroom
+
+Affordability above is a baseline; it cannot say which pool is pressed today, and
+the best baseline is the wrong pick when that pool is the one running dry.
+
+`~/.claude/usage-report.sh` prints all three, legends its own symbols, and
+documents its flags under `--help`. It ships separately and is not on every host
+— test for it (`[[ -x ~/.claude/usage-report.sh ]]`), and without it select on
+the baseline and say the live numbers were unavailable, never guess.
+
+- **Skip it when the figures are already here.** A budget hook warns when a pool
+  is pressed and the status line carries the same numbers, so hook silence is
+  itself a reading. An earlier report in the conversation still holds — these
+  move over hours, not turns.
+- **Call it when it would change the plan.** Before a long run, a wide fan-out or
+  a multi-round review; when two pools fit equally; when a fallback crosses
+  vendors. Not before an ordinary delegation.
+- **Scheduling needs it most.** Queued work spends a quota unwatched, so read the
+  resets over the percentages — 95% resetting within the hour is safe to schedule
+  behind, 60% with six days left and a heavy job already queued is not.
+
 ## Selection Logic
 
 - **Three subscriptions, spent independently.** All the same shape — a quota refilling on its own clock: an Anthropic plan behind a native `Agent` or the `claude` CLI, an OpenAI one behind a native Codex worker or the `codex` CLI, and an Ollama one behind `opencode`, metered in GPU-time rather than tokens. One running dry says nothing about the other two; the work moves to whichever still has room rather than stopping.
-- **Affordability is one currency: headroom.** Not a dollar price — how much of a quota a run really eats, already reconciled across the three: how generous each plan is, and how many tokens the model spends reaching the same finish line. Codex wins on both, which is why `sol` outscores its Anthropic peers. Compare it freely across rows; it is a baseline, and the live numbers say which pool is pressed today.
+- **Affordability is one currency: headroom.** Not a dollar price — how much of a quota a run really eats, already reconciled across the three: how generous each plan is, and how many tokens the model spends reaching the same finish line. Codex wins on both, which is why `sol` outscores its Anthropic peers. Compare it freely across rows; it is a baseline, and the live numbers — see **Live Headroom** above — say which pool is pressed today.
 - **Fable is for judgment, not throughput.** Use it to arbitrate between competing designs, settle disagreements between other models' reviews, crack problems where taste is the bottleneck, and lay out the overall architecture of a project — then hand the individual parts to gpt-5.6 to implement. Every mechanical task run on Fable is a judging call unavailable later.
 - **Fable is the biggest brain; `sol` compensates with tool calls.** Size buys two things: the most knowledge carried unaided, and the reach to hold something large whole — a codebase, a mission, an objective — and see the pattern running through it. On anything lookup-able `sol` arrives at the same place by working the tools harder, on the roomier plan; what it cannot substitute for is the overview. Spend Fable where there is nothing to look up, or the thing is too big to see in pieces.
 - **Sol-high vs Opus is capability, not just cost.** Sol-high is the stronger implementer for parsers, concurrency, numerics, and other correctness-critical work (Science 10). Opus wins when the hard part is API shape, module boundaries, or idiomatic fit — but it does not have to justify itself to write ordinary code; while the plan has room, that is a fine use of it.
