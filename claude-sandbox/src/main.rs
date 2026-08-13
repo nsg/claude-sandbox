@@ -1069,7 +1069,7 @@ fn run_container(
         cmd.arg("--quiet");
     }
     if pull_image {
-        cmd.arg("--pull=newer");
+        cmd.arg("--pull=always");
     }
     if mount_workspace {
         cmd.arg("-v").arg(format!("{}:/workspace", cwd.display()));
