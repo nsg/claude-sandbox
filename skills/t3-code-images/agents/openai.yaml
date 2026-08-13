@@ -1,0 +1,4 @@
+interface:
+  display_name: "T3 Code Images"
+  short_description: "Show local images inline in T3 Code"
+  default_prompt: "Use $t3-code-images to display this local image inline in the T3 Code conversation."
