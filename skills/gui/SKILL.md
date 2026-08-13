@@ -12,6 +12,13 @@ apps (GTK, Qt, X11, headed Chrome) launch directly — no physical screen needed
 If `DISPLAY` is unset or apps fail to connect, run `start-display` (idempotent)
 and source `/run/claude-display.env`.
 
+## Browser-only tasks
+
+If the task only requires using or testing a website in a browser, use the
+Playwright MCP server instead. Use this skill when testing a native GUI app or
+when the task specifically requires a visible browser window, the X display,
+window-manager behavior, or system-level mouse and keyboard input.
+
 ## Core loop: see → act → verify
 
 1. Launch the app in the background: `some-app &`.
