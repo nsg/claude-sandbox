@@ -136,6 +136,23 @@ When multiple unrelated commits are needed, use the Task tool to spawn subagents
 
 **Never push unless the user explicitly asks.** Commit locally and stop there.
 
+### Require SSH
+
+Use the SSH protocol for every push. Never push through an `http://` or
+`https://` remote.
+
+Before pushing:
+
+1. Run `git remote get-url --push origin` and verify that it is an SSH URL,
+   such as `git@github.com:owner/repository.git` or
+   `ssh://git@host/owner/repository.git`.
+2. If the push URL uses HTTP(S), replace it with the repository's corresponding
+   SSH URL using `git remote set-url --push origin <ssh-url>`. Do not embed
+   credentials or tokens in a remote URL.
+3. Run `git remote get-url --push origin` again and proceed only after it shows
+   an SSH URL. If the correct SSH URL cannot be determined unambiguously, stop
+   and ask the user instead of pushing over HTTPS.
+
 When asked, note how the sandbox bridges pushes to the host:
 
 - Only the exact commands `git push` and `git push --tags` are bridged to the
