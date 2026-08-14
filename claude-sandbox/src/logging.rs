@@ -51,6 +51,7 @@ pub fn timestamp() -> String {
 
 pub fn log_line(log: &Arc<Mutex<File>>, message: &str) {
     if let Ok(mut f) = log.lock() {
-        let _ = writeln!(f, "{} {}", timestamp(), message);
+        let line = format!("{} {}\n", timestamp(), message);
+        let _ = f.write_all(line.as_bytes());
     }
 }

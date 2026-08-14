@@ -3,6 +3,8 @@ mod gh_proxy;
 mod git_proxy;
 mod logging;
 mod managed_push;
+mod proxy_log;
+mod proxy_socket;
 mod ssh_proxy;
 mod t3_admin;
 
@@ -13,15 +15,17 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::fs::{self, File, Permissions};
+use std::fs::{self, DirBuilder, File, Permissions};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::net::TcpListener;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::{thread, time::Duration};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tar::Archive;
 
 const SCRIPT_URL: &str =
@@ -36,6 +40,7 @@ const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
 const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
 const SSHD_CONFIG_FILE: &str = "sshd.json";
+const CONTAINER_PROXY_RUNTIME_DIR: &str = "/run/claude-sandbox";
 // Must match the default session name in config/wrap.sh.
 const WRAP_TMUX_SESSION: &str = "claude-sandbox";
 
@@ -144,12 +149,18 @@ enum Commands {
         /// Socket path (absolute)
         #[arg(long)]
         socket: String,
+        /// Persistent log path
+        #[arg(long)]
+        log: PathBuf,
     },
     /// Start the git push proxy (internal, spawned automatically)
     GitProxy {
         /// Socket path (absolute)
         #[arg(long)]
         socket: String,
+        /// Persistent log path
+        #[arg(long)]
+        log: PathBuf,
         /// Origin remote URL snapshotted at launch (single-repository mode)
         #[arg(long)]
         origin_url: Option<String>,
@@ -182,12 +193,18 @@ enum Commands {
         /// Socket path (absolute)
         #[arg(long)]
         socket: String,
+        /// Persistent log path
+        #[arg(long)]
+        log: PathBuf,
     },
     /// Start the SSH proxy (internal, spawned automatically)
     SshProxy {
         /// Socket path (absolute)
         #[arg(long)]
         socket: String,
+        /// Persistent log path
+        #[arg(long)]
+        log: PathBuf,
         /// Config as JSON string
         #[arg(long)]
         config_json: String,
@@ -708,184 +725,146 @@ fn git_config(key: &str) -> String {
         .unwrap_or_default()
 }
 
-fn gh_proxy_socket_path() -> PathBuf {
-    env::current_dir()
-        .expect("Could not get current directory")
-        .join(GH_PROXY_SUBDIR)
-        .join(GH_PROXY_SOCKET_NAME)
+fn proxy_log_path(filename: &str) -> Result<PathBuf, String> {
+    let cwd = env::current_dir().expect("Could not get current directory");
+    let directory = home_dir()
+        .join(".claude-sandbox/projects")
+        .join(project_instance_name(&cwd))
+        .join("logs");
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+        .map_err(|error| format!("could not create proxy log directory: {error}"))?;
+    fs::set_permissions(&directory, Permissions::from_mode(0o700))
+        .map_err(|error| format!("could not secure proxy log directory: {error}"))?;
+    Ok(directory.join(filename))
 }
 
-fn clipboard_proxy_socket_path() -> PathBuf {
-    env::current_dir()
-        .expect("Could not get current directory")
-        .join(GH_PROXY_SUBDIR)
-        .join(CLIPBOARD_PROXY_SOCKET_NAME)
+fn create_proxy_runtime_dir() -> Result<PathBuf, String> {
+    let base = home_dir().join(".claude-sandbox/runtime");
+    create_proxy_runtime_dir_at(&base)
 }
 
-fn ensure_gh_proxy() {
-    let socket_path = gh_proxy_socket_path();
+fn create_proxy_runtime_dir_at(base: &Path) -> Result<PathBuf, String> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(base)
+        .map_err(|error| format!("could not create proxy runtime directory: {error}"))?;
+    fs::set_permissions(base, Permissions::from_mode(0o700))
+        .map_err(|error| format!("could not secure proxy runtime directory: {error}"))?;
 
-    // If socket already exists and is connectable, proxy is running
-    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-        return;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for counter in 0..10 {
+        let path = base.join(format!("{}-{nonce}-{counter}", std::process::id()));
+        match DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("could not create proxy runtime: {error}")),
+        }
     }
-    // Stale socket, will be cleaned up by the proxy on start
+    Err("could not allocate a unique proxy runtime directory".to_string())
+}
 
-    // Spawn proxy as a background process
-    let exe = env::current_exe().expect("Could not get executable path");
-    let socket_str = socket_path.to_str().expect("Invalid socket path");
-    match Command::new(&exe)
-        .args(["gh-proxy", "--socket", socket_str])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+fn wait_for_proxy_ready<F>(
+    name: &str,
+    socket_path: &Path,
+    attempts: usize,
+    delay: Duration,
+    mut child_status: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Result<Option<ExitStatus>, String>,
+{
+    for attempt in 0..attempts {
+        if UnixStream::connect(socket_path).is_ok() {
+            return Ok(());
+        }
+        if let Some(status) = child_status()? {
+            return Err(format!("{name} exited before becoming ready ({status})"));
+        }
+        if attempt + 1 < attempts {
+            thread::sleep(delay);
+        }
+    }
+    Err(format!("{name} did not become ready in time"))
+}
+
+fn start_proxy(name: &str, socket_path: &Path, mut command: Command) -> Result<(), String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
-    {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Warning: failed to start gh-proxy: {}", e);
-            return;
-        }
-    }
+        .map_err(|error| format!("failed to start {name}: {error}"))?;
 
-    // Poll for socket to appear (100ms intervals, 3s timeout)
-    for _ in 0..30 {
-        thread::sleep(Duration::from_millis(100));
-        if socket_path.exists() {
-            return;
-        }
-    }
-
-    eprintln!("Warning: gh-proxy did not start in time");
+    wait_for_proxy_ready(name, socket_path, 50, Duration::from_millis(100), || {
+        child
+            .try_wait()
+            .map_err(|error| format!("failed to inspect {name}: {error}"))
+    })
 }
 
-fn ensure_clipboard_proxy() {
-    let socket_path = clipboard_proxy_socket_path();
-
-    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-        return;
-    }
-
-    let exe = env::current_exe().expect("Could not get executable path");
-    let socket_str = socket_path.to_str().expect("Invalid socket path");
-    match Command::new(&exe)
-        .args(["clipboard-proxy", "--socket", socket_str])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Warning: failed to start clipboard-proxy: {}", e);
-            return;
-        }
-    }
-
-    for _ in 0..30 {
-        thread::sleep(Duration::from_millis(100));
-        if socket_path.exists() {
-            return;
-        }
-    }
-
-    eprintln!("Warning: clipboard-proxy did not start in time");
+fn ensure_gh_proxy(runtime_dir: &Path) -> Result<(), String> {
+    let socket_path = runtime_dir.join(GH_PROXY_SOCKET_NAME);
+    let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
+    command
+        .arg("gh-proxy")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--log")
+        .arg(proxy_log_path("gh-proxy.log")?);
+    start_proxy("gh-proxy", &socket_path, command)
 }
 
-fn git_proxy_socket_path() -> PathBuf {
-    env::current_dir()
-        .expect("Could not get current directory")
-        .join(GH_PROXY_SUBDIR)
-        .join(GIT_PROXY_SOCKET_NAME)
+fn ensure_clipboard_proxy(runtime_dir: &Path) -> Result<(), String> {
+    let socket_path = runtime_dir.join(CLIPBOARD_PROXY_SOCKET_NAME);
+    let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
+    command
+        .arg("clipboard-proxy")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--log")
+        .arg(proxy_log_path("clipboard-proxy.log")?);
+    start_proxy("clipboard-proxy", &socket_path, command)
 }
 
-fn ensure_git_proxy_single(origin_url: &str) {
-    let socket_path = git_proxy_socket_path();
-
-    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-        return;
-    }
-
-    let exe = env::current_exe().expect("Could not get executable path");
-    let socket_str = socket_path.to_str().expect("Invalid socket path");
-    match Command::new(&exe)
-        .args([
-            "git-proxy",
-            "--socket",
-            socket_str,
-            "--origin-url",
-            origin_url,
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Warning: failed to start git-proxy: {}", e);
-            return;
-        }
-    }
-
-    for _ in 0..30 {
-        thread::sleep(Duration::from_millis(100));
-        if socket_path.exists() {
-            return;
-        }
-    }
-
-    eprintln!("Warning: git-proxy did not start in time");
-}
-
-fn ensure_git_proxy_managed(workspace_root: &Path, state_dir: &Path) {
-    let socket_path = git_proxy_socket_path();
-    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-        return;
-    }
-
-    let exe = env::current_exe().expect("Could not get executable path");
-    let mut command = Command::new(&exe);
+fn ensure_git_proxy_single(runtime_dir: &Path, origin_url: &str) -> Result<(), String> {
+    let socket_path = runtime_dir.join(GIT_PROXY_SOCKET_NAME);
+    let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
     command
         .arg("git-proxy")
         .arg("--socket")
         .arg(&socket_path)
+        .arg("--log")
+        .arg(proxy_log_path("git-proxy.log")?)
+        .arg("--origin-url")
+        .arg(origin_url);
+    start_proxy("git-proxy", &socket_path, command)
+}
+
+fn ensure_git_proxy_managed(
+    runtime_dir: &Path,
+    workspace_root: &Path,
+    state_dir: &Path,
+) -> Result<(), String> {
+    let socket_path = runtime_dir.join(GIT_PROXY_SOCKET_NAME);
+    let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
+    command
+        .arg("git-proxy")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--log")
+        .arg(proxy_log_path("git-proxy.log")?)
         .arg("--workspace-root")
         .arg(workspace_root)
         .arg("--state-dir")
-        .arg(state_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Err(error) = command.spawn() {
-        eprintln!("Warning: failed to start managed git-proxy: {error}");
-        return;
-    }
-
-    for _ in 0..30 {
-        thread::sleep(Duration::from_millis(100));
-        if socket_path.exists() {
-            return;
-        }
-    }
-    eprintln!("Warning: managed git-proxy did not start in time");
-}
-
-/// Without --allow-push a leftover dead socket would make the container's
-/// git shim try (and confusingly fail) to bridge pushes — remove it. A live
-/// socket from a concurrent --allow-push session is left alone.
-fn remove_stale_git_proxy_socket() {
-    let socket_path = git_proxy_socket_path();
-    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_err() {
-        let _ = fs::remove_file(&socket_path);
-    }
-}
-
-fn ssh_proxy_socket_path() -> PathBuf {
-    env::current_dir()
-        .expect("Could not get current directory")
-        .join(GH_PROXY_SUBDIR)
-        .join(SSH_PROXY_SOCKET_NAME)
+        .arg(state_dir);
+    start_proxy("managed git-proxy", &socket_path, command)
 }
 
 fn ssh_proxy_host_config_path() -> PathBuf {
@@ -947,44 +926,19 @@ fn save_ssh_proxy_config(config: &ssh_proxy::Config) {
     }
 }
 
-fn ensure_ssh_proxy(config: &ssh_proxy::Config) {
-    let socket_path = ssh_proxy_socket_path();
-
-    if socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-        return;
-    }
-
+fn ensure_ssh_proxy(runtime_dir: &Path, config: &ssh_proxy::Config) -> Result<(), String> {
+    let socket_path = runtime_dir.join(SSH_PROXY_SOCKET_NAME);
     let config_json = serde_json::to_string(config).expect("Failed to serialize ssh-proxy config");
-    let exe = env::current_exe().expect("Could not get executable path");
-    let socket_str = socket_path.to_str().expect("Invalid socket path");
-    match Command::new(&exe)
-        .args([
-            "ssh-proxy",
-            "--socket",
-            socket_str,
-            "--config-json",
-            &config_json,
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Warning: failed to start ssh-proxy: {}", e);
-            return;
-        }
-    }
-
-    for _ in 0..30 {
-        thread::sleep(Duration::from_millis(100));
-        if socket_path.exists() {
-            return;
-        }
-    }
-
-    eprintln!("Warning: ssh-proxy did not start in time");
+    let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
+    command
+        .arg("ssh-proxy")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--log")
+        .arg(proxy_log_path("ssh-proxy.log")?)
+        .arg("--config-json")
+        .arg(config_json);
+    start_proxy("ssh-proxy", &socket_path, command)
 }
 
 struct SshConfig {
@@ -1008,33 +962,48 @@ fn run_container(
     managed_push_state: Option<&Path>,
     explicit_container_name: Option<&str>,
 ) {
-    ensure_gh_proxy();
-    ensure_clipboard_proxy();
+    let cwd = env::current_dir().expect("Could not get current directory");
+    let proxy_runtime_dir = create_proxy_runtime_dir().unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    });
+    let require_proxy = |result: Result<(), String>| {
+        result.unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        });
+    };
+
+    require_proxy(ensure_gh_proxy(&proxy_runtime_dir));
+    require_proxy(ensure_clipboard_proxy(&proxy_runtime_dir));
 
     match (managed_push_state, allow_push, git_proxy::origin_url()) {
         (Some(state_dir), true, _) => {
-            let workspace_root = env::current_dir().expect("Could not get current directory");
-            ensure_git_proxy_managed(&workspace_root, state_dir);
+            require_proxy(ensure_git_proxy_managed(
+                &proxy_runtime_dir,
+                &cwd,
+                state_dir,
+            ));
         }
-        (None, true, Some(url)) => ensure_git_proxy_single(&url),
+        (None, true, Some(url)) => {
+            require_proxy(ensure_git_proxy_single(&proxy_runtime_dir, &url));
+        }
         (None, true, None) => {
             eprintln!(
                 "Warning: --allow-push ignored, requires a git repository with an 'origin' remote"
             );
-            remove_stale_git_proxy_socket();
         }
-        (_, false, _) => remove_stale_git_proxy_socket(),
+        (_, false, _) => {}
     }
 
     let ssh_proxy_config = load_ssh_proxy_config();
     if ssh_proxy::is_empty(&ssh_proxy_config) {
         save_ssh_proxy_config(&ssh_proxy_config);
     } else {
-        ensure_ssh_proxy(&ssh_proxy_config);
+        require_proxy(ensure_ssh_proxy(&proxy_runtime_dir, &ssh_proxy_config));
     }
     ensure_ssh_proxy_symlink();
 
-    let cwd = env::current_dir().expect("Could not get current directory");
     let home = home_dir();
     let claude_dir = home.join(".claude");
     let codex_dir = home.join(".codex");
@@ -1075,6 +1044,12 @@ fn run_container(
         cmd.arg("-v").arg(format!("{}:/workspace", cwd.display()));
     }
     cmd.arg("-v")
+        .arg(format!(
+            "{}:{}:ro",
+            proxy_runtime_dir.display(),
+            CONTAINER_PROXY_RUNTIME_DIR
+        ))
+        .arg("-v")
         .arg(format!("{}:/root/.claude", claude_dir.display()))
         .arg("-v")
         .arg(format!("{}:/root/.codex", codex_dir.display()))
@@ -1162,8 +1137,85 @@ fn run_container(
     std::process::exit(1);
 }
 
+fn run_internal_command(command: Option<&Commands>) -> bool {
+    match command {
+        Some(Commands::GhProxy { socket, log }) => {
+            gh_proxy::run(socket, log);
+        }
+        Some(Commands::GitProxy {
+            socket,
+            log,
+            origin_url,
+            workspace_root,
+            state_dir,
+        }) => {
+            let mode = match (
+                origin_url.as_ref(),
+                workspace_root.as_ref(),
+                state_dir.as_ref(),
+            ) {
+                (Some(origin), None, None) => git_proxy::Mode::Single {
+                    repository: git_proxy::repository_root()
+                        .expect("git-proxy could not resolve the repository root"),
+                    origin: origin.clone(),
+                },
+                (None, Some(workspace_root), Some(state_dir)) => git_proxy::Mode::Managed {
+                    workspace_root: workspace_root.clone(),
+                    state_dir: state_dir.clone(),
+                },
+                _ => {
+                    eprintln!(
+                        "git-proxy requires either --origin-url or both --workspace-root and --state-dir"
+                    );
+                    std::process::exit(2);
+                }
+            };
+            git_proxy::run(socket, log, mode);
+        }
+        Some(Commands::T3Admin {
+            port,
+            t3_port,
+            container_name,
+            t3_base_dir,
+            workspace_root,
+            state_dir,
+            managed_push,
+        }) => {
+            t3_admin::run(t3_admin::RunOptions {
+                portal_port: *port,
+                t3_port: *t3_port,
+                container_name,
+                t3_base_dir,
+                workspace_root,
+                state_dir,
+                managed_push: *managed_push,
+            });
+        }
+        Some(Commands::ClipboardProxy { socket, log }) => {
+            clipboard_proxy::run(socket, log);
+        }
+        Some(Commands::SshProxy {
+            socket,
+            log,
+            config_json,
+        }) => {
+            let config: ssh_proxy::Config =
+                serde_json::from_str(config_json).unwrap_or_else(|error| {
+                    eprintln!("ssh-proxy: invalid config JSON: {error}");
+                    std::process::exit(1);
+                });
+            ssh_proxy::run(socket, log, &config);
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn main() {
     let cli = Cli::parse();
+    if run_internal_command(cli.command.as_ref()) {
+        return;
+    }
     if cli.t3_managed_push && !matches!(&cli.command, Some(Commands::T3code { .. })) {
         eprintln!("Error: --t3-managed-push can only be used with the t3code command");
         std::process::exit(2);
@@ -1242,67 +1294,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Commands::GhProxy { socket }) => {
-            gh_proxy::run(&socket);
-        }
-        Some(Commands::GitProxy {
-            socket,
-            origin_url,
-            workspace_root,
-            state_dir,
-        }) => {
-            let mode = match (origin_url, workspace_root, state_dir) {
-                (Some(origin), None, None) => git_proxy::Mode::Single {
-                    repository: git_proxy::repository_root()
-                        .expect("git-proxy could not resolve the repository root"),
-                    origin,
-                },
-                (None, Some(workspace_root), Some(state_dir)) => git_proxy::Mode::Managed {
-                    workspace_root,
-                    state_dir,
-                },
-                _ => {
-                    eprintln!(
-                        "git-proxy requires either --origin-url or both --workspace-root and --state-dir"
-                    );
-                    std::process::exit(2);
-                }
-            };
-            git_proxy::run(&socket, mode);
-        }
-        Some(Commands::T3Admin {
-            port,
-            t3_port,
-            container_name,
-            t3_base_dir,
-            workspace_root,
-            state_dir,
-            managed_push,
-        }) => {
-            t3_admin::run(t3_admin::RunOptions {
-                portal_port: port,
-                t3_port,
-                container_name: &container_name,
-                t3_base_dir: &t3_base_dir,
-                workspace_root: &workspace_root,
-                state_dir: &state_dir,
-                managed_push,
-            });
-        }
-        Some(Commands::ClipboardProxy { socket }) => {
-            clipboard_proxy::run(&socket);
-        }
-        Some(Commands::SshProxy {
-            socket,
-            config_json,
-        }) => {
-            let config: ssh_proxy::Config =
-                serde_json::from_str(&config_json).unwrap_or_else(|e| {
-                    eprintln!("ssh-proxy: invalid config JSON: {}", e);
-                    std::process::exit(1);
-                });
-            ssh_proxy::run(&socket, &config);
-        }
+        Some(
+            Commands::GhProxy { .. }
+            | Commands::GitProxy { .. }
+            | Commands::T3Admin { .. }
+            | Commands::ClipboardProxy { .. }
+            | Commands::SshProxy { .. },
+        ) => unreachable!("internal commands are dispatched before update checks"),
         Some(Commands::Run { command }) => {
             let cmd_str = command.join(" ");
             run_container(
@@ -1513,6 +1511,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn test_root(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "claude-sandbox-main-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn validates_pair_admin_pins() {
@@ -1529,5 +1541,70 @@ mod tests {
         let available = find_free_port_avoiding(45_000, &[45_000, 45_001]);
         assert_ne!(available, 45_000);
         assert_ne!(available, 45_001);
+    }
+
+    #[test]
+    fn proxy_readiness_waits_for_a_connectable_listener() {
+        let root = test_root("delayed-proxy");
+        fs::create_dir_all(&root).unwrap();
+        let socket = root.join("proxy.sock");
+        let listener_socket = socket.clone();
+        let listener = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            let listener = UnixListener::bind(listener_socket).unwrap();
+            listener.accept().unwrap();
+        });
+
+        wait_for_proxy_ready("test-proxy", &socket, 20, Duration::from_millis(10), || {
+            Ok(None)
+        })
+        .unwrap();
+        listener.join().unwrap();
+        fs::remove_file(&socket).unwrap();
+        fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn stale_socket_path_is_not_ready() {
+        let root = test_root("stale-proxy");
+        fs::create_dir_all(&root).unwrap();
+        let socket = root.join("proxy.sock");
+        drop(UnixListener::bind(&socket).unwrap());
+
+        let error = wait_for_proxy_ready("test-proxy", &socket, 1, Duration::ZERO, || Ok(None))
+            .unwrap_err();
+        assert!(error.contains("did not become ready"));
+        fs::remove_file(&socket).unwrap();
+        fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn proxy_readiness_reports_an_early_child_exit() {
+        let socket = test_root("exited-proxy").join("proxy.sock");
+        let error = wait_for_proxy_ready("test-proxy", &socket, 1, Duration::ZERO, || {
+            Ok(Some(ExitStatus::from_raw(7 << 8)))
+        })
+        .unwrap_err();
+        assert!(error.contains("exit status: 7"));
+    }
+
+    #[test]
+    fn proxy_runtime_directories_are_private_and_unique() {
+        let root = test_root("runtime");
+        let first = create_proxy_runtime_dir_at(&root).unwrap();
+        let second = create_proxy_runtime_dir_at(&root).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::remove_dir(first).unwrap();
+        fs::remove_dir(second).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 }

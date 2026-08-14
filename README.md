@@ -253,6 +253,8 @@ A session started with `claude-sandbox --wrap` uses the default name `claude-san
 
 The container includes a sandboxed `gh` proxy that gives Claude safe access to GitHub without exposing your credentials directly. The proxy runs on the host and communicates with the container over a Unix socket.
 
+Each launch gets a private set of host proxy sockets, mounted read-only at `/run/claude-sandbox` inside that container. The launcher waits until every enabled proxy accepts connections and aborts startup if one fails, preventing stale sockets or another session's permissions from being reused. Proxy logs live in private host-side project state under `~/.claude-sandbox/projects/<project>/logs/`.
+
 **Read commands** work against any repository:
 
 | Group | Commands |
@@ -279,7 +281,7 @@ The container includes a sandboxed `gh` proxy that gives Claude safe access to G
 | `gh ext milestone-create <title>` | Create a milestone (supports `--description`, `--due-on`) |
 | `gh ext milestone-list` | List milestones (supports `--state open\|closed\|all`) |
 
-All commands are flag-validated against a strict allowlist. Every request is logged to `.claude-sandbox/gh-proxy.log`.
+All commands are flag-validated against a strict allowlist. Every request is logged to `~/.claude-sandbox/projects/<project>/logs/gh-proxy.log`.
 
 Run `gh -h` inside the container to see available commands.
 
@@ -334,10 +336,10 @@ Each entry is a `user@host` destination. Any remote command is allowed (but a co
 
 ### Discovering what to allow
 
-After the SSH proxy is enabled, all proxy requests are logged to `.claude-sandbox/ssh-proxy.log`:
+After the SSH proxy is enabled, all proxy requests are logged to `~/.claude-sandbox/projects/<project>/logs/ssh-proxy.log`:
 
 ```bash
-grep DENIED .claude-sandbox/ssh-proxy.log
+grep DENIED ~/.claude-sandbox/projects/*/logs/ssh-proxy.log
 
 # 2026-04-26T12:00:01Z DENIED  git@gitlab.com git-receive-pack '/org/repo.git'
 # 2026-04-26T12:05:30Z DENIED  deploy@prod.example.com uptime
@@ -372,7 +374,7 @@ The workspace is agent-writable, so the host-side proxy treats the repository as
 - Credential helpers are reset on the push command line and rebuilt from the host's system/global git config only, so a helper injected into the workspace repo's config is never executed
 - Terminal credential prompts are disabled (`GIT_TERMINAL_PROMPT=0`) — pushes that would require interactive auth fail fast instead of hanging
 
-The grant applies to that launch only and is never persisted — start the next session without the flag and pushes are off again. Every request is logged to `.claude-sandbox/git-proxy.log`.
+The grant applies to that launch only and is never persisted — start the next session without the flag and pushes are off again. Every request is logged to `~/.claude-sandbox/projects/<project>/logs/git-proxy.log`.
 
 `--allow-push` requires the working directory to be a git repository with an `origin` remote.
 

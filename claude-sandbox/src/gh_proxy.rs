@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions, Permissions};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use std::{fs, process, thread};
+
+use crate::{proxy_log, proxy_socket};
 
 #[derive(Deserialize)]
 struct Request {
@@ -1251,35 +1251,20 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>) -> Response {
     }
 }
 
-pub fn run(socket_path: &str) {
+pub fn run(socket_path: &str, log_path: &Path) {
     let path = Path::new(socket_path);
+    let log_file = proxy_log::open(log_path).unwrap_or_else(|e| {
+        eprintln!("gh-proxy: failed to open log {}: {}", log_path.display(), e);
+        std::process::exit(1);
+    });
+    let log = Arc::new(Mutex::new(log_file));
 
-    // Remove stale socket if it exists
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-
-    // Ensure parent directory exists with owner-only permissions
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-        let _ = fs::set_permissions(parent, Permissions::from_mode(0o700));
-    }
-
-    let listener = UnixListener::bind(path).unwrap_or_else(|e| {
+    let bound = proxy_socket::bind(path).unwrap_or_else(|e| {
         eprintln!("gh-proxy: failed to bind {}: {}", socket_path, e);
         std::process::exit(1);
     });
-
-    let log_path = path.with_file_name("gh-proxy.log");
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .unwrap_or_else(|e| {
-            eprintln!("gh-proxy: failed to open log {}: {}", log_path.display(), e);
-            std::process::exit(1);
-        });
-    let log = Arc::new(Mutex::new(log_file));
+    let listener = bound.listener;
+    let socket_identity = bound.identity;
 
     log_line(&log, &format!("listening on {}", socket_path));
 
@@ -1287,7 +1272,7 @@ pub fn run(socket_path: &str) {
     // After exec(), our ppid is podman's PID. When podman exits, ppid
     // becomes 1 (init). Poll every 2s and clean up when that happens.
     let parent_pid = std::os::unix::process::parent_id();
-    let watchdog_socket = socket_path.to_string();
+    let watchdog_socket = socket_identity.clone();
     let watchdog_log = Arc::clone(&log);
     thread::spawn(move || {
         loop {
@@ -1301,7 +1286,7 @@ pub fn run(socket_path: &str) {
                         parent_pid, current_ppid
                     ),
                 );
-                let _ = fs::remove_file(&watchdog_socket);
+                let _ = watchdog_socket.remove_if_owned();
                 process::exit(0);
             }
         }

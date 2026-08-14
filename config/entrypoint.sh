@@ -10,7 +10,7 @@ if [ -n "$GIT_USER_EMAIL" ]; then
 fi
 
 # Use SSH proxy for git remote operations (if proxy socket exists)
-if [ -S /workspace/.claude-sandbox/ssh-proxy.sock ]; then
+if [ -S /run/claude-sandbox/ssh-proxy.sock ] || [ -S /workspace/.claude-sandbox/ssh-proxy.sock ]; then
     git config --global core.sshCommand "/usr/local/bin/ssh"
 fi
 
