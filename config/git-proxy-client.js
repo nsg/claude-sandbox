@@ -3,8 +3,12 @@
 
 const net = require("net");
 const { spawnSync } = require("child_process");
+const fs = require("fs");
 
-const SOCKET_PATH = "/workspace/.claude-sandbox/git-proxy.sock";
+const RUNTIME_DIR = "/run/claude-sandbox";
+const SOCKET_PATH = fs.existsSync(RUNTIME_DIR)
+  ? `${RUNTIME_DIR}/git-proxy.sock`
+  : "/workspace/.claude-sandbox/git-proxy.sock";
 
 const args = process.argv.slice(2);
 const request = JSON.stringify({ args, cwd: process.cwd() }) + "\n";

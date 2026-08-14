@@ -2,8 +2,12 @@
 "use strict";
 
 const net = require("net");
+const fs = require("fs");
 
-const SOCKET_PATH = "/workspace/.claude-sandbox/gh-proxy.sock";
+const RUNTIME_DIR = "/run/claude-sandbox";
+const SOCKET_PATH = fs.existsSync(RUNTIME_DIR)
+  ? `${RUNTIME_DIR}/gh-proxy.sock`
+  : "/workspace/.claude-sandbox/gh-proxy.sock";
 
 const args = process.argv.slice(2);
 const request = JSON.stringify({ args }) + "\n";

@@ -3,8 +3,12 @@
 
 const net = require("net");
 const path = require("path");
+const fs = require("fs");
 
-const SOCKET_PATH = "/workspace/.claude-sandbox/clipboard-proxy.sock";
+const RUNTIME_DIR = "/run/claude-sandbox";
+const SOCKET_PATH = fs.existsSync(RUNTIME_DIR)
+  ? `${RUNTIME_DIR}/clipboard-proxy.sock`
+  : "/workspace/.claude-sandbox/clipboard-proxy.sock";
 
 const invocation = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
