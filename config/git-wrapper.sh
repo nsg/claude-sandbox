@@ -3,7 +3,11 @@
 # push proxy when it is enabled (claude-sandbox --allow-push). Everything
 # else execs the real git in-place, so behavior is byte-for-byte identical.
 
-SOCKET=/workspace/.claude-sandbox/git-proxy.sock
+if [ -d /run/claude-sandbox ]; then
+    SOCKET=/run/claude-sandbox/git-proxy.sock
+else
+    SOCKET=/workspace/.claude-sandbox/git-proxy.sock
+fi
 
 if [ "$1" = "push" ]; then
     if [ -S "$SOCKET" ]; then
