@@ -8,6 +8,10 @@
 
 - You MUST load the `git` skill before any git operation that writes — staging, committing, pushing, rewriting history. Reading (`status`, `diff`, `log`) needs no skill.
 
+## Deployment
+
+- Do not add deployment configuration (Kubernetes manifests, Helm charts, or similar) to project repositories. Definitions that build artifacts, such as Dockerfiles, remain in scope.
+
 ## GUI Apps / Virtual Display
 
 - A virtual X display runs on `DISPLAY=:99` — GUI apps work without a physical screen. Launch applications normally; use `wmctrl`, `xdotool`, `scrot`, and `gui-tree` to manage windows, provide input, capture screenshots, and inspect controls. Load the `gui` skill before testing GUI apps.
