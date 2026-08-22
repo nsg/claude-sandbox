@@ -171,9 +171,13 @@ T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
 The host-side portal uses a distinct port, defaulting to 3774. Open the exact
 URL printed at startup and enter the PIN in its sign-in page. It creates
 five-minute, single-use pairing links on demand and automatically uses the
-running server's instance database. The PIN stays on the host, is neither
-generated nor stored by claude-sandbox, and must be provided again on every
-launch.
+running server's instance database. Open a generated link in the current
+browser, or copy it from the read-only field to another client such as the
+mobile app. Creating or copying the link does not consume it. For another
+device, open the admin portal through a hostname or IP address that device can
+reach before generating the link; a link created through `localhost` only
+works on the host. The PIN stays on the host, is neither generated nor stored
+by claude-sandbox, and must be provided again on every launch.
 
 For a long-running T3 service whose workspace contains several repositories,
 enable managed pushes:

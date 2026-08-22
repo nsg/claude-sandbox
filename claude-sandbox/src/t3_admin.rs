@@ -401,16 +401,7 @@ fn render_page(
     let action = if locked {
         r#"<section><h2>Unlock</h2><form method="post" action="/login"><label>Admin PIN<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,12}" minlength="4" maxlength="12" required autofocus></label><button>Unlock</button></form></section>"#.to_string()
     } else {
-        let mut sections = format!(
-            r#"<section><h2>Browser pairing</h2><p>Create a five-minute, single-use browser credential.</p><form method="post" action="/pair"><input type="hidden" name="csrf" value="{}"><button>Create pairing link</button></form>{}</section>"#,
-            config.csrf_token,
-            pair_url
-                .map(|url| format!(
-                    r#"<a class="pair" href="{}">Pair this browser ↗</a>"#,
-                    escape_html(url)
-                ))
-                .unwrap_or_default()
-        );
+        let mut sections = render_pairing_controls(&config.csrf_token, pair_url);
         if config.managed_push {
             sections.push_str(&render_push_controls(config));
         }
@@ -421,9 +412,24 @@ fn render_page(
         .unwrap_or_default();
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>T3 Code · Admin</title><style>
-:root{{--ink:#f4f1e8;--muted:#a4a49b;--line:#353630;--acid:#d8ff4f;--danger:#ff8c7e;--bg:#11120f}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;color:var(--ink);background:radial-gradient(circle at 85% 10%,#293315 0,transparent 30%),var(--bg);font:14px/1.55 "IBM Plex Mono","Courier New",monospace}}main{{width:min(920px,calc(100% - 32px));margin:auto;padding:48px 0 80px}}header{{border-top:1px solid var(--acid);padding-top:16px;margin-bottom:48px}}h1{{font:400 clamp(42px,8vw,76px)/.95 Georgia,serif;letter-spacing:-.05em;margin:18px 0}}h2{{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:var(--acid)}}section{{border:1px solid var(--line);padding:22px;margin:14px 0;background:#11120fd9}}p,small{{color:var(--muted)}}form{{display:inline-flex;gap:10px;align-items:end;margin:5px 8px 5px 0}}label{{display:grid;gap:7px}}input{{background:#090a08;color:var(--ink);border:1px solid var(--line);padding:12px}}button,.pair{{display:inline-block;border:0;background:var(--acid);color:#15170d;padding:12px 15px;font:700 11px/1 monospace;text-transform:uppercase;text-decoration:none;cursor:pointer}}button.secondary{{background:#34362e;color:var(--ink)}}button.danger{{background:#713a34;color:#fff}}.repo{{padding:16px 0;border-top:1px solid var(--line)}}.repo:first-of-type{{border-top:0}}code{{color:var(--ink);overflow-wrap:anywhere}}.meta{{display:grid;grid-template-columns:100px 1fr;gap:5px 12px}}.notice{{border:1px solid #6f752f;padding:13px;margin-bottom:14px}}.changed{{color:var(--danger)}}footer{{margin-top:42px;color:#67685f;font-size:10px;text-transform:uppercase;letter-spacing:.12em}}@media(max-width:600px){{.meta{{grid-template-columns:1fr}}form{{display:flex;flex-wrap:wrap}}}}
+:root{{--ink:#f4f1e8;--muted:#a4a49b;--line:#353630;--acid:#d8ff4f;--danger:#ff8c7e;--bg:#11120f}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;color:var(--ink);background:radial-gradient(circle at 85% 10%,#293315 0,transparent 30%),var(--bg);font:14px/1.55 "IBM Plex Mono","Courier New",monospace}}main{{width:min(920px,calc(100% - 32px));margin:auto;padding:48px 0 80px}}header{{border-top:1px solid var(--acid);padding-top:16px;margin-bottom:48px}}h1{{font:400 clamp(42px,8vw,76px)/.95 Georgia,serif;letter-spacing:-.05em;margin:18px 0}}h2{{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:var(--acid)}}section{{border:1px solid var(--line);padding:22px;margin:14px 0;background:#11120fd9}}p,small{{color:var(--muted)}}form{{display:inline-flex;gap:10px;align-items:end;margin:5px 8px 5px 0}}label{{display:grid;gap:7px}}input{{background:#090a08;color:var(--ink);border:1px solid var(--line);padding:12px}}button,.pair{{display:inline-block;border:0;background:var(--acid);color:#15170d;padding:12px 15px;font:700 11px/1 monospace;text-transform:uppercase;text-decoration:none;cursor:pointer}}button.secondary{{background:#34362e;color:var(--ink)}}button.danger{{background:#713a34;color:#fff}}.pair-result{{border-top:1px solid var(--line);margin-top:17px;padding-top:17px}}.pair-url{{width:100%;margin:5px 0 12px}}.repo{{padding:16px 0;border-top:1px solid var(--line)}}.repo:first-of-type{{border-top:0}}code{{color:var(--ink);overflow-wrap:anywhere}}.meta{{display:grid;grid-template-columns:100px 1fr;gap:5px 12px}}.notice{{border:1px solid #6f752f;padding:13px;margin-bottom:14px}}.changed{{color:var(--danger)}}footer{{margin-top:42px;color:#67685f;font-size:10px;text-transform:uppercase;letter-spacing:.12em}}@media(max-width:600px){{.meta{{grid-template-columns:1fr}}form{{display:flex;flex-wrap:wrap}}}}
 </style></head><body><main><header><small>Private control plane · {}</small><h1>T3 Code<br>Admin.</h1></header>{notice}{action}<footer>Host-owned administration surface</footer></main></body></html>"#,
         config.portal_port
+    )
+}
+
+fn render_pairing_controls(csrf_token: &str, pair_url: Option<&str>) -> String {
+    let result = pair_url
+        .map(|url| {
+            let url = escape_html(url);
+            format!(
+                r#"<div class="pair-result"><label>Pair another client<input class="pair-url" type="url" value="{url}" readonly></label><small>Copy this link to the client you want to pair. Creating or copying it does not pair this browser. The link must use an address that client can reach.</small><p><a class="pair" href="{url}">Pair this browser ↗</a></p></div>"#
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"<section><h2>Client pairing</h2><p>Create a five-minute, single-use client credential.</p><form method="post" action="/pair"><input type="hidden" name="csrf" value="{}"><button>Create pairing link</button></form>{result}</section>"#,
+        escape_html(csrf_token)
     )
 }
 
@@ -700,5 +706,34 @@ mod tests {
         assert!(valid_pin("123456789012"));
         assert!(!valid_pin("123"));
         assert!(!valid_pin("123x"));
+    }
+
+    #[test]
+    fn renders_transferable_pairing_link_without_opening_it() {
+        let html = render_pairing_controls(
+            "csrf-token",
+            Some("http://example.test:3773/pair?first=1&second=\"two\""),
+        );
+
+        assert!(html.contains("Pair another client"));
+        assert!(html.contains("readonly"));
+        assert!(html.contains(
+            "value=\"http://example.test:3773/pair?first=1&amp;second=&quot;two&quot;\""
+        ));
+        assert!(
+            html.contains(
+                "href=\"http://example.test:3773/pair?first=1&amp;second=&quot;two&quot;\""
+            )
+        );
+        assert!(html.contains("Creating or copying it does not pair this browser."));
+    }
+
+    #[test]
+    fn hides_pairing_result_before_a_link_is_created() {
+        let html = render_pairing_controls("csrf-token", None);
+
+        assert!(html.contains("Create pairing link"));
+        assert!(!html.contains("Pair another client"));
+        assert!(!html.contains("Pair this browser"));
     }
 }
