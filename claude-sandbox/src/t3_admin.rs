@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use std::{process, thread};
 
 use crate::managed_push::{self, ApprovalScope};
+use crate::usage_api;
 
 const MAX_REQUEST_BYTES: usize = 16_384;
 const MAX_BODY_BYTES: usize = 8_192;
@@ -123,6 +124,12 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
             return;
         }
     };
+
+    if request.method == "GET" && request.path == "/api/usage" {
+        let (usage, available) = usage_api::collect(&config.workspace_root);
+        send_json(&mut stream, if available { 200 } else { 503 }, &usage);
+        return;
+    }
 
     if request.method == "GET" && request.path == "/" {
         let authorized = is_authorized(&request, config);
@@ -628,6 +635,21 @@ fn send_html(stream: &mut TcpStream, status: u16, body: &str, extra_headers: &[(
     let _ = stream.write_all(body.as_bytes());
 }
 
+fn send_json(stream: &mut TcpStream, status: u16, body: &impl serde::Serialize) {
+    let body = serde_json::to_vec(body).unwrap_or_else(|_| b"{\"schema_version\":1}".to_vec());
+    let reason = match status {
+        200 => "OK",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    let headers = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(&body);
+}
+
 fn redirect(stream: &mut TcpStream, location: &str) {
     redirect_with_headers(stream, location, &[]);
 }
@@ -682,6 +704,8 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Shutdown;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn decodes_forms() {
@@ -735,5 +759,114 @@ mod tests {
         assert!(html.contains("Create pairing link"));
         assert!(!html.contains("Pair another client"));
         assert!(!html.contains("Pair this browser"));
+    }
+
+    #[test]
+    fn serves_usage_without_authentication_and_does_not_enable_cors() {
+        let workspace = temporary_workspace("empty");
+        std::fs::create_dir(&workspace).unwrap();
+        let config = test_config(&workspace);
+
+        let response = make_request(
+            &config,
+            "GET /api/usage?format=json HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        std::fs::remove_dir(&workspace).unwrap();
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n")
+                || response.starts_with("HTTP/1.1 503 Service Unavailable\r\n")
+        );
+        assert!(response.contains("Content-Type: application/json; charset=utf-8\r\n"));
+        assert!(response.contains("Cache-Control: no-store\r\n"));
+        assert!(response.contains("X-Content-Type-Options: nosniff\r\n"));
+        assert!(!response.contains("Access-Control-Allow-Origin"));
+        assert!(!response.contains("Set-Cookie"));
+        assert!(response.contains("\"schema_version\":1"));
+        assert!(response.contains("\"anthropic\""));
+        assert!(response.contains("\"openai\""));
+        assert!(response.contains("\"ollama\""));
+    }
+
+    #[test]
+    fn serves_sanitized_cached_usage() {
+        let workspace = temporary_workspace("cached");
+        let state = workspace.join(".claude-sandbox");
+        std::fs::create_dir_all(&state).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cache = serde_json::json!({
+            "fetched_at": now,
+            "data": {
+                "plan": "private-plan",
+                "windows": [{
+                    "name": "codex",
+                    "pct": 42,
+                    "window_minutes": 10080,
+                    "resets_at": now + 3600
+                }]
+            }
+        });
+        std::fs::write(
+            state.join("vendor-usage.codex.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let config = test_config(&workspace);
+
+        let response = make_request(
+            &config,
+            "GET /api/usage HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        std::fs::remove_dir_all(&workspace).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("\"openai\":{\"freshness\":\"fresh\""));
+        assert!(response.contains("\"used_percent\":42"));
+        assert!(!response.contains("private-plan"));
+        assert!(!response.contains("codex"));
+    }
+
+    fn temporary_workspace(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "claude-sandbox-usage-api-{label}-{}-{}",
+            process::id(),
+            random_token(8)
+        ))
+    }
+
+    fn test_config(workspace: &Path) -> Config {
+        Config {
+            portal_port: 0,
+            t3_port: 0,
+            container_name: "unused".to_string(),
+            t3_base_dir: "unused".to_string(),
+            workspace_root: workspace.to_path_buf(),
+            state_dir: workspace.to_path_buf(),
+            managed_push: false,
+            pin: "1234".to_string(),
+            csrf_token: "csrf".to_string(),
+            session_token: "session".to_string(),
+            failed_logins: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn make_request(config: &Config, request: &str) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let request = request.to_string();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+        let (stream, _) = listener.accept().unwrap();
+        handle_connection(stream, config);
+        client.join().unwrap()
     }
 }

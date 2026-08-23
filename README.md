@@ -179,6 +179,23 @@ reach before generating the link; a link created through `localhost` only
 works on the host. The PIN stays on the host, is neither generated nor stored
 by claude-sandbox, and must be provided again on every launch.
 
+The same host-side server exposes cached plan-limit usage without
+authentication. Append `/api/usage` to the admin URL printed at startup:
+
+```bash
+curl http://localhost:3774/api/usage
+```
+
+The response reports each provider's data freshness and its available usage
+buckets under the fixed `anthropic`, `openai`, and `ollama` keys. Each bucket
+contains an integer `used_percent` and an RFC 3339 UTC
+`resets_at` value, or `null` when the reset time is unknown or not reported.
+Missing buckets are omitted rather than reported as 0%. The endpoint reads
+cached snapshots only and never contacts a provider. It omits account, plan,
+model, cost, credit, and credential data. It returns HTTP 503 when no provider
+has a valid snapshot. Treat the result as advisory telemetry: the managed
+container updates the source cache files.
+
 For a long-running T3 service whose workspace contains several repositories,
 enable managed pushes:
 
@@ -196,7 +213,8 @@ review. Approvals are stored outside the mounted workspace under
 The portal uses plain HTTP. Anyone able to observe the traffic can recover both
 the PIN and generated pairing token, and a short PIN can be guessed. Never
 expose it to the internet; use it over an encrypted trusted path such as a VPN
-or SSH tunnel.
+or SSH tunnel. `GET /api/usage` is intentionally unauthenticated, so anyone who
+can reach the admin port can observe usage percentages and reset schedules.
 
 ### Wrapped sessions
 
@@ -430,6 +448,7 @@ claude-sandbox install skills
 | `/git` | Git operations with small, atomic commits and clean history |
 | `/github-actions` | GitHub Actions workflow development with official actions preference |
 | `/readme` | README writing and maintenance guidelines |
+| `/plan-usage` | Check plan-limit headroom and reset timing before routing substantial agent work |
 | `/gui` | Run and test GUI applications on the virtual X display |
 | `/wrap` | Run and drive interactive terminal programs in a tmux session |
 | `/claude` | Delegate work to Anthropic models through the Claude Code CLI |

@@ -7,6 +7,7 @@ mod proxy_log;
 mod proxy_socket;
 mod ssh_proxy;
 mod t3_admin;
+mod usage_api;
 
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
@@ -1441,10 +1442,13 @@ fn main() {
                 });
             }
 
-            let container_env = vec![
+            let mut container_env = vec![
                 format!("T3CODE_PORT={}", port),
                 format!("T3CODE_BASE_DIR={}", instance_dir),
             ];
+            if let Some(pair_admin_port) = pair_admin_port {
+                container_env.push(format!("T3CODE_ADMIN_PORT={pair_admin_port}"));
+            }
             let managed_state = cli.t3_managed_push.then_some(push_state_dir.as_path());
             let named_container = pair_admin_pin.as_ref().map(|_| container_name.as_str());
 
