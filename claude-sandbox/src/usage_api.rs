@@ -1,33 +1,86 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::Read;
+use std::fs::{self, DirBuilder, OpenOptions, Permissions};
+use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_USAGE_FILE_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const CACHE_FILE: &str = "usage-v1.json";
+const MAX_CACHE_BYTES: u64 = 64 * 1024;
+const MAX_LEGACY_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const FRESH_SECS: i64 = 40 * 60;
+const MAX_CLOCK_SKEW_SECS: i64 = 5 * 60;
+const MAX_RESET_HORIZON_SECS: i64 = 366 * 24 * 60 * 60;
+const MAX_BUCKETS: usize = 32;
 const RESPONSE_CACHE_SECS: u64 = 5;
 #[cfg(target_os = "linux")]
 const O_NONBLOCK: i32 = 0o4_000;
 #[cfg(target_os = "linux")]
 const O_NOFOLLOW: i32 = 0o400_000;
-const ANTHROPIC_FRESH_SECS: i64 = 30 * 60;
-const VENDOR_FRESH_SECS: i64 = 10 * 60;
-const MAX_CLOCK_SKEW_SECS: i64 = 5 * 60;
-const MAX_RESET_HORIZON_SECS: i64 = 366 * 24 * 60 * 60;
 
 static RESPONSE_CACHE: OnceLock<Mutex<Option<CachedResponse>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 struct CachedResponse {
-    workspace_root: PathBuf,
+    usage_dir: PathBuf,
+    legacy_workspace_root: Option<PathBuf>,
     collected_at: Instant,
     response: UsageResponse,
     available: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Provider {
+    Anthropic,
+    Openai,
+    Ollama,
+}
+
+impl Provider {
+    pub(crate) const ALL: [Self; 3] = [Self::Anthropic, Self::Openai, Self::Ollama];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Ollama => "ollama",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeResponse {
+    schema_version: u8,
+    provider: Provider,
+    observed_at: i64,
+    buckets: Vec<ProbeBucket>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredUsage {
+    schema_version: u8,
+    providers: StoredProviders,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct StoredProviders {
+    anthropic: Option<ProviderSnapshot>,
+    openai: Option<ProviderSnapshot>,
+    ollama: Option<ProviderSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ProviderSnapshot {
+    observed_at: i64,
+    buckets: Vec<UsageBucket>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -46,7 +99,8 @@ struct Providers {
 #[derive(Clone, Debug, Serialize)]
 struct ProviderUsage {
     freshness: Freshness,
-    buckets: Vec<UsageBucket>,
+    updated_at: Option<String>,
+    buckets: Vec<PublicBucket>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -57,15 +111,32 @@ enum Freshness {
     Unknown,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeBucket {
+    period: Period,
+    scope: Scope,
+    used_percent: u8,
+    resets_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 struct UsageBucket {
+    period: Period,
+    scope: Scope,
+    used_percent: u8,
+    resets_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PublicBucket {
     period: Period,
     scope: Scope,
     used_percent: u8,
     resets_at: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Period {
     Session,
@@ -74,18 +145,81 @@ enum Period {
     Other,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Scope {
     Overall,
     Model,
 }
 
+impl StoredUsage {
+    fn empty() -> Self {
+        Self {
+            schema_version: 1,
+            providers: StoredProviders::default(),
+        }
+    }
+
+    fn provider(&self, provider: Provider) -> Option<&ProviderSnapshot> {
+        match provider {
+            Provider::Anthropic => self.providers.anthropic.as_ref(),
+            Provider::Openai => self.providers.openai.as_ref(),
+            Provider::Ollama => self.providers.ollama.as_ref(),
+        }
+    }
+
+    fn set_provider(&mut self, provider: Provider, snapshot: ProviderSnapshot) {
+        *match provider {
+            Provider::Anthropic => &mut self.providers.anthropic,
+            Provider::Openai => &mut self.providers.openai,
+            Provider::Ollama => &mut self.providers.ollama,
+        } = Some(snapshot);
+    }
+}
+
+enum StoredRead {
+    Missing,
+    Unsupported,
+    Current(StoredUsage),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum StoreOutcome {
+    Durable,
+    DirectorySyncFailed(String),
+}
+
 impl ProviderUsage {
     fn unknown() -> Self {
         Self {
             freshness: Freshness::Unknown,
+            updated_at: None,
             buckets: Vec::new(),
+        }
+    }
+
+    fn from_snapshot(snapshot: ProviderSnapshot, now: i64) -> Self {
+        let freshness = freshness(snapshot.observed_at, now);
+        if freshness == Freshness::Unknown {
+            return Self::unknown();
+        }
+        let buckets = snapshot
+            .buckets
+            .into_iter()
+            .map(|bucket| PublicBucket {
+                period: bucket.period,
+                scope: bucket.scope,
+                used_percent: bucket.used_percent,
+                resets_at: bucket
+                    .resets_at
+                    .filter(|timestamp| valid_public_reset(*timestamp, now))
+                    .map(format_epoch),
+            })
+            .collect();
+        Self {
+            freshness,
+            updated_at: Some(format_epoch(snapshot.observed_at)),
+            buckets,
         }
     }
 
@@ -94,29 +228,27 @@ impl ProviderUsage {
     }
 }
 
-pub fn collect(workspace_root: &Path) -> (UsageResponse, bool) {
+pub fn collect(usage_dir: &Path, legacy_workspace_root: Option<&Path>) -> (UsageResponse, bool) {
     let cache = RESPONSE_CACHE.get_or_init(|| Mutex::new(None));
     {
         let cached = cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(cached) = cached.as_ref()
-            && cached.workspace_root == workspace_root
+            && cached.usage_dir == usage_dir
+            && cached.legacy_workspace_root.as_deref() == legacy_workspace_root
             && cached.collected_at.elapsed().as_secs() < RESPONSE_CACHE_SECS
         {
             return (cached.response.clone(), cached.available);
         }
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0);
-    let (response, available) = collect_at(workspace_root, now);
+    let (response, available) = collect_at(usage_dir, legacy_workspace_root, unix_time());
     *cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedResponse {
-        workspace_root: workspace_root.to_path_buf(),
+        usage_dir: usage_dir.to_path_buf(),
+        legacy_workspace_root: legacy_workspace_root.map(Path::to_path_buf),
         collected_at: Instant::now(),
         response: response.clone(),
         available,
@@ -124,25 +256,28 @@ pub fn collect(workspace_root: &Path) -> (UsageResponse, bool) {
     (response, available)
 }
 
-fn collect_at(workspace_root: &Path, now: i64) -> (UsageResponse, bool) {
-    let anthropic = find_claude_usage()
-        .as_deref()
-        .and_then(read_json_file)
-        .map(|value| parse_anthropic(&value, now))
-        .unwrap_or_else(ProviderUsage::unknown);
-
-    let state_dir = safe_state_dir(workspace_root);
-    let openai = state_dir
-        .as_ref()
-        .and_then(|directory| read_json_file(&directory.join("vendor-usage.codex.json")))
-        .map(|value| parse_vendor(&value, now))
-        .unwrap_or_else(ProviderUsage::unknown);
-    let ollama = state_dir
-        .as_ref()
-        .and_then(|directory| read_json_file(&directory.join("vendor-usage.ollama.json")))
-        .map(|value| parse_vendor(&value, now))
-        .unwrap_or_else(ProviderUsage::unknown);
-
+fn collect_at(
+    usage_dir: &Path,
+    legacy_workspace_root: Option<&Path>,
+    now: i64,
+) -> (UsageResponse, bool) {
+    let stored = match read_stored(usage_dir, now) {
+        StoredRead::Current(stored) => stored,
+        StoredRead::Missing | StoredRead::Unsupported => StoredUsage::empty(),
+    };
+    let provider = |name| {
+        stored
+            .provider(name)
+            .cloned()
+            .or_else(|| {
+                legacy_workspace_root.and_then(|root| read_legacy_provider(name, root, now))
+            })
+            .map(|snapshot| ProviderUsage::from_snapshot(snapshot, now))
+            .unwrap_or_else(ProviderUsage::unknown)
+    };
+    let anthropic = provider(Provider::Anthropic);
+    let openai = provider(Provider::Openai);
+    let ollama = provider(Provider::Ollama);
     let available = anthropic.is_available() || openai.is_available() || ollama.is_available();
     (
         UsageResponse {
@@ -157,6 +292,202 @@ fn collect_at(workspace_root: &Path, now: i64) -> (UsageResponse, bool) {
     )
 }
 
+pub(crate) fn prepare_usage_dir(path: &Path) -> Result<PathBuf, String> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|error| format!("could not create usage state: {error}"))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect usage state: {error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err("usage state path is not a directory".to_string());
+    }
+    fs::set_permissions(path, Permissions::from_mode(0o700))
+        .map_err(|error| format!("could not protect usage state: {error}"))?;
+    fs::canonicalize(path).map_err(|error| format!("could not resolve usage state: {error}"))
+}
+
+pub(crate) fn parse_probe(
+    bytes: &[u8],
+    expected: Provider,
+    now: i64,
+) -> Result<ProviderSnapshot, String> {
+    let response: ProbeResponse =
+        serde_json::from_slice(bytes).map_err(|error| format!("invalid helper JSON: {error}"))?;
+    if response.schema_version != 1 {
+        return Err("unsupported helper schema".to_string());
+    }
+    if response.provider != expected {
+        return Err("helper returned the wrong provider".to_string());
+    }
+    let mut snapshot = ProviderSnapshot {
+        observed_at: response.observed_at,
+        buckets: response
+            .buckets
+            .into_iter()
+            .map(|bucket| UsageBucket {
+                period: bucket.period,
+                scope: bucket.scope,
+                used_percent: bucket.used_percent,
+                resets_at: bucket.resets_at,
+            })
+            .collect(),
+    };
+    sanitize_snapshot(&mut snapshot, now)?;
+    normalize_buckets(&mut snapshot.buckets);
+    Ok(snapshot)
+}
+
+pub(crate) fn observed_at(usage_dir: &Path, provider: Provider, now: i64) -> Option<i64> {
+    match read_stored(usage_dir, now) {
+        StoredRead::Current(stored) => stored
+            .provider(provider)
+            .map(|snapshot| snapshot.observed_at),
+        StoredRead::Missing | StoredRead::Unsupported => None,
+    }
+}
+
+pub(crate) fn store_provider(
+    usage_dir: &Path,
+    provider: Provider,
+    mut snapshot: ProviderSnapshot,
+    now: i64,
+) -> Result<StoreOutcome, String> {
+    sanitize_snapshot(&mut snapshot, now)?;
+    normalize_buckets(&mut snapshot.buckets);
+    prepare_usage_dir(usage_dir)?;
+    let mut stored = match read_stored(usage_dir, now) {
+        StoredRead::Current(stored) => stored,
+        StoredRead::Missing => StoredUsage::empty(),
+        StoredRead::Unsupported => {
+            return Err(
+                "usage cache has an unsupported schema; refusing to overwrite it".to_string(),
+            );
+        }
+    };
+    stored.set_provider(provider, snapshot);
+    atomic_write_json(&usage_dir.join(CACHE_FILE), &stored)
+}
+
+fn sanitize_snapshot(snapshot: &mut ProviderSnapshot, now: i64) -> Result<(), String> {
+    if snapshot.observed_at < 0 || snapshot.observed_at > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
+        return Err("helper timestamp is outside the allowed range".to_string());
+    }
+    if !(1..=MAX_BUCKETS).contains(&snapshot.buckets.len()) {
+        return Err("helper must return between 1 and 32 buckets".to_string());
+    }
+    for bucket in &mut snapshot.buckets {
+        if bucket.used_percent > 100 {
+            return Err("helper percentage exceeds 100".to_string());
+        }
+        if let Some(reset) = bucket.resets_at
+            && (reset < snapshot.observed_at.saturating_sub(MAX_CLOCK_SKEW_SECS)
+                || reset > snapshot.observed_at.saturating_add(MAX_RESET_HORIZON_SECS))
+        {
+            bucket.resets_at = None;
+        }
+    }
+    Ok(())
+}
+
+fn read_stored(usage_dir: &Path, now: i64) -> StoredRead {
+    let Some(root) = read_json_file::<Value>(&usage_dir.join(CACHE_FILE), MAX_CACHE_BYTES) else {
+        return StoredRead::Missing;
+    };
+    let Some(schema_version) = root.get("schema_version").and_then(Value::as_u64) else {
+        return StoredRead::Missing;
+    };
+    if schema_version != 1 {
+        return StoredRead::Unsupported;
+    }
+    let providers = root.get("providers").and_then(Value::as_object);
+    let mut stored = StoredUsage::empty();
+    for provider in Provider::ALL {
+        if let Some(mut snapshot) = providers
+            .and_then(|values| values.get(provider.as_str()))
+            .and_then(|value| serde_json::from_value::<ProviderSnapshot>(value.clone()).ok())
+            && sanitize_snapshot(&mut snapshot, now).is_ok()
+        {
+            normalize_buckets(&mut snapshot.buckets);
+            stored.set_provider(provider, snapshot);
+        }
+    }
+    StoredRead::Current(stored)
+}
+
+fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<StoreOutcome, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "usage cache has no parent directory".to_string())?;
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("could not encode usage cache: {error}"))?;
+    if bytes.len() as u64 > MAX_CACHE_BYTES {
+        return Err("usage cache exceeds its size limit".to_string());
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("usage"),
+        std::process::id(),
+        nonce
+    ));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|error| format!("could not create usage cache: {error}"))?;
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("could not write usage cache: {error}"));
+    }
+    fs::rename(&temp, path).map_err(|error| {
+        let _ = fs::remove_file(&temp);
+        format!("could not replace usage cache: {error}")
+    })?;
+    fs::set_permissions(path, Permissions::from_mode(0o600))
+        .map_err(|error| format!("could not protect usage cache: {error}"))?;
+    match OpenOptions::new()
+        .read(true)
+        .open(parent)
+        .and_then(|directory| directory.sync_all())
+    {
+        Ok(()) => Ok(StoreOutcome::Durable),
+        Err(error) => Ok(StoreOutcome::DirectorySyncFailed(format!(
+            "could not sync usage state: {error}"
+        ))),
+    }
+}
+
+fn read_legacy_provider(
+    provider: Provider,
+    workspace_root: &Path,
+    now: i64,
+) -> Option<ProviderSnapshot> {
+    match provider {
+        Provider::Anthropic => find_claude_usage()
+            .as_deref()
+            .and_then(|path| read_json_file::<Value>(path, MAX_LEGACY_FILE_BYTES))
+            .and_then(|value| parse_anthropic(&value, now)),
+        Provider::Openai | Provider::Ollama => {
+            let state_dir = safe_legacy_state_dir(workspace_root)?;
+            let filename = match provider {
+                Provider::Openai => "vendor-usage.codex.json",
+                Provider::Ollama => "vendor-usage.ollama.json",
+                Provider::Anthropic => unreachable!(),
+            };
+            read_json_file::<Value>(&state_dir.join(filename), MAX_LEGACY_FILE_BYTES)
+                .and_then(|value| parse_vendor(&value, now))
+        }
+    }
+}
+
 fn find_claude_usage() -> Option<PathBuf> {
     let home = env::var_os("HOME").map(PathBuf::from)?;
     let mut candidates = Vec::new();
@@ -168,15 +499,15 @@ fn find_claude_usage() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
-fn safe_state_dir(workspace_root: &Path) -> Option<PathBuf> {
+fn safe_legacy_state_dir(workspace_root: &Path) -> Option<PathBuf> {
     let workspace = fs::canonicalize(workspace_root).ok()?;
     let state = fs::canonicalize(workspace_root.join(".claude-sandbox")).ok()?;
     state.starts_with(&workspace).then_some(state)
 }
 
-fn read_json_file(path: &Path) -> Option<Value> {
+fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path, limit: u64) -> Option<T> {
     let metadata = fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_USAGE_FILE_BYTES {
+    if !metadata.file_type().is_file() || metadata.len() > limit {
         return None;
     }
     let mut options = OpenOptions::new();
@@ -185,41 +516,27 @@ fn read_json_file(path: &Path) -> Option<Value> {
     options.custom_flags(O_NONBLOCK | O_NOFOLLOW);
     let file = options.open(path).ok()?;
     let metadata = file.metadata().ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_USAGE_FILE_BYTES {
+    if !metadata.is_file() || metadata.len() > limit {
         return None;
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_USAGE_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > MAX_USAGE_FILE_BYTES {
+    file.take(limit + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > limit {
         return None;
     }
     serde_json::from_slice(&bytes).ok()
 }
 
-fn parse_anthropic(root: &Value, now: i64) -> ProviderUsage {
-    let Some(snapshot) = root.get("cachedUsageUtilization") else {
-        return ProviderUsage::unknown();
-    };
-    let Some(fetched_at) = snapshot
-        .get("fetchedAtMs")
-        .and_then(Value::as_u64)
-        .and_then(|milliseconds| i64::try_from(milliseconds / 1000).ok())
-    else {
-        return ProviderUsage::unknown();
-    };
-    let freshness = freshness(fetched_at, now, ANTHROPIC_FRESH_SECS);
-    if freshness == Freshness::Unknown {
-        return ProviderUsage::unknown();
+fn parse_anthropic(root: &Value, now: i64) -> Option<ProviderSnapshot> {
+    let snapshot = root.get("cachedUsageUtilization")?;
+    let observed_at = snapshot
+        .get("fetchedAtMs")?
+        .as_u64()
+        .and_then(|milliseconds| i64::try_from(milliseconds / 1000).ok())?;
+    if freshness(observed_at, now) != Freshness::Fresh {
+        return None;
     }
-
-    let Some(utilization) = snapshot
-        .get("utilization")
-        .filter(|value| value.is_object())
-    else {
-        return ProviderUsage::unknown();
-    };
+    let utilization = snapshot.get("utilization")?.as_object()?;
     let mut buckets = utilization
         .get("limits")
         .and_then(Value::as_array)
@@ -238,28 +555,32 @@ fn parse_anthropic(root: &Value, now: i64) -> ProviderUsage {
                     Scope::Overall
                 },
                 used_percent: percent(limit.get("percent")?)?,
-                resets_at: reset_from_text(limit.get("resets_at"), now),
+                resets_at: reset_from_text(limit.get("resets_at"), observed_at),
             })
         })
         .collect::<Vec<_>>();
-
     if buckets.is_empty() {
         add_anthropic_legacy_bucket(
             &mut buckets,
             utilization.get("five_hour"),
             Period::Session,
-            now,
+            observed_at,
         );
         add_anthropic_legacy_bucket(
             &mut buckets,
             utilization.get("seven_day"),
             Period::Weekly,
-            now,
+            observed_at,
         );
     }
-
+    if buckets.is_empty() || buckets.len() > MAX_BUCKETS {
+        return None;
+    }
     normalize_buckets(&mut buckets);
-    ProviderUsage { freshness, buckets }
+    Some(ProviderSnapshot {
+        observed_at,
+        buckets,
+    })
 }
 
 fn period_from_anthropic_limit(limit: &Value) -> Period {
@@ -286,7 +607,7 @@ fn add_anthropic_legacy_bucket(
     buckets: &mut Vec<UsageBucket>,
     source: Option<&Value>,
     period: Period,
-    now: i64,
+    observed_at: i64,
 ) {
     let Some(source) = source else { return };
     let Some(used_percent) = source.get("utilization").and_then(percent) else {
@@ -296,22 +617,16 @@ fn add_anthropic_legacy_bucket(
         period,
         scope: Scope::Overall,
         used_percent,
-        resets_at: reset_from_text(source.get("resets_at"), now),
+        resets_at: reset_from_text(source.get("resets_at"), observed_at),
     });
 }
 
-fn parse_vendor(root: &Value, now: i64) -> ProviderUsage {
-    let Some(fetched_at) = root.get("fetched_at").and_then(Value::as_i64) else {
-        return ProviderUsage::unknown();
-    };
-    let freshness = freshness(fetched_at, now, VENDOR_FRESH_SECS);
-    if freshness == Freshness::Unknown {
-        return ProviderUsage::unknown();
+fn parse_vendor(root: &Value, now: i64) -> Option<ProviderSnapshot> {
+    let observed_at = root.get("fetched_at")?.as_i64()?;
+    if freshness(observed_at, now) != Freshness::Fresh {
+        return None;
     }
-
-    let Some(windows) = root.pointer("/data/windows").and_then(Value::as_array) else {
-        return ProviderUsage::unknown();
-    };
+    let windows = root.pointer("/data/windows")?.as_array()?;
     let mut buckets = windows
         .iter()
         .filter_map(|window| {
@@ -324,12 +639,18 @@ fn parse_vendor(root: &Value, now: i64) -> ProviderUsage {
                 period,
                 scope: scope_from_name(name, period),
                 used_percent: percent(window.get("pct")?)?,
-                resets_at: reset_from_epoch(window.get("resets_at"), now),
+                resets_at: reset_from_epoch(window.get("resets_at"), observed_at),
             })
         })
         .collect::<Vec<_>>();
+    if buckets.is_empty() || buckets.len() > MAX_BUCKETS {
+        return None;
+    }
     normalize_buckets(&mut buckets);
-    ProviderUsage { freshness, buckets }
+    Some(ProviderSnapshot {
+        observed_at,
+        buckets,
+    })
 }
 
 fn period_from_window(window: &Value, name: &str) -> Period {
@@ -379,32 +700,37 @@ fn percent(value: &Value) -> Option<u8> {
         .then_some(value.clamp(0.0, 100.0).floor() as u8)
 }
 
-fn freshness(fetched_at: i64, now: i64, fresh_for: i64) -> Freshness {
-    if fetched_at < 0 || fetched_at > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
+fn freshness(observed_at: i64, now: i64) -> Freshness {
+    if observed_at < 0 || observed_at > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
         Freshness::Unknown
-    } else if now.saturating_sub(fetched_at) <= fresh_for {
+    } else if now.saturating_sub(observed_at) <= FRESH_SECS {
         Freshness::Fresh
     } else {
         Freshness::Stale
     }
 }
 
-fn reset_from_epoch(value: Option<&Value>, now: i64) -> Option<String> {
+fn reset_from_epoch(value: Option<&Value>, observed_at: i64) -> Option<i64> {
     let timestamp = value?.as_i64()?;
-    valid_reset(timestamp, now).then(|| format_epoch(timestamp))
+    valid_stored_reset(timestamp, observed_at).then_some(timestamp)
 }
 
-fn reset_from_text(value: Option<&Value>, now: i64) -> Option<String> {
+fn reset_from_text(value: Option<&Value>, observed_at: i64) -> Option<i64> {
     let timestamp = parse_rfc3339_utc(value?.as_str()?)?;
-    valid_reset(timestamp, now).then(|| format_epoch(timestamp))
+    valid_stored_reset(timestamp, observed_at).then_some(timestamp)
 }
 
-fn valid_reset(timestamp: i64, now: i64) -> bool {
+fn valid_stored_reset(timestamp: i64, observed_at: i64) -> bool {
+    timestamp >= observed_at.saturating_sub(MAX_CLOCK_SKEW_SECS)
+        && timestamp <= observed_at.saturating_add(MAX_RESET_HORIZON_SECS)
+}
+
+fn valid_public_reset(timestamp: i64, now: i64) -> bool {
     timestamp > now && timestamp <= now.saturating_add(MAX_RESET_HORIZON_SECS)
 }
 
 fn normalize_buckets(buckets: &mut Vec<UsageBucket>) {
-    buckets.sort_by_key(|bucket| (bucket.period, bucket.scope, bucket.used_percent));
+    buckets.sort();
     buckets.dedup();
 }
 
@@ -500,169 +826,428 @@ fn format_epoch(timestamp: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
+fn unix_time() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     const NOW: i64 = 1_787_500_000;
 
     #[test]
-    fn parses_vendor_cache_without_exposing_names_or_plan() {
-        let usage = parse_vendor(
-            &json!({
-                "fetched_at": NOW - 20,
-                "data": {
-                    "plan": "secret-plan",
-                    "windows": [
-                        {"name":"codex", "pct":42, "window_minutes":10080,
-                         "resets_at":1787802733},
-                        {"name":"codex", "pct":8, "window_minutes":300,
-                         "resets_at":1787510000},
-                        {"name":"GPT Secret Model", "pct":7, "window_minutes":300,
-                         "resets_at":1787510000}
-                    ]
+    fn validates_and_normalizes_strict_probe_output() {
+        let response = json!({
+            "schema_version": 1,
+            "provider": "openai",
+            "observed_at": NOW - 20,
+            "buckets": [
+                {"period":"weekly", "scope":"overall", "used_percent":42,
+                 "resets_at":NOW + 5000},
+                {"period":"session", "scope":"model", "used_percent":7,
+                 "resets_at":null},
+                {"period":"session", "scope":"model", "used_percent":7,
+                 "resets_at":null}
+            ]
+        });
+        let snapshot = parse_probe(
+            serde_json::to_string(&response).unwrap().as_bytes(),
+            Provider::Openai,
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.buckets.len(), 2);
+        assert_eq!(snapshot.buckets[0].period, Period::Session);
+        assert_eq!(snapshot.buckets[1].period, Period::Weekly);
+    }
+
+    #[test]
+    fn rejects_unknown_fields_provider_mismatch_and_invalid_ranges() {
+        let base = json!({
+            "schema_version": 1,
+            "provider": "openai",
+            "observed_at": NOW,
+            "buckets": [{"period":"weekly", "scope":"overall",
+                         "used_percent":42, "resets_at":NOW + 5000}]
+        });
+        let mut unknown = base.clone();
+        unknown["account"] = json!("private");
+        assert!(parse_probe(unknown.to_string().as_bytes(), Provider::Openai, NOW).is_err());
+        let mut unknown_bucket = base.clone();
+        unknown_bucket["buckets"][0]["name"] = json!("private model");
+        assert!(parse_probe(unknown_bucket.to_string().as_bytes(), Provider::Openai, NOW).is_err());
+        assert!(parse_probe(base.to_string().as_bytes(), Provider::Ollama, NOW).is_err());
+
+        let mut percentage = base.clone();
+        percentage["buckets"][0]["used_percent"] = json!(101);
+        assert!(parse_probe(percentage.to_string().as_bytes(), Provider::Openai, NOW).is_err());
+
+        let mut future = base;
+        future["observed_at"] = json!(NOW + MAX_CLOCK_SKEW_SECS + 1);
+        assert!(parse_probe(future.to_string().as_bytes(), Provider::Openai, NOW).is_err());
+    }
+
+    #[test]
+    fn invalid_optional_reset_is_dropped_without_losing_provider() {
+        let response = json!({
+            "schema_version":1, "provider":"openai", "observed_at":NOW,
+            "buckets":[{"period":"weekly", "scope":"overall",
+                        "used_percent":42,
+                        "resets_at":NOW + MAX_RESET_HORIZON_SECS + 1}]
+        });
+        let snapshot = parse_probe(response.to_string().as_bytes(), Provider::Openai, NOW).unwrap();
+
+        assert_eq!(snapshot.buckets.len(), 1);
+        assert_eq!(snapshot.buckets[0].resets_at, None);
+    }
+
+    #[test]
+    fn rejects_empty_and_excessive_bucket_lists() {
+        for count in [0, MAX_BUCKETS + 1] {
+            let buckets = (0..count)
+                .map(|_| {
+                    json!({"period":"weekly", "scope":"overall",
+                           "used_percent":1, "resets_at":null})
+                })
+                .collect::<Vec<_>>();
+            let response = json!({
+                "schema_version":1, "provider":"anthropic",
+                "observed_at":NOW, "buckets":buckets
+            });
+            assert!(
+                parse_probe(response.to_string().as_bytes(), Provider::Anthropic, NOW).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn global_cache_is_sanitized_private_and_drives_freshness() {
+        let directory = temporary_directory("global-cache");
+        let snapshot = ProviderSnapshot {
+            observed_at: NOW - 10,
+            buckets: vec![UsageBucket {
+                period: Period::Weekly,
+                scope: Scope::Overall,
+                used_percent: 42,
+                resets_at: Some(NOW + 5000),
+            }],
+        };
+        store_provider(&directory, Provider::Openai, snapshot, NOW).unwrap();
+
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(directory.join(CACHE_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let (fresh, available) = collect_at(&directory, None, NOW);
+        assert!(available);
+        let fresh = serde_json::to_value(fresh).unwrap();
+        assert_eq!(fresh["providers"]["openai"]["freshness"], "fresh");
+        assert_eq!(
+            fresh["providers"]["openai"]["updated_at"],
+            format_epoch(NOW - 10)
+        );
+        assert_eq!(
+            fresh["providers"]["openai"]["buckets"][0]["resets_at"],
+            format_epoch(NOW + 5000)
+        );
+
+        let (stale, _) = collect_at(&directory, None, NOW + FRESH_SECS + 1);
+        let stale = serde_json::to_value(stale).unwrap();
+        assert_eq!(stale["providers"]["openai"]["freshness"], "stale");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn all_unknown_is_unavailable_with_fixed_provider_keys() {
+        let directory = temporary_directory("unknown");
+        let (response, available) = collect_at(&directory, None, NOW);
+        let response = serde_json::to_value(response).unwrap();
+
+        assert!(!available);
+        assert_eq!(response["schema_version"], 1);
+        for provider in ["anthropic", "openai", "ollama"] {
+            assert_eq!(response["providers"][provider]["freshness"], "unknown");
+            assert!(response["providers"][provider]["updated_at"].is_null());
+            assert_eq!(response["providers"][provider]["buckets"], json!([]));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn updates_one_provider_without_discarding_another() {
+        let directory = temporary_directory("merge");
+        for (provider, used) in [(Provider::Openai, 12), (Provider::Ollama, 34)] {
+            store_provider(
+                &directory,
+                provider,
+                ProviderSnapshot {
+                    observed_at: NOW,
+                    buckets: vec![UsageBucket {
+                        period: Period::Weekly,
+                        scope: Scope::Overall,
+                        used_percent: used,
+                        resets_at: None,
+                    }],
+                },
+                NOW,
+            )
+            .unwrap();
+        }
+        let (response, available) = collect_at(&directory, None, NOW);
+        let response = serde_json::to_value(response).unwrap();
+        assert!(available);
+        assert_eq!(
+            response["providers"]["openai"]["buckets"][0]["used_percent"],
+            12
+        );
+        assert_eq!(
+            response["providers"]["ollama"]["buckets"][0]["used_percent"],
+            34
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn invalid_persisted_provider_does_not_clobber_other_last_good_data() {
+        let directory = temporary_directory("provider-pruning");
+        let cache = json!({
+            "schema_version":1,
+            "future_extension":"ignored",
+            "providers":{
+                "anthropic":null,
+                "openai":{
+                    "observed_at":NOW,
+                    "buckets":[{"period":"weekly", "scope":"overall",
+                                "used_percent":41, "resets_at":null,
+                                "future_bucket_extension":"ignored"}],
+                    "future_extension":true
+                },
+                "ollama":{
+                    "observed_at":NOW + MAX_CLOCK_SKEW_SECS + 1,
+                    "buckets":[{"period":"weekly", "scope":"overall",
+                                "used_percent":99, "resets_at":null}]
                 }
-            }),
-            NOW,
-        );
+            }
+        });
+        fs::write(directory.join(CACHE_FILE), cache.to_string()).unwrap();
+        let anthropic = json!({
+            "schema_version":1, "provider":"anthropic", "observed_at":NOW,
+            "buckets":[{"period":"session", "scope":"overall",
+                        "used_percent":3, "resets_at":null}]
+        });
+        let snapshot =
+            parse_probe(anthropic.to_string().as_bytes(), Provider::Anthropic, NOW).unwrap();
+        store_provider(&directory, Provider::Anthropic, snapshot, NOW).unwrap();
 
-        assert_eq!(usage.freshness, Freshness::Fresh);
-        assert_eq!(usage.buckets.len(), 3);
-        assert_eq!(usage.buckets[0].period, Period::Session);
-        assert_eq!(usage.buckets[0].scope, Scope::Overall);
-        assert_eq!(usage.buckets[0].used_percent, 8);
-        assert_eq!(usage.buckets[1].period, Period::Session);
-        assert_eq!(usage.buckets[1].scope, Scope::Model);
-        assert_eq!(usage.buckets[1].used_percent, 7);
-        assert_eq!(usage.buckets[2].period, Period::Weekly);
-        assert_eq!(usage.buckets[2].scope, Scope::Overall);
+        let (response, available) = collect_at(&directory, None, NOW);
+        let response = serde_json::to_value(response).unwrap();
+        assert!(available);
         assert_eq!(
-            usage.buckets[2].resets_at.as_deref(),
-            Some("2026-08-27T03:52:13Z")
+            response["providers"]["openai"]["buckets"][0]["used_percent"],
+            41
         );
-        let public = serde_json::to_string(&usage).unwrap();
-        assert!(!public.contains("secret-plan"));
-        assert!(!public.contains("GPT Secret Model"));
-    }
-
-    #[test]
-    fn parses_anthropic_limits_and_normalizes_utc_reset() {
-        let usage = parse_anthropic(
-            &json!({
-                "cachedUsageUtilization": {
-                    "fetchedAtMs": (NOW - 60) * 1000,
-                    "utilization": {
-                        "limits": [
-                            {"kind":"five_hour", "percent":12.9,
-                             "resets_at":"2026-08-23T12:34:56.987+00:00"},
-                            {"kind":"weekly_scoped", "percent":33,
-                             "resets_at":"2026-08-27T03:52:13Z",
-                             "scope":{"model":{"display_name":"Private model"}}}
-                        ],
-                        "extra_usage": {"is_enabled":true, "utilization":88}
-                    }
-                }
-            }),
-            NOW,
-        );
-
-        assert_eq!(usage.freshness, Freshness::Fresh);
-        assert_eq!(usage.buckets[0].used_percent, 12);
-        assert_eq!(usage.buckets[0].scope, Scope::Overall);
-        assert_eq!(usage.buckets[1].scope, Scope::Model);
-        assert_eq!(usage.buckets.len(), 2);
-        let public = serde_json::to_string(&usage).unwrap();
-        assert!(!public.contains("Private model"));
-        assert!(public.contains("2026-08-27T03:52:13Z"));
-    }
-
-    #[test]
-    fn clamps_percentages_and_discards_expired_resets() {
-        let usage = parse_vendor(
-            &json!({
-                "fetched_at": NOW - 1,
-                "data": {"windows": [
-                    {"name":"session", "pct":101, "resets_at":NOW + 100},
-                    {"name":"weekly", "pct":50, "resets_at":NOW - 1}
-                ]}
-            }),
-            NOW,
-        );
-
-        assert_eq!(usage.buckets.len(), 2);
-        assert_eq!(usage.buckets[0].used_percent, 100);
-        assert!(usage.buckets[0].resets_at.is_some());
-        assert_eq!(usage.buckets[1].used_percent, 50);
-        assert_eq!(usage.buckets[1].resets_at, None);
-    }
-
-    #[test]
-    fn treats_unknown_vendor_windows_as_overall_other_buckets() {
-        let usage = parse_vendor(
-            &json!({
-                "fetched_at": NOW,
-                "data": {"windows": [
-                    {"name":"new-ollama-window", "pct":3, "window_minutes":null,
-                     "resets_at":null}
-                ]}
-            }),
-            NOW,
-        );
-
-        assert_eq!(usage.buckets.len(), 1);
-        assert_eq!(usage.buckets[0].period, Period::Other);
-        assert_eq!(usage.buckets[0].scope, Scope::Overall);
-        assert_eq!(usage.buckets[0].used_percent, 3);
-        assert_eq!(usage.buckets[0].resets_at, None);
-    }
-
-    #[test]
-    fn marks_old_or_future_snapshots_appropriately() {
+        assert_eq!(response["providers"]["ollama"]["freshness"], "unknown");
         assert_eq!(
-            freshness(NOW - VENDOR_FRESH_SECS - 1, NOW, VENDOR_FRESH_SECS),
-            Freshness::Stale
+            response["providers"]["anthropic"]["buckets"][0]["used_percent"],
+            3
         );
-        assert_eq!(
-            freshness(NOW + MAX_CLOCK_SKEW_SECS + 1, NOW, VENDOR_FRESH_SECS),
-            Freshness::Unknown
-        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn rejects_malformed_provider_shapes() {
-        let vendor = parse_vendor(&json!({"fetched_at": NOW}), NOW);
-        let anthropic = parse_anthropic(
-            &json!({"cachedUsageUtilization":{"fetchedAtMs":NOW * 1000}}),
-            NOW,
-        );
+    fn unsupported_cache_schema_is_never_overwritten() {
+        let directory = temporary_directory("future-schema");
+        let path = directory.join(CACHE_FILE);
+        let future = br#"{"schema_version":2,"providers":{},"future":"keep-me"}"#;
+        fs::write(&path, future).unwrap();
+        let response = json!({
+            "schema_version":1, "provider":"ollama", "observed_at":NOW,
+            "buckets":[{"period":"weekly", "scope":"overall",
+                        "used_percent":1, "resets_at":null}]
+        });
+        let snapshot = parse_probe(response.to_string().as_bytes(), Provider::Ollama, NOW).unwrap();
 
-        assert_eq!(vendor.freshness, Freshness::Unknown);
-        assert_eq!(anthropic.freshness, Freshness::Unknown);
+        assert!(store_provider(&directory, Provider::Ollama, snapshot, NOW).is_err());
+        assert_eq!(fs::read(path).unwrap(), future);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_fallback_is_used_for_missing_global_providers() {
+        let workspace = temporary_directory("legacy-workspace");
+        let usage = temporary_directory("legacy-global");
+        let legacy_state = workspace.join(".claude-sandbox");
+        fs::create_dir(&legacy_state).unwrap();
+        let legacy = json!({
+            "fetched_at": NOW,
+            "data": {"plan":"private-plan", "windows":[
+                {"name":"codex", "pct":9, "window_minutes":10080,
+                 "resets_at":NOW + 5000}
+            ]}
+        });
+        fs::write(
+            legacy_state.join("vendor-usage.codex.json"),
+            legacy.to_string(),
+        )
+        .unwrap();
+        store_provider(
+            &usage,
+            Provider::Ollama,
+            ProviderSnapshot {
+                observed_at: NOW,
+                buckets: vec![UsageBucket {
+                    period: Period::Weekly,
+                    scope: Scope::Overall,
+                    used_percent: 2,
+                    resets_at: None,
+                }],
+            },
+            NOW,
+        )
+        .unwrap();
+
+        let (response, available) = collect_at(&usage, Some(&workspace), NOW);
+        let public = serde_json::to_string(&response).unwrap();
+        assert!(available);
+        assert!(public.contains("\"used_percent\":9"));
+        assert!(public.contains("\"used_percent\":2"));
+        assert!(!public.contains("private-plan"));
+        fs::remove_dir_all(workspace).unwrap();
+        fs::remove_dir_all(usage).unwrap();
+    }
+
+    #[test]
+    fn global_provider_takes_precedence_over_legacy_provider() {
+        let workspace = temporary_directory("legacy-precedence-workspace");
+        let usage = temporary_directory("legacy-precedence-global");
+        let legacy_state = workspace.join(".claude-sandbox");
+        fs::create_dir(&legacy_state).unwrap();
+        fs::write(
+            legacy_state.join("vendor-usage.codex.json"),
+            json!({
+                "fetched_at":NOW,
+                "data":{"windows":[{"name":"codex", "pct":9,
+                                     "window_minutes":10080, "resets_at":null}]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        store_provider(
+            &usage,
+            Provider::Openai,
+            ProviderSnapshot {
+                observed_at: NOW,
+                buckets: vec![UsageBucket {
+                    period: Period::Weekly,
+                    scope: Scope::Overall,
+                    used_percent: 71,
+                    resets_at: None,
+                }],
+            },
+            NOW,
+        )
+        .unwrap();
+
+        let (response, available) = collect_at(&usage, Some(&workspace), NOW);
+        let response = serde_json::to_value(response).unwrap();
+        assert!(available);
+        assert_eq!(
+            response["providers"]["openai"]["buckets"][0]["used_percent"],
+            71
+        );
+        fs::remove_dir_all(workspace).unwrap();
+        fs::remove_dir_all(usage).unwrap();
+    }
+
+    #[test]
+    fn legacy_fallback_rejects_stale_snapshots() {
+        let workspace = temporary_directory("legacy-stale-workspace");
+        let usage = temporary_directory("legacy-stale-global");
+        let legacy_state = workspace.join(".claude-sandbox");
+        fs::create_dir(&legacy_state).unwrap();
+        fs::write(
+            legacy_state.join("vendor-usage.codex.json"),
+            json!({
+                "fetched_at":NOW - FRESH_SECS - 1,
+                "data":{"windows":[{"name":"codex", "pct":9,
+                                     "window_minutes":10080, "resets_at":null}]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (response, available) = collect_at(&usage, Some(&workspace), NOW);
+        let response = serde_json::to_value(response).unwrap();
+        assert!(!available);
+        assert_eq!(response["providers"]["openai"]["freshness"], "unknown");
+        fs::remove_dir_all(workspace).unwrap();
+        fs::remove_dir_all(usage).unwrap();
+    }
+
+    #[test]
+    fn response_cache_holds_a_snapshot_for_five_seconds() {
+        let directory = temporary_directory("response-cache");
+        let now = unix_time();
+        for used in [10, 20] {
+            let response = json!({
+                "schema_version":1, "provider":"openai", "observed_at":now,
+                "buckets":[{"period":"weekly", "scope":"overall",
+                            "used_percent":used, "resets_at":null}]
+            });
+            let snapshot =
+                parse_probe(response.to_string().as_bytes(), Provider::Openai, now).unwrap();
+            store_provider(&directory, Provider::Openai, snapshot, now).unwrap();
+            let (public, _) = collect(&directory, None);
+            let public = serde_json::to_value(public).unwrap();
+            assert_eq!(
+                public["providers"]["openai"]["buckets"][0]["used_percent"],
+                10
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn rejects_symlinks_and_oversized_cache_files() {
-        let directory = std::env::temp_dir().join(format!(
-            "claude-sandbox-usage-reader-{}-{}",
-            std::process::id(),
-            format_epoch(NOW).replace([':', '-'], "")
-        ));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir(&directory).unwrap();
+        let directory = temporary_directory("reader");
         let regular = directory.join("regular.json");
         let link = directory.join("link.json");
         let oversized = directory.join("oversized.json");
-        std::fs::write(&regular, b"{}").unwrap();
+        fs::write(&regular, b"{}").unwrap();
         symlink(&regular, &link).unwrap();
-        std::fs::write(&oversized, vec![b' '; MAX_USAGE_FILE_BYTES as usize + 1]).unwrap();
+        fs::write(&oversized, vec![b' '; MAX_CACHE_BYTES as usize + 1]).unwrap();
 
-        assert_eq!(read_json_file(&regular), Some(json!({})));
-        assert_eq!(read_json_file(&link), None);
-        assert_eq!(read_json_file(&oversized), None);
+        assert!(read_json_file::<Value>(&regular, MAX_CACHE_BYTES).is_some());
+        assert!(read_json_file::<Value>(&link, MAX_CACHE_BYTES).is_none());
+        assert!(read_json_file::<Value>(&oversized, MAX_CACHE_BYTES).is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
-        std::fs::remove_dir_all(&directory).unwrap();
+    #[test]
+    fn refuses_a_symlink_as_the_global_state_directory() {
+        let directory = temporary_directory("state-symlink");
+        let target = directory.join("target");
+        let link = directory.join("link");
+        fs::create_dir(&target).unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(prepare_usage_dir(&link).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -675,5 +1260,18 @@ mod tests {
         );
         assert_eq!(parse_rfc3339_utc("2001-02-29T12:34:56Z"), None);
         assert_eq!(parse_rfc3339_utc("2000-02-29T12:34:56-04:00"), None);
+    }
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "claude-sandbox-usage-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&path).unwrap();
+        path
     }
 }

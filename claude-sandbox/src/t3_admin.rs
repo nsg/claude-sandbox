@@ -12,6 +12,7 @@ use std::{process, thread};
 
 use crate::managed_push::{self, ApprovalScope};
 use crate::usage_api;
+use crate::usage_collector;
 
 const MAX_REQUEST_BYTES: usize = 16_384;
 const MAX_BODY_BYTES: usize = 8_192;
@@ -25,6 +26,7 @@ struct Config {
     t3_base_dir: String,
     workspace_root: PathBuf,
     state_dir: PathBuf,
+    usage_state_dir: PathBuf,
     managed_push: bool,
     pin: String,
     csrf_token: String,
@@ -59,6 +61,7 @@ pub struct RunOptions<'a> {
     pub t3_base_dir: &'a str,
     pub workspace_root: &'a Path,
     pub state_dir: &'a Path,
+    pub usage_state_dir: &'a Path,
     pub managed_push: bool,
 }
 
@@ -75,6 +78,7 @@ pub fn run(options: RunOptions<'_>) {
         t3_base_dir: options.t3_base_dir.to_string(),
         workspace_root: options.workspace_root.to_path_buf(),
         state_dir: options.state_dir.to_path_buf(),
+        usage_state_dir: options.usage_state_dir.to_path_buf(),
         managed_push: options.managed_push,
         pin,
         csrf_token: random_token(24),
@@ -89,6 +93,11 @@ pub fn run(options: RunOptions<'_>) {
         );
         process::exit(1);
     });
+
+    usage_collector::start(
+        options.container_name.to_string(),
+        options.usage_state_dir.to_path_buf(),
+    );
 
     let parent_pid = std::os::unix::process::parent_id();
     thread::spawn(move || {
@@ -126,7 +135,8 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
     };
 
     if request.method == "GET" && request.path == "/api/usage" {
-        let (usage, available) = usage_api::collect(&config.workspace_root);
+        let (usage, available) =
+            usage_api::collect(&config.usage_state_dir, Some(&config.workspace_root));
         send_json(&mut stream, if available { 200 } else { 503 }, &usage);
         return;
     }
@@ -824,6 +834,7 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("\"openai\":{\"freshness\":\"fresh\""));
+        assert!(response.contains("\"updated_at\":\""));
         assert!(response.contains("\"used_percent\":42"));
         assert!(!response.contains("private-plan"));
         assert!(!response.contains("codex"));
@@ -845,6 +856,7 @@ mod tests {
             t3_base_dir: "unused".to_string(),
             workspace_root: workspace.to_path_buf(),
             state_dir: workspace.to_path_buf(),
+            usage_state_dir: workspace.join("usage"),
             managed_push: false,
             pin: "1234".to_string(),
             csrf_token: "csrf".to_string(),

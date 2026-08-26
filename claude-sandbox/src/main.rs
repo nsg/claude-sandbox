@@ -8,6 +8,7 @@ mod proxy_socket;
 mod ssh_proxy;
 mod t3_admin;
 mod usage_api;
+mod usage_collector;
 
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
@@ -186,6 +187,8 @@ enum Commands {
         workspace_root: PathBuf,
         #[arg(long)]
         state_dir: PathBuf,
+        #[arg(long)]
+        usage_state_dir: PathBuf,
         #[arg(long)]
         managed_push: bool,
     },
@@ -436,6 +439,7 @@ struct T3AdminConfig<'a> {
     t3_base_dir: &'a str,
     workspace_root: &'a Path,
     state_dir: &'a Path,
+    usage_state_dir: &'a Path,
     managed_push: bool,
 }
 
@@ -456,6 +460,8 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
         .arg(config.workspace_root)
         .arg("--state-dir")
         .arg(config.state_dir)
+        .arg("--usage-state-dir")
+        .arg(config.usage_state_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -501,6 +507,42 @@ fn invoked_program() -> std::ffi::OsString {
 
 fn home_dir() -> PathBuf {
     PathBuf::from(env::var("HOME").expect("HOME environment variable not set"))
+}
+
+fn usage_state_dir() -> PathBuf {
+    env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty() && Path::new(value).is_absolute())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".local/state"))
+        .join("claude-sandbox/usage")
+}
+
+fn prepare_usage_state_dir(path: &Path, workspace: &Path) -> Result<PathBuf, String> {
+    if path.starts_with(workspace) {
+        return Err("usage state must be outside the agent-mounted workspace".to_string());
+    }
+    let canonical_workspace = fs::canonicalize(workspace)
+        .map_err(|error| format!("could not resolve T3 workspace: {error}"))?;
+    let mut existing = path;
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| "usage state has no existing ancestor".to_string())?;
+    }
+    let unresolved = path
+        .strip_prefix(existing)
+        .map_err(|_| "could not resolve usage state path".to_string())?;
+    let resolved_candidate = fs::canonicalize(existing)
+        .map_err(|error| format!("could not resolve usage state parent: {error}"))?
+        .join(unresolved);
+    if resolved_candidate.starts_with(&canonical_workspace) {
+        return Err("usage state must be outside the agent-mounted workspace".to_string());
+    }
+    let canonical_state = usage_api::prepare_usage_dir(path)?;
+    if canonical_state.starts_with(&canonical_workspace) {
+        return Err("usage state must be outside the agent-mounted workspace".to_string());
+    }
+    Ok(canonical_state)
 }
 
 fn cache_dir() -> PathBuf {
@@ -1180,6 +1222,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             t3_base_dir,
             workspace_root,
             state_dir,
+            usage_state_dir,
             managed_push,
         }) => {
             t3_admin::run(t3_admin::RunOptions {
@@ -1189,6 +1232,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 t3_base_dir,
                 workspace_root,
                 state_dir,
+                usage_state_dir,
                 managed_push: *managed_push,
             });
         }
@@ -1387,6 +1431,12 @@ fn main() {
                 find_free_port_avoiding(T3CODE_PAIR_ADMIN_PORT, &excluded_ports)
             });
             let cwd = env::current_dir().expect("Could not get current directory");
+            let usage_state_dir = pair_admin_port.map(|_| {
+                prepare_usage_state_dir(&usage_state_dir(), &cwd).unwrap_or_else(|error| {
+                    eprintln!("Error: could not prepare usage state: {error}");
+                    std::process::exit(1);
+                })
+            });
             let instance_name = project_instance_name(&cwd);
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
             let mut push_state_dir = managed_push::state_dir(&home_dir(), &instance_name);
@@ -1426,7 +1476,9 @@ fn main() {
                 );
             }
             eprintln!("t3code available at http://localhost:{}", port);
-            if let Some(pair_admin_port) = pair_admin_port {
+            if let (Some(pair_admin_port), Some(usage_state_dir)) =
+                (pair_admin_port, usage_state_dir.as_deref())
+            {
                 eprintln!(
                     "t3code admin portal available at http://localhost:{}",
                     pair_admin_port
@@ -1438,6 +1490,7 @@ fn main() {
                     t3_base_dir: &instance_dir,
                     workspace_root: &cwd,
                     state_dir: &push_state_dir,
+                    usage_state_dir,
                     managed_push: cli.t3_managed_push,
                 });
             }
@@ -1515,7 +1568,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::os::unix::net::UnixListener;
     use std::os::unix::process::ExitStatusExt;
 
@@ -1610,5 +1663,33 @@ mod tests {
         fs::remove_dir(first).unwrap();
         fs::remove_dir(second).unwrap();
         fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn usage_state_must_stay_outside_the_workspace() {
+        let root = test_root("usage-state");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let lexical = workspace.join(".state/usage");
+        assert!(prepare_usage_state_dir(&lexical, &workspace).is_err());
+        assert!(!lexical.exists());
+
+        let linked_parent = outside.join("linked");
+        symlink(&workspace, &linked_parent).unwrap();
+        let canonical = linked_parent.join("nested/usage");
+        assert!(prepare_usage_state_dir(&canonical, &workspace).is_err());
+        assert!(!workspace.join("nested").exists());
+
+        let valid = outside.join("usage");
+        let prepared = prepare_usage_state_dir(&valid, &workspace).unwrap();
+        assert_eq!(prepared, fs::canonicalize(&valid).unwrap());
+        assert_eq!(
+            fs::metadata(&prepared).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

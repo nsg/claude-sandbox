@@ -179,22 +179,40 @@ reach before generating the link; a link created through `localhost` only
 works on the host. The PIN stays on the host, is neither generated nor stored
 by claude-sandbox, and must be provided again on every launch.
 
-The same host-side server exposes cached plan-limit usage without
+The same host-side server exposes account-level plan-limit usage without
 authentication. Append `/api/usage` to the admin URL printed at startup:
 
 ```bash
 curl http://localhost:3774/api/usage
 ```
 
-The response reports each provider's data freshness and its available usage
-buckets under the fixed `anthropic`, `openai`, and `ollama` keys. Each bucket
-contains an integer `used_percent` and an RFC 3339 UTC
-`resets_at` value, or `null` when the reset time is unknown or not reported.
-Missing buckets are omitted rather than reported as 0%. The endpoint reads
-cached snapshots only and never contacts a provider. It omits account, plan,
-model, cost, credit, and credential data. It returns HTTP 503 when no provider
-has a valid snapshot. Treat the result as advisory telemetry: the managed
-container updates the source cache files.
+The response reports each provider's data freshness, RFC 3339 UTC `updated_at`
+time, and available usage buckets under the fixed `anthropic`, `openai`, and
+`ollama` keys. Each bucket contains an integer `used_percent` and an RFC 3339
+UTC `resets_at` value, or `null` when the reset time is unknown or not
+reported. Missing buckets are omitted rather than reported as 0%.
+
+The host admin service elects one collector across all running sandbox
+instances. It refreshes each provider independently at startup and every 30
+minutes by running a fixed, tool-less probe in one managed container. Failed
+refreshes retain the last good snapshot and retry with bounded backoff; data
+becomes `stale` after 40 minutes. The sanitized account-global cache is stored
+under `${XDG_STATE_HOME:-$HOME/.local/state}/claude-sandbox/usage/usage-v1.json`,
+outside the agent-mounted workspace.
+
+The HTTP request itself reads that cache only and never contacts a provider.
+The collector obtains Anthropic limits through the built-in `/usage` view in
+an isolated Claude session without sending a model prompt, OpenAI limits from
+the Codex account rate-limit interface, and Ollama limits from its usage
+endpoint. Neither the cache nor the public response contains account, plan,
+model, cost, credit, credential, or raw provider-error data. The endpoint
+returns HTTP 503 only when every provider is unknown. Treat the result as
+advisory telemetry.
+
+This collector supersedes locally customized status-line or hook-based usage
+refreshers. Because those files are user-owned rather than managed by this
+repository, remove any old refresh trigger separately after upgrading; a
+status line may remain as a display-only consumer.
 
 For a long-running T3 service whose workspace contains several repositories,
 enable managed pushes:

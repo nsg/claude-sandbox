@@ -73,6 +73,9 @@ The top-level `providers` object always contains `anthropic`, `openai`, and
 `ollama`. Each has:
 
 - `freshness`: `fresh`, `stale`, or `unknown`.
+- `updated_at`: the RFC 3339 UTC time of the last successful observation, or
+  `null` when no valid snapshot exists. It may be absent during a rolling
+  upgrade from the original schema-v1 server.
 - `buckets`: the limits that provider reported. An absent bucket is unknown,
   not 0% used.
 
@@ -86,13 +89,14 @@ Each bucket has:
 Treat providers independently. A high percentage near its reset can be less
 urgent than a lower percentage with most of its window remaining. Do not infer
 headroom from an `unknown` provider, and label conclusions based on `stale` data
-as tentative. Parse `resets_at` as an absolute time so elapsed time since the
-request does not make a stored countdown wrong.
+as tentative. Parse `updated_at` and `resets_at` as absolute times so elapsed
+time since the request does not make a stored countdown wrong.
 
-The response is advisory telemetry sourced from cache files the managed
-container updates. It intentionally excludes credentials, account and plan
-identifiers, model names, costs, credits, and raw provider errors. Do not use it
-as an authentication, billing, or enforcement authority.
+The response is advisory, account-global telemetry from a host cache. A single
+elected collector refreshes each provider independently every 30 minutes; the
+endpoint itself is passive. It intentionally excludes credentials, account and
+plan identifiers, model names, costs, credits, and raw provider errors. Do not
+use it as an authentication, billing, or enforcement authority.
 
 ## Diagnose access without crossing boundaries
 
