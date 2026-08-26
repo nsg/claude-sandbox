@@ -1,0 +1,32 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "rateLimits": {
+      "planType": "private-plan"
+    },
+    "rateLimitsByLimitId": {
+      "codex": {
+        "limitName": null,
+        "primary": {
+          "usedPercent": 30.9,
+          "windowDurationMins": 10080,
+          "resetsAt": 1893456000
+        },
+        "secondary": null
+      },
+      "private-model-id": {
+        "limitName": "Private Model Name",
+        "primary": {
+          "usedPercent": 7,
+          "windowDurationMins": 300,
+          "resetsAt": 1893474000
+        },
+        "secondary": null
+      }
+    },
+    "rateLimitResetCredits": {
+      "availableCount": 99
+    }
+  }
+}

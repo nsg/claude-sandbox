@@ -1,0 +1,13 @@
+{
+  "limits": {
+    "session": {
+      "usage": 0.125
+    },
+    "weekly": {
+      "usage": 0.03
+    }
+  },
+  "activity": {
+    "cost": "private-cost"
+  }
+}

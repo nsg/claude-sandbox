@@ -126,6 +126,10 @@ RUN chmod +x /usr/local/bin/git-proxy-client /usr/local/bin/git
 COPY config/t3code-register.sh /usr/local/bin/t3code-register
 RUN chmod +x /usr/local/bin/t3code-register
 
+# Provider-neutral plan usage collector (invoked by the host admin service)
+COPY config/usage-probe.py /usr/local/bin/claude-sandbox-usage-probe
+RUN chmod 0555 /usr/local/bin/claude-sandbox-usage-probe
+
 # Wrapped tmux session helpers (wrap, wrap-type, wrap-key, wrap-read)
 COPY config/wrap.sh /usr/local/bin/wrap
 RUN chmod +x /usr/local/bin/wrap && \
