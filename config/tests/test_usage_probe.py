@@ -66,6 +66,17 @@ class NormalizeTests(unittest.TestCase):
         self.assertNotIn(b"private-plan", result.stdout)
         self.assertNotIn(b"availableCount", result.stdout)
 
+    def test_openai_normalizes_millisecond_reset_epochs(self) -> None:
+        raw = json.loads((FIXTURES / "openai-rate-limits.json").read_text(encoding="utf-8"))
+        window = raw["result"]["rateLimitsByLimitId"]["codex"]["primary"]
+        window["resetsAt"] = 1893456000123
+        value = usage_probe.normalize_openai(raw, 1893450000)
+        self.assertEqual(value["buckets"][-1]["resets_at"], 1893456000)
+
+        window["resetsAt"] = 10**18
+        value = usage_probe.normalize_openai(raw, 1893450000)
+        self.assertIsNone(value["buckets"][-1]["resets_at"])
+
     def test_ollama_normalization_is_sanitized(self) -> None:
         result, value = self.normalize_cli("ollama", "ollama-usage.json")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -153,7 +164,16 @@ class AcquisitionTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            with mock.patch.dict(os.environ, {"OLLAMA_API_KEY": "test-only-key"}):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "OLLAMA_API_KEY": "test-only-key",
+                    "HTTP_PROXY": "http://127.0.0.1:1",
+                    "http_proxy": "http://127.0.0.1:1",
+                    "NO_PROXY": "127.0.0.1",
+                    "no_proxy": "127.0.0.1",
+                },
+            ):
                 value = usage_probe.probe_ollama(
                     url=f"http://127.0.0.1:{server.server_port}/api/usage", timeout=2
                 )
@@ -186,13 +206,23 @@ class AcquisitionTests(unittest.TestCase):
                 "'home':os.environ['HOME'],'state':os.environ['CLAUDE_CONFIG_DIR'],"
                 "'secure':os.environ['CLAUDE_SECURESTORAGE_CONFIG_DIR'],"
                 "'trusted':before['projects'][os.getcwd()]['hasTrustDialogAccepted'],"
-                "'early':early,'columns':size.columns,'lines':size.lines}\n"
-                "pathlib.Path(os.environ['FAKE_CLAUDE_RECORD']).write_text(json.dumps(record))\n"
+                "'early':early,'columns':size.columns,'lines':size.lines,"
+                "'path':os.environ.get('PATH'),'http_proxy':os.environ.get('HTTP_PROXY'),"
+                "'unrelated':os.environ.get('PROBE_UNRELATED_SECRET'),"
+                "'anthropic_base':os.environ.get('ANTHROPIC_BASE_URL')}\n"
+                "pathlib.Path(sys.argv[0]).with_name('record.json').write_text(json.dumps(record))\n"
                 f"state.write_text({fixture!r})\n"
                 "print('usage opened',flush=True)\n"
                 "sys.stdin.readline()\n",
             )
-            with mock.patch.dict(os.environ, {"FAKE_CLAUDE_RECORD": str(record)}):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PROBE_UNRELATED_SECRET": "must-not-pass",
+                    "ANTHROPIC_BASE_URL": "https://must-not-pass.invalid",
+                    "HTTP_PROXY": "http://proxy.example.test:8080",
+                },
+            ):
                 value = usage_probe.probe_anthropic(
                     claude_bin=str(script), secure_storage=secure, timeout=5
                 )
@@ -201,6 +231,10 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(invocation["line"], "/usage")
         self.assertTrue(invocation["trusted"])
         self.assertEqual(invocation["secure"], str(secure))
+        self.assertTrue(invocation["path"])
+        self.assertEqual(invocation["http_proxy"], "http://proxy.example.test:8080")
+        self.assertIsNone(invocation["unrelated"])
+        self.assertIsNone(invocation["anthropic_base"])
         self.assertNotEqual(invocation["home"], str(Path.home()))
         self.assertNotEqual(invocation["home"], invocation["state"])
         self.assertFalse(invocation["early"])
@@ -210,6 +244,30 @@ class AcquisitionTests(unittest.TestCase):
         self.assertIn("--no-chrome", invocation["argv"])
         self.assertEqual(invocation["argv"][invocation["argv"].index("--permission-mode") + 1], "plan")
         self.assertEqual(invocation["argv"][invocation["argv"].index("--tools") + 1], "")
+
+    def test_nonblocking_write_handles_blocking_and_partial_progress_once(self) -> None:
+        read_fd, write_fd = os.pipe()
+        os.set_blocking(write_fd, False)
+        real_write = os.write
+        calls: list[bytes] = []
+
+        def flaky_write(fd: int, data: bytes | memoryview) -> int:
+            chunk = bytes(data)
+            calls.append(chunk)
+            if len(calls) == 1:
+                raise BlockingIOError()
+            if len(calls) == 2:
+                return real_write(fd, chunk[:3])
+            return real_write(fd, chunk)
+
+        try:
+            with mock.patch.object(usage_probe.os, "write", side_effect=flaky_write):
+                usage_probe._write_nonblocking(write_fd, b"/usage\r", usage_probe.time.monotonic() + 1)
+            self.assertEqual(os.read(read_fd, 64), b"/usage\r")
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+        self.assertEqual(calls, [b"/usage\r", b"/usage\r", b"age\r"])
 
     def test_anthropic_timeout_is_bounded_and_sanitized(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

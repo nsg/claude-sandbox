@@ -32,6 +32,29 @@ TUI_ROWS = 40
 TUI_COLUMNS = 120
 OLLAMA_USAGE_URL = "https://ollama.com/api/usage"
 PROVIDERS = {"anthropic", "openai", "ollama"}
+CLAUDE_ENV_ALLOWLIST = {
+    "ALL_PROXY",
+    "COLORTERM",
+    "CURL_CA_BUNDLE",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "NODE_EXTRA_CA_CERTS",
+    "NO_PROXY",
+    "PATH",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+}
 
 
 class ProbeError(Exception):
@@ -81,6 +104,15 @@ def _epoch(value: Any) -> int | None:
     if number < 0 or not number.is_integer():
         raise _fail("invalid-response")
     return int(number)
+
+
+def _reset_epoch(value: Any) -> int | None:
+    epoch = _epoch(value)
+    if epoch is None:
+        return None
+    if epoch >= 100_000_000_000:
+        epoch //= 1000
+    return epoch if epoch < 100_000_000_000 else None
 
 
 def _rfc3339_epoch(value: Any) -> int | None:
@@ -171,7 +203,7 @@ def normalize_openai(raw: Any, observed_at: int) -> dict[str, Any]:
                     _period_from_minutes(window["windowDurationMins"]),
                     scope,
                     _percent(window["usedPercent"]),
-                    _epoch(window.get("resetsAt")),
+                    _reset_epoch(window.get("resetsAt")),
                 )
             )
     return _protocol("openai", observed_at, buckets)
@@ -282,6 +314,29 @@ def _terminate_group(process: subprocess.Popen[bytes]) -> None:
     for stream in (process.stdin, process.stdout, process.stderr):
         if stream is not None:
             stream.close()
+
+
+def _write_nonblocking(fd: int, data: bytes, deadline: float) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        wait = deadline - time.monotonic()
+        if wait <= 0:
+            raise _fail("timeout")
+        try:
+            _, writable, _ = select.select([], [fd], [], min(wait, 0.1))
+        except (OSError, ValueError) as error:
+            raise _fail("unavailable") from error
+        if not writable:
+            continue
+        try:
+            written = os.write(fd, remaining)
+        except BlockingIOError:
+            continue
+        except OSError as error:
+            raise _fail("unavailable") from error
+        if written <= 0:
+            raise _fail("unavailable")
+        remaining = remaining[written:]
 
 
 class _JsonRpcReader:
@@ -410,7 +465,7 @@ def probe_ollama(
         headers={"Authorization": f"Bearer {_ollama_key(auth_path)}", "Accept": "application/json"},
         method="GET",
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(request, timeout=timeout) as response:
             raw = _read_json_bytes(response)
@@ -464,17 +519,7 @@ def probe_anthropic(
         empty_cwd.mkdir(mode=0o700)
         _write_private_state(private_state, empty_cwd)
         state_path = private_state / ".claude.json"
-        environment = os.environ.copy()
-        for name in (
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_BASE_URL",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_FOUNDRY",
-            "CLAUDE_CODE_USE_VERTEX",
-        ):
-            environment.pop(name, None)
+        environment = {name: value for name, value in os.environ.items() if name in CLAUDE_ENV_ALLOWLIST}
         environment.update(
             {
                 "HOME": str(private_home),
@@ -536,13 +581,17 @@ def probe_anthropic(
                         prompt_seen = prompt_seen or b"\xe2\x9d\xaf" in prompt_tail + chunk
                         prompt_tail = (prompt_tail + chunk)[-2:]
                 if not sent_usage and prompt_seen:
-                    os.write(master, b"/usage\r")
+                    _write_nonblocking(master, b"/usage\r", deadline)
                     sent_usage = True
                 state = _load_anthropic_state(state_path)
                 if state is not None:
                     try:
-                        os.write(master, b"\x1b/exit\r")
-                    except OSError:
+                        _write_nonblocking(
+                            master,
+                            b"\x1b/exit\r",
+                            min(deadline, time.monotonic() + 0.25),
+                        )
+                    except ProbeError:
                         pass
                     return normalize_anthropic(state)
                 if process.poll() is not None:
