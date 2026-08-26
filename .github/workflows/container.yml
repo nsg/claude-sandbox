@@ -69,6 +69,12 @@ jobs:
           done
           exit "$status"
 
+      - name: Test account usage probe
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONWARNINGS: "error::ResourceWarning"
+        run: python3 -B config/tests/test_usage_probe.py
+
   build-and-push-image:
     runs-on: ubuntu-latest
     timeout-minutes: 45
