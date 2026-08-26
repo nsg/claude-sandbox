@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Load before any piece of work big enough to hand off — a multi-step build, a broad sweep, a review worth a second opinion — and whenever the model or vendor pick is contested, needs a judge or a cross-vendor pair, or needs a fallback because the intended model is unavailable.
+description: Load before any piece of work big enough to hand off — a multi-step build, a broad sweep, a review worth a second opinion — and whenever the job could fan out to several models or vendors in parallel, the model or vendor pick is contested, needs a judge or a cross-vendor pair, or needs a fallback because the intended model is unavailable.
 ---
 
 # Model Selection for Delegated Work
@@ -46,6 +46,41 @@ the baseline and say the live numbers were unavailable, never guess.
 - **Scheduling needs it most.** Queued work spends a quota unwatched, so read the
   resets over the percentages — 95% resetting within the hour is safe to schedule
   behind, 60% with six days left and a heavy job already queued is not.
+
+## Parallel Fan-Out
+
+The three subscriptions are three independent lanes: concurrent runs on
+different vendors cost no more than sequential ones and finish in a fraction of
+the wall-clock. When a job splits into pieces that do not consume each other's
+output, fan it out — several models, several vendors, side by side — instead of
+feeding the pieces through one delegate in turn.
+
+- **Split on independence, then route each piece on fit.** Partition along
+  boundaries where outputs don't feed each other — separate modules, separate
+  review dimensions, code vs. docs vs. research. A fan-out is several routing
+  decisions from the table above, not one model asked several times; it is also
+  how a review gets its cross-vendor pair for free.
+- **Launch pattern.** Start each runner from the orchestrator's own background
+  Bash per its runner skill and let completion notifications drive assembly;
+  never chain a fan-out through a subagent that dies before its children finish.
+- **Disjoint files can share the checkout.** Workers editing non-overlapping
+  paths may all point at the working tree, though shared build artifacts and
+  lockfiles can still collide (two concurrent `cargo` runs fight over `target/`).
+  When in doubt, isolate.
+- **Overlapping files → one git worktree per worker.** Give each worker a
+  private, clean checkout: `git worktree add /workspace/.claude-sandbox/worktrees/<task> -b <branch>`,
+  then point the runner's cwd at it. Nothing in a worktree can step on another
+  worker; the branch is merged back or pushed to the remote when done, and the
+  worktree removed (`git worktree remove`) after integration.
+- **The main checkout is the merge point, nothing else.** While a fan-out is
+  live, no worker — and no orchestrator editing — touches the primary checkout;
+  it stays clean so integration stays trivial. Working there alongside the
+  workers is how fan-outs end in conflict archaeology.
+- **One orchestrator integrates, by rebase.** A single agent owns assembly: as
+  branches finish, rebase each onto the current tip, resolve conflicts there,
+  and fast-forward the main checkout — no merge commits, so the history reads
+  as one clean linear series. Load the `git` skill before this phase; it is all
+  write operations.
 
 ## Selection Logic
 
