@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::env;
 use std::fs::{self, DirBuilder, OpenOptions, Permissions};
 use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
@@ -13,7 +12,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const CACHE_FILE: &str = "usage-v1.json";
 const MAX_CACHE_BYTES: u64 = 64 * 1024;
-const MAX_LEGACY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const FRESH_SECS: i64 = 40 * 60;
 const MAX_CLOCK_SKEW_SECS: i64 = 5 * 60;
 const MAX_RESET_HORIZON_SECS: i64 = 366 * 24 * 60 * 60;
@@ -29,7 +27,6 @@ static RESPONSE_CACHE: OnceLock<Mutex<Option<CachedResponse>>> = OnceLock::new()
 #[derive(Clone, Debug)]
 struct CachedResponse {
     usage_dir: PathBuf,
-    legacy_workspace_root: Option<PathBuf>,
     collected_at: Instant,
     response: UsageResponse,
     available: bool,
@@ -228,7 +225,7 @@ impl ProviderUsage {
     }
 }
 
-pub fn collect(usage_dir: &Path, legacy_workspace_root: Option<&Path>) -> (UsageResponse, bool) {
+pub fn collect(usage_dir: &Path) -> (UsageResponse, bool) {
     let cache = RESPONSE_CACHE.get_or_init(|| Mutex::new(None));
     {
         let cached = cache
@@ -236,19 +233,17 @@ pub fn collect(usage_dir: &Path, legacy_workspace_root: Option<&Path>) -> (Usage
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(cached) = cached.as_ref()
             && cached.usage_dir == usage_dir
-            && cached.legacy_workspace_root.as_deref() == legacy_workspace_root
             && cached.collected_at.elapsed().as_secs() < RESPONSE_CACHE_SECS
         {
             return (cached.response.clone(), cached.available);
         }
     }
 
-    let (response, available) = collect_at(usage_dir, legacy_workspace_root, unix_time());
+    let (response, available) = collect_at(usage_dir, unix_time());
     *cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedResponse {
         usage_dir: usage_dir.to_path_buf(),
-        legacy_workspace_root: legacy_workspace_root.map(Path::to_path_buf),
         collected_at: Instant::now(),
         response: response.clone(),
         available,
@@ -256,11 +251,7 @@ pub fn collect(usage_dir: &Path, legacy_workspace_root: Option<&Path>) -> (Usage
     (response, available)
 }
 
-fn collect_at(
-    usage_dir: &Path,
-    legacy_workspace_root: Option<&Path>,
-    now: i64,
-) -> (UsageResponse, bool) {
+fn collect_at(usage_dir: &Path, now: i64) -> (UsageResponse, bool) {
     let stored = match read_stored(usage_dir, now) {
         StoredRead::Current(stored) => stored,
         StoredRead::Missing | StoredRead::Unsupported => StoredUsage::empty(),
@@ -269,9 +260,6 @@ fn collect_at(
         stored
             .provider(name)
             .cloned()
-            .or_else(|| {
-                legacy_workspace_root.and_then(|root| read_legacy_provider(name, root, now))
-            })
             .map(|snapshot| ProviderUsage::from_snapshot(snapshot, now))
             .unwrap_or_else(ProviderUsage::unknown)
     };
@@ -465,46 +453,6 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<StoreOutcom
     }
 }
 
-fn read_legacy_provider(
-    provider: Provider,
-    workspace_root: &Path,
-    now: i64,
-) -> Option<ProviderSnapshot> {
-    match provider {
-        Provider::Anthropic => find_claude_usage()
-            .as_deref()
-            .and_then(|path| read_json_file::<Value>(path, MAX_LEGACY_FILE_BYTES))
-            .and_then(|value| parse_anthropic(&value, now)),
-        Provider::Openai | Provider::Ollama => {
-            let state_dir = safe_legacy_state_dir(workspace_root)?;
-            let filename = match provider {
-                Provider::Openai => "vendor-usage.codex.json",
-                Provider::Ollama => "vendor-usage.ollama.json",
-                Provider::Anthropic => unreachable!(),
-            };
-            read_json_file::<Value>(&state_dir.join(filename), MAX_LEGACY_FILE_BYTES)
-                .and_then(|value| parse_vendor(&value, now))
-        }
-    }
-}
-
-fn find_claude_usage() -> Option<PathBuf> {
-    let home = env::var_os("HOME").map(PathBuf::from)?;
-    let mut candidates = Vec::new();
-    if let Some(directory) = env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty()) {
-        candidates.push(PathBuf::from(directory).join(".claude.json"));
-    }
-    candidates.push(home.join(".claude/.claude.json"));
-    candidates.push(home.join(".claude.json"));
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-fn safe_legacy_state_dir(workspace_root: &Path) -> Option<PathBuf> {
-    let workspace = fs::canonicalize(workspace_root).ok()?;
-    let state = fs::canonicalize(workspace_root.join(".claude-sandbox")).ok()?;
-    state.starts_with(&workspace).then_some(state)
-}
-
 fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path, limit: u64) -> Option<T> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.file_type().is_file() || metadata.len() > limit {
@@ -527,179 +475,6 @@ fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path, limit: u64) -> Opti
     serde_json::from_slice(&bytes).ok()
 }
 
-fn parse_anthropic(root: &Value, now: i64) -> Option<ProviderSnapshot> {
-    let snapshot = root.get("cachedUsageUtilization")?;
-    let observed_at = snapshot
-        .get("fetchedAtMs")?
-        .as_u64()
-        .and_then(|milliseconds| i64::try_from(milliseconds / 1000).ok())?;
-    if freshness(observed_at, now) != Freshness::Fresh {
-        return None;
-    }
-    let utilization = snapshot.get("utilization")?.as_object()?;
-    let mut buckets = utilization
-        .get("limits")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|limit| {
-            let kind = limit
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            Some(UsageBucket {
-                period: period_from_anthropic_limit(limit),
-                scope: if kind == "weekly_scoped" {
-                    Scope::Model
-                } else {
-                    Scope::Overall
-                },
-                used_percent: percent(limit.get("percent")?)?,
-                resets_at: reset_from_text(limit.get("resets_at"), observed_at),
-            })
-        })
-        .collect::<Vec<_>>();
-    if buckets.is_empty() {
-        add_anthropic_legacy_bucket(
-            &mut buckets,
-            utilization.get("five_hour"),
-            Period::Session,
-            observed_at,
-        );
-        add_anthropic_legacy_bucket(
-            &mut buckets,
-            utilization.get("seven_day"),
-            Period::Weekly,
-            observed_at,
-        );
-    }
-    if buckets.is_empty() || buckets.len() > MAX_BUCKETS {
-        return None;
-    }
-    normalize_buckets(&mut buckets);
-    Some(ProviderSnapshot {
-        observed_at,
-        buckets,
-    })
-}
-
-fn period_from_anthropic_limit(limit: &Value) -> Period {
-    if let Some(period) = limit
-        .get("group")
-        .and_then(Value::as_str)
-        .and_then(period_from_name)
-    {
-        return period;
-    }
-    match limit
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-    {
-        "five_hour" | "session" => Period::Session,
-        "seven_day" | "weekly" | "weekly_all" | "weekly_scoped" => Period::Weekly,
-        "monthly" => Period::Monthly,
-        _ => Period::Other,
-    }
-}
-
-fn add_anthropic_legacy_bucket(
-    buckets: &mut Vec<UsageBucket>,
-    source: Option<&Value>,
-    period: Period,
-    observed_at: i64,
-) {
-    let Some(source) = source else { return };
-    let Some(used_percent) = source.get("utilization").and_then(percent) else {
-        return;
-    };
-    buckets.push(UsageBucket {
-        period,
-        scope: Scope::Overall,
-        used_percent,
-        resets_at: reset_from_text(source.get("resets_at"), observed_at),
-    });
-}
-
-fn parse_vendor(root: &Value, now: i64) -> Option<ProviderSnapshot> {
-    let observed_at = root.get("fetched_at")?.as_i64()?;
-    if freshness(observed_at, now) != Freshness::Fresh {
-        return None;
-    }
-    let windows = root.pointer("/data/windows")?.as_array()?;
-    let mut buckets = windows
-        .iter()
-        .filter_map(|window| {
-            let name = window
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let period = period_from_window(window, name);
-            Some(UsageBucket {
-                period,
-                scope: scope_from_name(name, period),
-                used_percent: percent(window.get("pct")?)?,
-                resets_at: reset_from_epoch(window.get("resets_at"), observed_at),
-            })
-        })
-        .collect::<Vec<_>>();
-    if buckets.is_empty() || buckets.len() > MAX_BUCKETS {
-        return None;
-    }
-    normalize_buckets(&mut buckets);
-    Some(ProviderSnapshot {
-        observed_at,
-        buckets,
-    })
-}
-
-fn period_from_window(window: &Value, name: &str) -> Period {
-    if let Some(minutes) = window.get("window_minutes").and_then(Value::as_u64) {
-        if minutes <= 1_440 {
-            Period::Session
-        } else if minutes <= 20_160 {
-            Period::Weekly
-        } else {
-            Period::Monthly
-        }
-    } else {
-        period_from_name(name).unwrap_or(Period::Other)
-    }
-}
-
-fn period_from_name(name: &str) -> Option<Period> {
-    match name.to_ascii_lowercase().as_str() {
-        "session" => Some(Period::Session),
-        "weekly" => Some(Period::Weekly),
-        "monthly" => Some(Period::Monthly),
-        "other" => Some(Period::Other),
-        _ => None,
-    }
-}
-
-fn scope_from_name(name: &str, period: Period) -> Scope {
-    let name = name.to_ascii_lowercase();
-    let headline = name == "codex"
-        || match period {
-            Period::Session => name == "session",
-            Period::Weekly => matches!(name.as_str(), "weekly" | "weekly_all"),
-            Period::Monthly => name == "monthly",
-            Period::Other => true,
-        };
-    if headline {
-        Scope::Overall
-    } else {
-        Scope::Model
-    }
-}
-
-fn percent(value: &Value) -> Option<u8> {
-    let value = value.as_f64()?;
-    value
-        .is_finite()
-        .then_some(value.clamp(0.0, 100.0).floor() as u8)
-}
-
 fn freshness(observed_at: i64, now: i64) -> Freshness {
     if observed_at < 0 || observed_at > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
         Freshness::Unknown
@@ -710,21 +485,6 @@ fn freshness(observed_at: i64, now: i64) -> Freshness {
     }
 }
 
-fn reset_from_epoch(value: Option<&Value>, observed_at: i64) -> Option<i64> {
-    let timestamp = value?.as_i64()?;
-    valid_stored_reset(timestamp, observed_at).then_some(timestamp)
-}
-
-fn reset_from_text(value: Option<&Value>, observed_at: i64) -> Option<i64> {
-    let timestamp = parse_rfc3339_utc(value?.as_str()?)?;
-    valid_stored_reset(timestamp, observed_at).then_some(timestamp)
-}
-
-fn valid_stored_reset(timestamp: i64, observed_at: i64) -> bool {
-    timestamp >= observed_at.saturating_sub(MAX_CLOCK_SKEW_SECS)
-        && timestamp <= observed_at.saturating_add(MAX_RESET_HORIZON_SECS)
-}
-
 fn valid_public_reset(timestamp: i64, now: i64) -> bool {
     timestamp > now && timestamp <= now.saturating_add(MAX_RESET_HORIZON_SECS)
 }
@@ -732,74 +492,6 @@ fn valid_public_reset(timestamp: i64, now: i64) -> bool {
 fn normalize_buckets(buckets: &mut Vec<UsageBucket>) {
     buckets.sort();
     buckets.dedup();
-}
-
-fn parse_rfc3339_utc(value: &str) -> Option<i64> {
-    let value = value
-        .strip_suffix('Z')
-        .or_else(|| value.strip_suffix("+00:00"))?;
-    let timestamp = value.split_once('.').map_or(value, |(whole, fraction)| {
-        if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
-            ""
-        } else {
-            whole
-        }
-    });
-    if timestamp.len() != 19 || !timestamp.is_ascii() {
-        return None;
-    }
-    let bytes = timestamp.as_bytes();
-    if bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || bytes[10] != b'T'
-        || bytes[13] != b':'
-        || bytes[16] != b':'
-    {
-        return None;
-    }
-    let year = parse_digits(&timestamp[0..4])? as i64;
-    let month = parse_digits(&timestamp[5..7])? as i64;
-    let day = parse_digits(&timestamp[8..10])? as i64;
-    let hour = parse_digits(&timestamp[11..13])? as i64;
-    let minute = parse_digits(&timestamp[14..16])? as i64;
-    let second = parse_digits(&timestamp[17..19])? as i64;
-    if !(1970..=3000).contains(&year)
-        || !(1..=12).contains(&month)
-        || day < 1
-        || day > days_in_month(year, month)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-fn parse_digits(value: &str) -> Option<u32> {
-    value
-        .bytes()
-        .all(|byte| byte.is_ascii_digit())
-        .then(|| value.parse().ok())?
-}
-
-fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    }
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = year - i64::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let adjusted_month = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
 }
 
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
@@ -953,7 +645,7 @@ mod tests {
                 & 0o777,
             0o600
         );
-        let (fresh, available) = collect_at(&directory, None, NOW);
+        let (fresh, available) = collect_at(&directory, NOW);
         assert!(available);
         let fresh = serde_json::to_value(fresh).unwrap();
         assert_eq!(fresh["providers"]["openai"]["freshness"], "fresh");
@@ -966,7 +658,7 @@ mod tests {
             format_epoch(NOW + 5000)
         );
 
-        let (stale, _) = collect_at(&directory, None, NOW + FRESH_SECS + 1);
+        let (stale, _) = collect_at(&directory, NOW + FRESH_SECS + 1);
         let stale = serde_json::to_value(stale).unwrap();
         assert_eq!(stale["providers"]["openai"]["freshness"], "stale");
         fs::remove_dir_all(directory).unwrap();
@@ -975,7 +667,7 @@ mod tests {
     #[test]
     fn all_unknown_is_unavailable_with_fixed_provider_keys() {
         let directory = temporary_directory("unknown");
-        let (response, available) = collect_at(&directory, None, NOW);
+        let (response, available) = collect_at(&directory, NOW);
         let response = serde_json::to_value(response).unwrap();
 
         assert!(!available);
@@ -1008,7 +700,7 @@ mod tests {
             )
             .unwrap();
         }
-        let (response, available) = collect_at(&directory, None, NOW);
+        let (response, available) = collect_at(&directory, NOW);
         let response = serde_json::to_value(response).unwrap();
         assert!(available);
         assert_eq!(
@@ -1054,7 +746,7 @@ mod tests {
             parse_probe(anthropic.to_string().as_bytes(), Provider::Anthropic, NOW).unwrap();
         store_provider(&directory, Provider::Anthropic, snapshot, NOW).unwrap();
 
-        let (response, available) = collect_at(&directory, None, NOW);
+        let (response, available) = collect_at(&directory, NOW);
         let response = serde_json::to_value(response).unwrap();
         assert!(available);
         assert_eq!(
@@ -1088,118 +780,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fallback_is_used_for_missing_global_providers() {
-        let workspace = temporary_directory("legacy-workspace");
-        let usage = temporary_directory("legacy-global");
-        let legacy_state = workspace.join(".claude-sandbox");
-        fs::create_dir(&legacy_state).unwrap();
-        let legacy = json!({
-            "fetched_at": NOW,
-            "data": {"plan":"private-plan", "windows":[
-                {"name":"codex", "pct":9, "window_minutes":10080,
-                 "resets_at":NOW + 5000}
-            ]}
-        });
-        fs::write(
-            legacy_state.join("vendor-usage.codex.json"),
-            legacy.to_string(),
-        )
-        .unwrap();
-        store_provider(
-            &usage,
-            Provider::Ollama,
-            ProviderSnapshot {
-                observed_at: NOW,
-                buckets: vec![UsageBucket {
-                    period: Period::Weekly,
-                    scope: Scope::Overall,
-                    used_percent: 2,
-                    resets_at: None,
-                }],
-            },
-            NOW,
-        )
-        .unwrap();
-
-        let (response, available) = collect_at(&usage, Some(&workspace), NOW);
-        let public = serde_json::to_string(&response).unwrap();
-        assert!(available);
-        assert!(public.contains("\"used_percent\":9"));
-        assert!(public.contains("\"used_percent\":2"));
-        assert!(!public.contains("private-plan"));
-        fs::remove_dir_all(workspace).unwrap();
-        fs::remove_dir_all(usage).unwrap();
-    }
-
-    #[test]
-    fn global_provider_takes_precedence_over_legacy_provider() {
-        let workspace = temporary_directory("legacy-precedence-workspace");
-        let usage = temporary_directory("legacy-precedence-global");
-        let legacy_state = workspace.join(".claude-sandbox");
-        fs::create_dir(&legacy_state).unwrap();
-        fs::write(
-            legacy_state.join("vendor-usage.codex.json"),
-            json!({
-                "fetched_at":NOW,
-                "data":{"windows":[{"name":"codex", "pct":9,
-                                     "window_minutes":10080, "resets_at":null}]}
-            })
-            .to_string(),
-        )
-        .unwrap();
-        store_provider(
-            &usage,
-            Provider::Openai,
-            ProviderSnapshot {
-                observed_at: NOW,
-                buckets: vec![UsageBucket {
-                    period: Period::Weekly,
-                    scope: Scope::Overall,
-                    used_percent: 71,
-                    resets_at: None,
-                }],
-            },
-            NOW,
-        )
-        .unwrap();
-
-        let (response, available) = collect_at(&usage, Some(&workspace), NOW);
-        let response = serde_json::to_value(response).unwrap();
-        assert!(available);
-        assert_eq!(
-            response["providers"]["openai"]["buckets"][0]["used_percent"],
-            71
-        );
-        fs::remove_dir_all(workspace).unwrap();
-        fs::remove_dir_all(usage).unwrap();
-    }
-
-    #[test]
-    fn legacy_fallback_rejects_stale_snapshots() {
-        let workspace = temporary_directory("legacy-stale-workspace");
-        let usage = temporary_directory("legacy-stale-global");
-        let legacy_state = workspace.join(".claude-sandbox");
-        fs::create_dir(&legacy_state).unwrap();
-        fs::write(
-            legacy_state.join("vendor-usage.codex.json"),
-            json!({
-                "fetched_at":NOW - FRESH_SECS - 1,
-                "data":{"windows":[{"name":"codex", "pct":9,
-                                     "window_minutes":10080, "resets_at":null}]}
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let (response, available) = collect_at(&usage, Some(&workspace), NOW);
-        let response = serde_json::to_value(response).unwrap();
-        assert!(!available);
-        assert_eq!(response["providers"]["openai"]["freshness"], "unknown");
-        fs::remove_dir_all(workspace).unwrap();
-        fs::remove_dir_all(usage).unwrap();
-    }
-
-    #[test]
     fn response_cache_holds_a_snapshot_for_five_seconds() {
         let directory = temporary_directory("response-cache");
         let now = unix_time();
@@ -1212,7 +792,7 @@ mod tests {
             let snapshot =
                 parse_probe(response.to_string().as_bytes(), Provider::Openai, now).unwrap();
             store_provider(&directory, Provider::Openai, snapshot, now).unwrap();
-            let (public, _) = collect(&directory, None);
+            let (public, _) = collect(&directory);
             let public = serde_json::to_value(public).unwrap();
             assert_eq!(
                 public["providers"]["openai"]["buckets"][0]["used_percent"],
@@ -1251,19 +831,13 @@ mod tests {
     }
 
     #[test]
-    fn converts_epoch_and_rfc3339_around_leap_day() {
+    fn formats_epochs_around_leap_day() {
         assert_eq!(format_epoch(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_epoch(951_827_696), "2000-02-29T12:34:56Z");
-        assert_eq!(
-            parse_rfc3339_utc("2000-02-29T12:34:56.123+00:00"),
-            Some(951_827_696)
-        );
-        assert_eq!(parse_rfc3339_utc("2001-02-29T12:34:56Z"), None);
-        assert_eq!(parse_rfc3339_utc("2000-02-29T12:34:56-04:00"), None);
     }
 
     fn temporary_directory(label: &str) -> PathBuf {
-        let path = env::temp_dir().join(format!(
+        let path = std::env::temp_dir().join(format!(
             "claude-sandbox-usage-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()

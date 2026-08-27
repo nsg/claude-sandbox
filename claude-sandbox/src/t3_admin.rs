@@ -135,8 +135,7 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
     };
 
     if request.method == "GET" && request.path == "/api/usage" {
-        let (usage, available) =
-            usage_api::collect(&config.usage_state_dir, Some(&config.workspace_root));
+        let (usage, available) = usage_api::collect(&config.usage_state_dir);
         send_json(&mut stream, if available { 200 } else { 503 }, &usage);
         return;
     }
@@ -801,30 +800,34 @@ mod tests {
     #[test]
     fn serves_sanitized_cached_usage() {
         let workspace = temporary_workspace("cached");
-        let state = workspace.join(".claude-sandbox");
-        std::fs::create_dir_all(&state).unwrap();
+        let config = test_config(&workspace);
+        std::fs::create_dir_all(&config.usage_state_dir).unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let cache = serde_json::json!({
-            "fetched_at": now,
-            "data": {
-                "plan": "private-plan",
-                "windows": [{
-                    "name": "codex",
-                    "pct": 42,
-                    "window_minutes": 10080,
-                    "resets_at": now + 3600
-                }]
+            "schema_version": 1,
+            "providers": {
+                "anthropic": null,
+                "openai": {
+                    "observed_at": now,
+                    "private_plan": "private-plan",
+                    "buckets": [{
+                        "period": "weekly",
+                        "scope": "overall",
+                        "used_percent": 42,
+                        "resets_at": now + 3600
+                    }]
+                },
+                "ollama": null
             }
         });
         std::fs::write(
-            state.join("vendor-usage.codex.json"),
+            config.usage_state_dir.join(usage_api::CACHE_FILE),
             serde_json::to_vec(&cache).unwrap(),
         )
         .unwrap();
-        let config = test_config(&workspace);
 
         let response = make_request(
             &config,
@@ -837,7 +840,6 @@ mod tests {
         assert!(response.contains("\"updated_at\":\""));
         assert!(response.contains("\"used_percent\":42"));
         assert!(!response.contains("private-plan"));
-        assert!(!response.contains("codex"));
     }
 
     fn temporary_workspace(label: &str) -> PathBuf {

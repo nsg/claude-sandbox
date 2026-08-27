@@ -31,15 +31,13 @@ one; otherwise load the `claude`, `codex`, or `opencode` skill for that CLI.
 Affordability above is a baseline; it cannot say which pool is pressed today, and
 the best baseline is the wrong pick when that pool is the one running dry.
 
-`~/.claude/usage-report.sh` prints all three, legends its own symbols, and
-documents its flags under `--help`. It ships separately and is not on every host
-— test for it (`[[ -x ~/.claude/usage-report.sh ]]`), and without it select on
-the baseline and say the live numbers were unavailable, never guess.
+Load the `plan-usage` skill when current headroom would affect routing. It reads
+the passive, account-global host API and explains freshness and reset timing.
+If that endpoint is unavailable, select on the baseline and say the live numbers
+were unavailable; never query provider APIs or infer headroom from missing data.
 
-- **Skip it when the figures are already here.** A budget hook warns when a pool
-  is pressed and the status line carries the same numbers, so hook silence is
-  itself a reading. An earlier report in the conversation still holds — these
-  move over hours, not turns.
+- **Reuse figures already in the conversation.** These move over hours, not
+  turns, so a recent API result usually still holds.
 - **Call it when it would change the plan.** Before a long run, a wide fan-out or
   a multi-round review; when two pools fit equally; when a fallback crosses
   vendors. Not before an ordinary delegation.
