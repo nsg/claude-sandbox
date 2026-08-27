@@ -6,6 +6,7 @@ on:
     paths:
       - claude-sandbox/**
       - skills/**
+      - .github/workflows/release.yml
 
 jobs:
   release:
@@ -15,7 +16,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Build claude-sandbox binary
         run: |
