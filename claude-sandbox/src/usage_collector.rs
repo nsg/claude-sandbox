@@ -245,6 +245,9 @@ fn run_probe(
 
 fn probe_command(container_name: &str, provider: Provider) -> Command {
     let mut command = Command::new("podman");
+    // TODO(compat-remove 2026-09-04): Remove this capability flag with the
+    // probe's legacy output after the daily host/image restart rollout. Usage
+    // reporting does not justify compatibility beyond one week.
     command.args([
         "exec",
         container_name,
@@ -252,6 +255,8 @@ fn probe_command(container_name: &str, provider: Provider) -> Command {
         "--signal=TERM",
         "--kill-after=2s",
         "25s",
+        "env",
+        "CLAUDE_SANDBOX_USAGE_LABELS=1",
         HELPER_PATH,
         provider.as_str(),
     ]);
@@ -506,6 +511,8 @@ mod tests {
                 "--signal=TERM",
                 "--kill-after=2s",
                 "25s",
+                "env",
+                "CLAUDE_SANDBOX_USAGE_LABELS=1",
                 HELPER_PATH,
                 "anthropic"
             ]

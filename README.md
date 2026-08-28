@@ -188,9 +188,13 @@ curl http://localhost:3774/api/usage
 
 The response reports each provider's data freshness, RFC 3339 UTC `updated_at`
 time, and available usage buckets under the fixed `anthropic`, `openai`, and
-`ollama` keys. Each bucket contains an integer `used_percent` and an RFC 3339
-UTC `resets_at` value, or `null` when the reset time is unknown or not
-reported. Missing buckets are omitted rather than reported as 0%.
+`ollama` keys. Each bucket contains an integer `used_percent`, its normalized
+`period`, and an RFC 3339 UTC `resets_at` value, or `null` when the reset time
+is unknown or not reported. A sanitized provider-supplied `label` and native
+`window` name are included when available. `scope` is present only when the
+provider establishes that the limit is `overall` or model-specific; do not
+infer a scope from an unlabeled or provider-specific limit. Missing buckets are
+omitted rather than reported as 0%.
 
 The host admin service elects one collector across all running sandbox
 instances. It refreshes each provider independently at startup and every 30
@@ -204,10 +208,11 @@ The HTTP request itself reads that cache only and never contacts a provider.
 The collector obtains Anthropic limits through the built-in `/usage` view in
 an isolated Claude session without sending a model prompt, OpenAI limits from
 the Codex account rate-limit interface, and Ollama limits from its usage
-endpoint. Neither the cache nor the public response contains account, plan,
-model, cost, credit, credential, or raw provider-error data. The endpoint
-returns HTTP 503 only when every provider is unknown. Treat the result as
-advisory telemetry.
+endpoint. The cache and public response retain provider limit and model labels
+needed to interpret the percentages. They exclude credentials and tokens,
+account identifiers, billing amounts, costs and credits, and raw provider
+errors. The endpoint returns HTTP 503 only when every provider is unknown.
+Treat the result as advisory telemetry.
 
 This collector supersedes locally customized status-line or hook-based usage
 refreshers. Because those files are user-owned rather than managed by this
@@ -232,7 +237,8 @@ The portal uses plain HTTP. Anyone able to observe the traffic can recover both
 the PIN and generated pairing token, and a short PIN can be guessed. Never
 expose it to the internet; use it over an encrypted trusted path such as a VPN
 or SSH tunnel. `GET /api/usage` is intentionally unauthenticated, so anyone who
-can reach the admin port can observe usage percentages and reset schedules.
+can reach the admin port can observe usage percentages, reset schedules, and
+the associated provider limit or model labels.
 
 ### Wrapped sessions
 

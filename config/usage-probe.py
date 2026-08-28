@@ -31,6 +31,7 @@ DEFAULT_TIMEOUT = 20.0
 TUI_ROWS = 40
 TUI_COLUMNS = 120
 OLLAMA_USAGE_URL = "https://ollama.com/api/usage"
+LABELS_ENV = "CLAUDE_SANDBOX_USAGE_LABELS"
 PROVIDERS = {"anthropic", "openai", "ollama"}
 CLAUDE_ENV_ALLOWLIST = {
     "ALL_PROXY",
@@ -147,27 +148,61 @@ def _period_from_name(value: Any) -> str:
     return name if name in {"session", "weekly", "monthly", "other"} else "other"
 
 
-def _bucket(period: str, scope: str, used_percent: int, resets_at: int | None) -> dict[str, Any]:
-    return {
+def _label(value: Any, *, max_bytes: int = 128) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if any(not character.isprintable() for character in value):
+        return None
+    normalized = " ".join(value.split())
+    if not normalized or len(normalized.encode("utf-8")) > max_bytes:
+        return None
+    return normalized
+
+
+def _bucket(
+    period: str,
+    scope: str | None,
+    used_percent: int,
+    resets_at: int | None,
+    *,
+    label: str | None = None,
+    window: str | None = None,
+) -> dict[str, Any]:
+    bucket: dict[str, Any] = {
         "period": period,
-        "scope": scope,
         "used_percent": used_percent,
         "resets_at": resets_at,
     }
+    if scope is not None:
+        bucket["scope"] = scope
+    if label is not None:
+        bucket["label"] = label
+    if window is not None:
+        bucket["window"] = window
+    return bucket
 
 
 def _protocol(provider: str, observed_at: int, buckets: list[dict[str, Any]]) -> dict[str, Any]:
     if provider not in PROVIDERS or observed_at < 0 or not buckets or len(buckets) > 32:
         raise _fail("invalid-response")
     unique = {
-        (bucket["period"], bucket["scope"], bucket["used_percent"], bucket["resets_at"]): bucket
+        (
+            bucket["period"],
+            bucket.get("scope"),
+            bucket.get("label"),
+            bucket.get("window"),
+            bucket["used_percent"],
+            bucket["resets_at"],
+        ): bucket
         for bucket in buckets
     }
     ordered = sorted(
         unique.values(),
         key=lambda item: (
             ("session", "weekly", "monthly", "other").index(item["period"]),
-            ("overall", "model").index(item["scope"]),
+            {"overall": 1, "model": 2}.get(item.get("scope"), 0),
+            item.get("label") or "",
+            item.get("window") or "",
             item["used_percent"],
             item["resets_at"] or 0,
         ),
@@ -180,17 +215,33 @@ def _protocol(provider: str, observed_at: int, buckets: list[dict[str, Any]]) ->
     }
 
 
+def _legacy_protocol(result: dict[str, Any]) -> dict[str, Any]:
+    # TODO(compat-remove 2026-09-04): Remove this legacy shape after the
+    # labeled probe has survived the daily host/image restart rollout. Usage
+    # reporting is non-critical; old dangling installations may then break.
+    buckets = []
+    for source in result["buckets"]:
+        bucket = dict(source)
+        bucket.pop("label", None)
+        bucket.pop("window", None)
+        legacy_model_scope = (
+            result["provider"] == "openai" or source.get("window") == "weekly_scoped"
+        )
+        bucket.setdefault("scope", "model" if legacy_model_scope else "overall")
+        buckets.append(bucket)
+    return {**result, "buckets": buckets}
+
+
 def normalize_openai(raw: Any, observed_at: int) -> dict[str, Any]:
     result = _object(_object(raw).get("result"))
     limits = _object(result.get("rateLimitsByLimitId"))
     buckets: list[dict[str, Any]] = []
     for limit_id, raw_limit in limits.items():
         limit = _object(raw_limit)
-        name_value = limit.get("limitName")
-        if not isinstance(name_value, str) or not name_value:
-            name_value = limit_id
-        name = name_value.lower() if isinstance(name_value, str) else ""
-        scope = "overall" if name == "codex" else "model"
+        label = _label(limit.get("limitName"))
+        scope = "overall" if limit_id == "codex" else None
+        if label is None and limit_id == "codex":
+            label = "Codex"
         for slot in ("primary", "secondary"):
             window_value = limit.get(slot)
             if window_value is None:
@@ -204,6 +255,8 @@ def normalize_openai(raw: Any, observed_at: int) -> dict[str, Any]:
                     scope,
                     _percent(window["usedPercent"]),
                     _reset_epoch(window.get("resetsAt")),
+                    label=label,
+                    window=slot,
                 )
             )
     return _protocol("openai", observed_at, buckets)
@@ -217,7 +270,13 @@ def normalize_ollama(raw: Any, observed_at: int) -> dict[str, Any]:
         if limit.get("usage") is None:
             continue
         buckets.append(
-            _bucket(_period_from_name(name), "overall", _percent(limit["usage"], fraction=True), None)
+            _bucket(
+                _period_from_name(name),
+                "overall",
+                _percent(limit["usage"], fraction=True),
+                None,
+                label=_label(name),
+            )
         )
     return _protocol("ollama", observed_at, buckets)
 
@@ -236,6 +295,24 @@ def _anthropic_period(limit: dict[str, Any]) -> str:
     return "other"
 
 
+def _anthropic_model(limit: dict[str, Any]) -> tuple[bool, str | None]:
+    scope = limit.get("scope")
+    if not isinstance(scope, dict):
+        return False, None
+    model = scope.get("model")
+    if not isinstance(model, dict):
+        return False, None
+    return True, _label(model.get("display_name"))
+
+
+def _anthropic_scope(limit: dict[str, Any], model_scoped: bool) -> str | None:
+    if model_scoped:
+        return "model"
+    if limit.get("kind") in {"session", "five_hour", "weekly_all", "monthly"}:
+        return "overall"
+    return None
+
+
 def normalize_anthropic(raw: Any, _observed_at: int | None = None) -> dict[str, Any]:
     snapshot = _object(_object(raw).get("cachedUsageUtilization"))
     fetched_ms = _epoch(snapshot.get("fetchedAtMs"))
@@ -250,12 +327,16 @@ def normalize_anthropic(raw: Any, _observed_at: int | None = None) -> dict[str, 
             limit = _object(raw_limit)
             if limit.get("percent") is None:
                 continue
+            model_scoped, label = _anthropic_model(limit)
+            kind = _label(limit.get("kind"), max_bytes=64)
             buckets.append(
                 _bucket(
                     _anthropic_period(limit),
-                    "model" if limit.get("kind") == "weekly_scoped" else "overall",
+                    _anthropic_scope(limit, model_scoped),
                     _percent(limit["percent"]),
                     _rfc3339_epoch(limit.get("resets_at")),
+                    label=label,
+                    window=kind,
                 )
             )
     if not buckets:
@@ -272,6 +353,7 @@ def normalize_anthropic(raw: Any, _observed_at: int | None = None) -> dict[str, 
                     "overall",
                     _percent(legacy["utilization"]),
                     _rfc3339_epoch(legacy.get("resets_at")),
+                    window=key,
                 )
             )
     return _protocol("anthropic", observed_at, buckets)
@@ -620,6 +702,8 @@ def main(argv: list[str]) -> int:
                 "openai": probe_openai,
                 "ollama": probe_ollama,
             }[argv[0]]()
+            if os.environ.get(LABELS_ENV) != "1":
+                result = _legacy_protocol(result)
         else:
             raise _fail("invalid-invocation")
         sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")

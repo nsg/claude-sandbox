@@ -45,9 +45,22 @@ class NormalizeTests(unittest.TestCase):
         self.assertIsInstance(value["observed_at"], int)
         self.assertGreater(len(value["buckets"]), 0)
         for bucket in value["buckets"]:
-            self.assertEqual(set(bucket), {"period", "scope", "used_percent", "resets_at"})
+            self.assertTrue(
+                {"period", "used_percent", "resets_at"}.issubset(bucket), bucket
+            )
+            self.assertTrue(
+                set(bucket).issubset(
+                    {"period", "scope", "label", "window", "used_percent", "resets_at"}
+                ),
+                bucket,
+            )
             self.assertIn(bucket["period"], {"session", "weekly", "monthly", "other"})
-            self.assertIn(bucket["scope"], {"overall", "model"})
+            if "scope" in bucket:
+                self.assertIn(bucket["scope"], {"overall", "model"})
+            if "label" in bucket:
+                self.assertIsInstance(bucket["label"], str)
+            if "window" in bucket:
+                self.assertIsInstance(bucket["window"], str)
             self.assertIsInstance(bucket["used_percent"], int)
             self.assertTrue(bucket["resets_at"] is None or isinstance(bucket["resets_at"], int))
 
@@ -58,13 +71,50 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(
             value["buckets"],
             [
-                {"period": "session", "scope": "model", "used_percent": 7, "resets_at": 1893474000},
-                {"period": "weekly", "scope": "overall", "used_percent": 30, "resets_at": 1893456000},
+                {
+                    "period": "session",
+                    "used_percent": 7,
+                    "resets_at": 1893474000,
+                    "label": "Private Model Name",
+                    "window": "primary",
+                },
+                {
+                    "period": "weekly",
+                    "scope": "overall",
+                    "used_percent": 30,
+                    "resets_at": 1893456000,
+                    "label": "Codex",
+                    "window": "primary",
+                },
             ],
         )
-        self.assertNotIn(b"Private", result.stdout)
+        self.assertIn(b"Private Model Name", result.stdout)
+        self.assertNotIn(b"private-model-id", result.stdout)
         self.assertNotIn(b"private-plan", result.stdout)
         self.assertNotIn(b"availableCount", result.stdout)
+
+    def test_openai_drops_unsafe_labels_without_leaking_limit_ids(self) -> None:
+        raw = json.loads((FIXTURES / "openai-rate-limits.json").read_text(encoding="utf-8"))
+        private = raw["result"]["rateLimitsByLimitId"]["private-model-id"]
+        private["limitName"] = "unsafe\nlabel"
+        value = usage_probe.normalize_openai(raw, 1893450000)
+        bucket = next(bucket for bucket in value["buckets"] if bucket["period"] == "session")
+        self.assertNotIn("label", bucket)
+        self.assertNotIn("scope", bucket)
+        self.assertNotIn("private-model-id", json.dumps(value))
+
+        private["limitName"] = "x" * 129
+        value = usage_probe.normalize_openai(raw, 1893450000)
+        bucket = next(bucket for bucket in value["buckets"] if bucket["period"] == "session")
+        self.assertNotIn("label", bucket)
+
+    def test_legacy_protocol_remains_compatible_with_strict_old_hosts(self) -> None:
+        raw = json.loads((FIXTURES / "openai-rate-limits.json").read_text(encoding="utf-8"))
+        value = usage_probe._legacy_protocol(usage_probe.normalize_openai(raw, 1893450000))
+        for bucket in value["buckets"]:
+            self.assertEqual(set(bucket), {"period", "scope", "used_percent", "resets_at"})
+            self.assertIn(bucket["scope"], {"overall", "model"})
+        self.assertNotIn("private-model-id", json.dumps(value))
 
     def test_openai_normalizes_millisecond_reset_epochs(self) -> None:
         raw = json.loads((FIXTURES / "openai-rate-limits.json").read_text(encoding="utf-8"))
@@ -82,18 +132,41 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_contract(value, "ollama")
         self.assertEqual([bucket["used_percent"] for bucket in value["buckets"]], [12, 3])
+        self.assertEqual([bucket["label"] for bucket in value["buckets"]], ["session", "weekly"])
         self.assertTrue(all(bucket["resets_at"] is None for bucket in value["buckets"]))
         self.assertNotIn(b"cost", result.stdout)
 
-    def test_anthropic_normalization_uses_snapshot_time_and_hides_names(self) -> None:
+    def test_anthropic_normalization_uses_snapshot_time_and_preserves_model_name(self) -> None:
         result, value = self.normalize_cli("anthropic", "anthropic-usage.json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_contract(value, "anthropic")
         self.assertEqual(value["observed_at"], 1893456000)
         self.assertEqual([bucket["used_percent"] for bucket in value["buckets"]], [16, 3, 4])
-        self.assertNotIn(b"Private", result.stdout)
+        self.assertEqual(value["buckets"][-1]["label"], "Private Anthropic Model")
+        self.assertEqual(value["buckets"][-1]["scope"], "model")
+        self.assertIn(b"Private Anthropic Model", result.stdout)
         self.assertNotIn(b"extra_usage", result.stdout)
         self.assertNotIn(b"monthly_limit", result.stdout)
+
+    def test_anthropic_model_scope_does_not_depend_on_label_safety(self) -> None:
+        source = json.loads((FIXTURES / "anthropic-usage.json").read_text(encoding="utf-8"))
+        limit = source["cachedUsageUtilization"]["utilization"]["limits"][-1]
+        limit["kind"] = "provider_specific"
+        for unsafe in ("unsafe\nlabel", "\N{NO-BREAK SPACE}", "x" * 129):
+            limit["scope"]["model"]["display_name"] = unsafe
+            value = usage_probe.normalize_anthropic(source)
+            bucket = next(
+                bucket for bucket in value["buckets"] if bucket.get("window") == "provider_specific"
+            )
+            self.assertEqual(bucket["scope"], "model")
+            self.assertNotIn("label", bucket)
+
+        del limit["scope"]
+        value = usage_probe.normalize_anthropic(source)
+        bucket = next(
+            bucket for bucket in value["buckets"] if bucket.get("window") == "provider_specific"
+        )
+        self.assertNotIn("scope", bucket)
 
     def test_empty_or_malformed_input_fails_without_stdout(self) -> None:
         for provider, raw in (("ollama", b'{"limits":{}}'), ("openai", b"not-json")):
@@ -137,7 +210,8 @@ class AcquisitionTests(unittest.TestCase):
             value = usage_probe.probe_openai(codex_bin=str(script), timeout=2)
         self.assertEqual(value["provider"], "openai")
         encoded = json.dumps(value)
-        self.assertNotIn("Private", encoded)
+        self.assertIn("Private Model Name", encoded)
+        self.assertNotIn("private-model-id", encoded)
         self.assertNotIn("private-plan", encoded)
 
     def test_ollama_calls_only_usage_endpoint(self) -> None:

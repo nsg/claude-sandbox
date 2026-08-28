@@ -82,21 +82,27 @@ The top-level `providers` object always contains `anthropic`, `openai`, and
 Each bucket has:
 
 - `period`: `session`, `weekly`, `monthly`, or `other`.
-- `scope`: `overall` or an anonymized `model`-specific limit.
+- `label`: a sanitized provider limit or model display name, when available.
+- `window`: the provider's native window name, when useful and available.
+- `scope`: `overall` or `model` only when the provider establishes that
+  meaning; it is absent when the limit's semantics are provider-specific.
 - `used_percent`: an integer from 0 through 100.
 - `resets_at`: an RFC 3339 UTC timestamp, or `null` when unknown or unreported.
 
 Treat providers independently. A high percentage near its reset can be less
 urgent than a lower percentage with most of its window remaining. Do not infer
-headroom from an `unknown` provider, and label conclusions based on `stale` data
-as tentative. Parse `updated_at` and `resets_at` as absolute times so elapsed
-time since the request does not make a stored countdown wrong.
+headroom from an `unknown` provider, infer a model scope when `scope` is absent,
+or treat `label` as a stable identifier. Prefer the label when describing a
+bucket, and label conclusions based on `stale` data as tentative. Parse
+`updated_at` and `resets_at` as absolute times so elapsed time since the request
+does not make a stored countdown wrong.
 
 The response is advisory, account-global telemetry from a host cache. A single
 elected collector refreshes each provider independently every 30 minutes; the
-endpoint itself is passive. It intentionally excludes credentials, account and
-plan identifiers, model names, costs, credits, and raw provider errors. Do not
-use it as an authentication, billing, or enforcement authority.
+endpoint itself is passive. It retains provider limit and model labels needed
+to interpret the percentages, while excluding credentials and tokens, account
+identifiers, billing amounts, costs and credits, and raw provider errors. Do
+not use it as an authentication, billing, or enforcement authority.
 
 ## Diagnose access without crossing boundaries
 

@@ -815,7 +815,8 @@ mod tests {
                     "private_plan": "private-plan",
                     "buckets": [{
                         "period": "weekly",
-                        "scope": "overall",
+                        "label": "GPT-5 Codex",
+                        "window": "secondary",
                         "used_percent": 42,
                         "resets_at": now + 3600
                     }]
@@ -839,6 +840,9 @@ mod tests {
         assert!(response.contains("\"openai\":{\"freshness\":\"fresh\""));
         assert!(response.contains("\"updated_at\":\""));
         assert!(response.contains("\"used_percent\":42"));
+        assert!(response.contains("\"label\":\"GPT-5 Codex\""));
+        assert!(response.contains("\"window\":\"secondary\""));
+        assert!(!response.contains("\"scope\":\"model\""));
         assert!(!response.contains("private-plan"));
     }
 

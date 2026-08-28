@@ -16,6 +16,8 @@ const FRESH_SECS: i64 = 40 * 60;
 const MAX_CLOCK_SKEW_SECS: i64 = 5 * 60;
 const MAX_RESET_HORIZON_SECS: i64 = 366 * 24 * 60 * 60;
 const MAX_BUCKETS: usize = 32;
+const MAX_LABEL_BYTES: usize = 128;
+const MAX_WINDOW_BYTES: usize = 64;
 const RESPONSE_CACHE_SECS: u64 = 5;
 #[cfg(target_os = "linux")]
 const O_NONBLOCK: i32 = 0o4_000;
@@ -112,7 +114,12 @@ enum Freshness {
 #[serde(deny_unknown_fields)]
 struct ProbeBucket {
     period: Period,
-    scope: Scope,
+    #[serde(default)]
+    scope: Option<Scope>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    window: Option<String>,
     used_percent: u8,
     resets_at: Option<i64>,
 }
@@ -120,7 +127,12 @@ struct ProbeBucket {
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 struct UsageBucket {
     period: Period,
-    scope: Scope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<Scope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window: Option<String>,
     used_percent: u8,
     resets_at: Option<i64>,
 }
@@ -128,7 +140,12 @@ struct UsageBucket {
 #[derive(Clone, Debug, Serialize)]
 struct PublicBucket {
     period: Period,
-    scope: Scope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<Scope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window: Option<String>,
     used_percent: u8,
     resets_at: Option<String>,
 }
@@ -206,6 +223,8 @@ impl ProviderUsage {
             .map(|bucket| PublicBucket {
                 period: bucket.period,
                 scope: bucket.scope,
+                label: bucket.label,
+                window: bucket.window,
                 used_percent: bucket.used_percent,
                 resets_at: bucket
                     .resets_at
@@ -317,6 +336,8 @@ pub(crate) fn parse_probe(
             .map(|bucket| UsageBucket {
                 period: bucket.period,
                 scope: bucket.scope,
+                label: bucket.label,
+                window: bucket.window,
                 used_percent: bucket.used_percent,
                 resets_at: bucket.resets_at,
             })
@@ -369,6 +390,20 @@ fn sanitize_snapshot(snapshot: &mut ProviderSnapshot, now: i64) -> Result<(), St
         if bucket.used_percent > 100 {
             return Err("helper percentage exceeds 100".to_string());
         }
+        if bucket
+            .label
+            .as_deref()
+            .is_some_and(|label| !valid_display_text(label, MAX_LABEL_BYTES))
+        {
+            bucket.label = None;
+        }
+        if bucket
+            .window
+            .as_deref()
+            .is_some_and(|window| !valid_display_text(window, MAX_WINDOW_BYTES))
+        {
+            bucket.window = None;
+        }
         if let Some(reset) = bucket.resets_at
             && (reset < snapshot.observed_at.saturating_sub(MAX_CLOCK_SKEW_SECS)
                 || reset > snapshot.observed_at.saturating_add(MAX_RESET_HORIZON_SECS))
@@ -377,6 +412,28 @@ fn sanitize_snapshot(snapshot: &mut ProviderSnapshot, now: i64) -> Result<(), St
         }
     }
     Ok(())
+}
+
+fn valid_display_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.chars().any(|character| character != ' ')
+        && value.chars().all(|character| {
+            !character.is_control()
+                && (!character.is_whitespace() || character == ' ')
+                && !matches!(
+                    character,
+                    '\u{00ad}'
+                        | '\u{061c}'
+                        | '\u{200b}'..='\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2060}'..='\u{2064}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{feff}'
+                        | '\u{fff9}'..='\u{fffb}'
+                        | '\u{e0000}'..='\u{e007f}'
+                )
+        })
 }
 
 fn read_stored(usage_dir: &Path, now: i64) -> StoredRead {
@@ -540,11 +597,13 @@ mod tests {
             "provider": "openai",
             "observed_at": NOW - 20,
             "buckets": [
-                {"period":"weekly", "scope":"overall", "used_percent":42,
-                 "resets_at":NOW + 5000},
-                {"period":"session", "scope":"model", "used_percent":7,
+                {"period":"weekly", "scope":"overall", "label":"Codex",
+                 "window":"secondary", "used_percent":42, "resets_at":NOW + 5000},
+                {"period":"session", "label":"GPT-5 Codex", "window":"primary",
+                 "used_percent":7,
                  "resets_at":null},
-                {"period":"session", "scope":"model", "used_percent":7,
+                {"period":"session", "label":"GPT-5 Codex", "window":"primary",
+                 "used_percent":7,
                  "resets_at":null}
             ]
         });
@@ -557,6 +616,8 @@ mod tests {
 
         assert_eq!(snapshot.buckets.len(), 2);
         assert_eq!(snapshot.buckets[0].period, Period::Session);
+        assert_eq!(snapshot.buckets[0].scope, None);
+        assert_eq!(snapshot.buckets[0].label.as_deref(), Some("GPT-5 Codex"));
         assert_eq!(snapshot.buckets[1].period, Period::Weekly);
     }
 
@@ -573,7 +634,7 @@ mod tests {
         unknown["account"] = json!("private");
         assert!(parse_probe(unknown.to_string().as_bytes(), Provider::Openai, NOW).is_err());
         let mut unknown_bucket = base.clone();
-        unknown_bucket["buckets"][0]["name"] = json!("private model");
+        unknown_bucket["buckets"][0]["account_id"] = json!("private");
         assert!(parse_probe(unknown_bucket.to_string().as_bytes(), Provider::Openai, NOW).is_err());
         assert!(parse_probe(base.to_string().as_bytes(), Provider::Ollama, NOW).is_err());
 
@@ -584,6 +645,51 @@ mod tests {
         let mut future = base;
         future["observed_at"] = json!(NOW + MAX_CLOCK_SKEW_SECS + 1);
         assert!(parse_probe(future.to_string().as_bytes(), Provider::Openai, NOW).is_err());
+    }
+
+    #[test]
+    fn preserves_safe_labels_and_drops_unsafe_optional_display_text() {
+        let long_window = "x".repeat(MAX_WINDOW_BYTES + 1);
+        let response = json!({
+            "schema_version":1, "provider":"openai", "observed_at":NOW,
+            "buckets":[
+                {"period":"session", "label":"GPT-5 Codex", "window":"primary",
+                 "used_percent":7, "resets_at":null},
+                {"period":"weekly", "scope":"overall", "label":"bad\u{1b}[31m",
+                 "window":"\u{202e}secondary", "used_percent":42, "resets_at":null},
+                {"period":"monthly", "label":"Named limit", "window":long_window,
+                 "used_percent":3, "resets_at":null}
+            ]
+        });
+        let snapshot = parse_probe(response.to_string().as_bytes(), Provider::Openai, NOW).unwrap();
+
+        assert_eq!(snapshot.buckets[0].label.as_deref(), Some("GPT-5 Codex"));
+        assert_eq!(snapshot.buckets[0].window.as_deref(), Some("primary"));
+        assert_eq!(snapshot.buckets[0].scope, None);
+        assert_eq!(snapshot.buckets[1].label, None);
+        assert_eq!(snapshot.buckets[1].window, None);
+        assert_eq!(snapshot.buckets[1].scope, Some(Scope::Overall));
+        assert_eq!(snapshot.buckets[2].label.as_deref(), Some("Named limit"));
+        assert_eq!(snapshot.buckets[2].window, None);
+    }
+
+    #[test]
+    fn rejects_invisible_and_directional_display_text() {
+        assert!(valid_display_text("GPT-5 Codex", MAX_LABEL_BYTES));
+        for value in [
+            "",
+            "   ",
+            "line\u{2028}break",
+            "hidden\u{feff}mark",
+            "tag\u{e0001}",
+            "right\u{202e}left",
+        ] {
+            assert!(!valid_display_text(value, MAX_LABEL_BYTES), "{value:?}");
+        }
+        assert!(!valid_display_text(
+            &"x".repeat(MAX_LABEL_BYTES + 1),
+            MAX_LABEL_BYTES
+        ));
     }
 
     #[test]
@@ -626,7 +732,9 @@ mod tests {
             observed_at: NOW - 10,
             buckets: vec![UsageBucket {
                 period: Period::Weekly,
-                scope: Scope::Overall,
+                scope: Some(Scope::Overall),
+                label: Some("Codex".to_string()),
+                window: Some("secondary".to_string()),
                 used_percent: 42,
                 resets_at: Some(NOW + 5000),
             }],
@@ -657,6 +765,7 @@ mod tests {
             fresh["providers"]["openai"]["buckets"][0]["resets_at"],
             format_epoch(NOW + 5000)
         );
+        assert_eq!(fresh["providers"]["openai"]["buckets"][0]["label"], "Codex");
 
         let (stale, _) = collect_at(&directory, NOW + FRESH_SECS + 1);
         let stale = serde_json::to_value(stale).unwrap();
@@ -691,7 +800,9 @@ mod tests {
                     observed_at: NOW,
                     buckets: vec![UsageBucket {
                         period: Period::Weekly,
-                        scope: Scope::Overall,
+                        scope: Some(Scope::Overall),
+                        label: None,
+                        window: None,
                         used_percent: used,
                         resets_at: None,
                     }],
