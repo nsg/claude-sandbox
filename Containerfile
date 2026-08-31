@@ -23,6 +23,7 @@ RUN apt-get update && apt-get upgrade -y && \
         libssl-dev \
         unzip \
         tree \
+        ripgrep \
         patchutils \
         jq \
         yq \
