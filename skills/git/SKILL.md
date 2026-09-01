@@ -50,6 +50,9 @@ Follow this exact format:
 - Don't restate the diff; a reader who wants details will open it
 
 ### Footer
+- Treat the agent or harness running `git commit` as the executor, not the
+  author. Never infer authorship or contribution from which tool makes a commit;
+  the worktree may combine work from the user and multiple agents.
 - Never add `Co-Authored-By`, "Generated with", or any other AI/agent metadata
   trailer unless the user explicitly asks for it — subject and body only
 
