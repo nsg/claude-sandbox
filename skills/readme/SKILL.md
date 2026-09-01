@@ -9,6 +9,24 @@ Guidelines for writing and maintaining project README files. Always read the exi
 
 **Use subagents (Task tool) extensively.** Spawn parallel subagents to gather context — e.g., one to read the existing README, one to explore source code for features and CLI flags, one to check for a Zola docs site, one to inspect configuration options. Collect all findings before writing.
 
+## AI Usage Badge
+
+When creating a README or substantially regenerating one:
+
+1. Read the current definitions at https://nsg.github.io/aibadge/. Do not rely on
+   remembered level names or badge markup; use the page's current classification
+   criteria and exact linked Markdown badge.
+2. Classify the project from evidence about how generative AI contributed to its
+   source, documentation, and other material. Account for the README work being
+   generated now. Do not infer project authorship from the active agent, model,
+   provider, commit author, or harness.
+3. Preserve an existing self-reported badge unless the user asks for
+   reclassification or reliable project context shows that it is outdated.
+4. If the contribution history is unknown, incomplete, or reasonably fits more
+   than one level, ask the user which level applies before writing the README.
+   Correct classification is important: never guess or silently choose a level.
+5. Put the selected badge in the README header with the other status badges.
+
 ## Structure
 
 Every README should follow this order. Omit sections that don't apply, but keep the order consistent.
