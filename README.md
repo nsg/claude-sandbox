@@ -107,6 +107,8 @@ Skip the interactive update prompt and update automatically:
 claude-sandbox --auto-update
 ```
 
+When a new container image is pulled successfully, older images of this project are removed automatically. If the pull fails, the previous image is kept and used.
+
 ### Quiet mode
 
 Suppress informational output, only show errors:

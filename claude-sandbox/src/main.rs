@@ -35,6 +35,8 @@ const SCRIPT_URL: &str =
 const SKILLS_URL: &str =
     "https://github.com/nsg/claude-sandbox/releases/latest/download/skills.tar.gz";
 const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
+const IMAGE_SOURCE_LABEL: &str =
+    "org.opencontainers.image.source=https://github.com/nsg/claude-sandbox";
 const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
 const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
 const GIT_PROXY_SOCKET_NAME: &str = "git-proxy.sock";
@@ -990,6 +992,70 @@ struct SshConfig {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn podman_image_ids(args: &[&str]) -> Vec<String> {
+    Command::new("podman")
+        .args(["images", "--format", "{{.Id}}"])
+        .args(args)
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn stale_image_ids(
+    current: &[String],
+    candidates: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    if current.is_empty() {
+        return Vec::new();
+    }
+    let mut stale: Vec<String> = candidates
+        .into_iter()
+        .filter(|id| !current.contains(id))
+        .collect();
+    stale.sort();
+    stale.dedup();
+    stale
+}
+
+fn update_container_image(quiet: bool) {
+    let previous = podman_image_ids(&[IMAGE]);
+
+    let mut cmd = Command::new("podman");
+    cmd.args(["pull", IMAGE]);
+    if quiet {
+        cmd.arg("--quiet").stdout(Stdio::null());
+    }
+    if !cmd.status().map(|s| s.success()).unwrap_or(false) {
+        eprintln!("Warning: failed to pull {}, using the local image", IMAGE);
+        return;
+    }
+
+    let current = podman_image_ids(&[IMAGE]);
+    let label_filter = format!("label={}", IMAGE_SOURCE_LABEL);
+    let labeled = podman_image_ids(&["--filter", &label_filter]);
+    let stale = stale_image_ids(&current, previous.into_iter().chain(labeled));
+    if stale.is_empty() {
+        return;
+    }
+    if !quiet {
+        eprintln!("Removing {} old container image(s)", stale.len());
+    }
+    for id in &stale {
+        let _ = Command::new("podman")
+            .args(["rmi", id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 fn run_container(
     extra_args: &[&str],
     pull_image: bool,
@@ -1063,6 +1129,10 @@ fn run_container(
     let git_user_name = git_config("user.name");
     let git_user_email = git_config("user.email");
 
+    if pull_image {
+        update_container_image(quiet);
+    }
+
     let mut cmd = Command::new("podman");
     for entry in host_env {
         if let Some((key, val)) = entry.split_once('=') {
@@ -1079,9 +1149,6 @@ fn run_container(
     }
     if quiet {
         cmd.arg("--quiet");
-    }
-    if pull_image {
-        cmd.arg("--pull=always");
     }
     if mount_workspace {
         cmd.arg("-v").arg(format!("{}:/workspace", cwd.display()));
@@ -1581,6 +1648,22 @@ mod tests {
             "claude-sandbox-main-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn stale_images_exclude_current_and_dedupe() {
+        let current = vec!["new".to_string()];
+        let candidates = ["old", "new", "older", "old"].map(String::from);
+        assert_eq!(
+            stale_image_ids(&current, candidates),
+            vec!["old".to_string(), "older".to_string()]
+        );
+    }
+
+    #[test]
+    fn stale_images_are_empty_without_a_current_image() {
+        let candidates = ["old"].map(String::from);
+        assert!(stale_image_ids(&[], candidates).is_empty());
     }
 
     #[test]
