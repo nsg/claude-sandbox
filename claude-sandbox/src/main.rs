@@ -9,6 +9,7 @@ mod ssh_proxy;
 mod t3_admin;
 mod usage_api;
 mod usage_collector;
+mod usage_dashboard;
 
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;

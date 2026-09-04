@@ -188,6 +188,13 @@ authentication. Append `/api/usage` to the admin URL printed at startup:
 curl http://localhost:3774/api/usage
 ```
 
+For a human-readable live dashboard with provider gauges, per-limit graphs,
+freshness, and reset timing, open `/usage` on the same server:
+
+```text
+http://localhost:3774/usage
+```
+
 The response reports each provider's data freshness, RFC 3339 UTC `updated_at`
 time, and available usage buckets under the fixed `anthropic`, `openai`, and
 `ollama` keys. Each bucket contains an integer `used_percent`, its normalized

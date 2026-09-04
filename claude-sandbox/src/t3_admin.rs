@@ -13,6 +13,7 @@ use std::{process, thread};
 use crate::managed_push::{self, ApprovalScope};
 use crate::usage_api;
 use crate::usage_collector;
+use crate::usage_dashboard;
 
 const MAX_REQUEST_BYTES: usize = 16_384;
 const MAX_BODY_BYTES: usize = 8_192;
@@ -137,6 +138,11 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
     if request.method == "GET" && request.path == "/api/usage" {
         let (usage, available) = usage_api::collect(&config.usage_state_dir);
         send_json(&mut stream, if available { 200 } else { 503 }, &usage);
+        return;
+    }
+
+    if request.method == "GET" && request.path == "/usage" {
+        send_usage_dashboard(&mut stream);
         return;
     }
 
@@ -428,8 +434,8 @@ fn render_page(
         .unwrap_or_default();
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>T3 Code · Admin</title><style>
-:root{{--ink:#f4f1e8;--muted:#a4a49b;--line:#353630;--acid:#d8ff4f;--danger:#ff8c7e;--bg:#11120f}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;color:var(--ink);background:radial-gradient(circle at 85% 10%,#293315 0,transparent 30%),var(--bg);font:14px/1.55 "IBM Plex Mono","Courier New",monospace}}main{{width:min(920px,calc(100% - 32px));margin:auto;padding:48px 0 80px}}header{{border-top:1px solid var(--acid);padding-top:16px;margin-bottom:48px}}h1{{font:400 clamp(42px,8vw,76px)/.95 Georgia,serif;letter-spacing:-.05em;margin:18px 0}}h2{{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:var(--acid)}}section{{border:1px solid var(--line);padding:22px;margin:14px 0;background:#11120fd9}}p,small{{color:var(--muted)}}form{{display:inline-flex;gap:10px;align-items:end;margin:5px 8px 5px 0}}label{{display:grid;gap:7px}}input{{background:#090a08;color:var(--ink);border:1px solid var(--line);padding:12px}}button,.pair{{display:inline-block;border:0;background:var(--acid);color:#15170d;padding:12px 15px;font:700 11px/1 monospace;text-transform:uppercase;text-decoration:none;cursor:pointer}}button.secondary{{background:#34362e;color:var(--ink)}}button.danger{{background:#713a34;color:#fff}}.pair-result{{border-top:1px solid var(--line);margin-top:17px;padding-top:17px}}.pair-url{{width:100%;margin:5px 0 12px}}.repo{{padding:16px 0;border-top:1px solid var(--line)}}.repo:first-of-type{{border-top:0}}code{{color:var(--ink);overflow-wrap:anywhere}}.meta{{display:grid;grid-template-columns:100px 1fr;gap:5px 12px}}.notice{{border:1px solid #6f752f;padding:13px;margin-bottom:14px}}.changed{{color:var(--danger)}}footer{{margin-top:42px;color:#67685f;font-size:10px;text-transform:uppercase;letter-spacing:.12em}}@media(max-width:600px){{.meta{{grid-template-columns:1fr}}form{{display:flex;flex-wrap:wrap}}}}
-</style></head><body><main><header><small>Private control plane · {}</small><h1>T3 Code<br>Admin.</h1></header>{notice}{action}<footer>Host-owned administration surface</footer></main></body></html>"#,
+:root{{--ink:#f4f1e8;--muted:#a4a49b;--line:#353630;--acid:#d8ff4f;--danger:#ff8c7e;--bg:#11120f}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;color:var(--ink);background:radial-gradient(circle at 85% 10%,#293315 0,transparent 30%),var(--bg);font:14px/1.55 "IBM Plex Mono","Courier New",monospace}}main{{width:min(920px,calc(100% - 32px));margin:auto;padding:48px 0 80px}}header{{border-top:1px solid var(--acid);padding-top:16px;margin-bottom:48px}}h1{{font:400 clamp(42px,8vw,76px)/.95 Georgia,serif;letter-spacing:-.05em;margin:18px 0}}h2{{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:var(--acid)}}section{{border:1px solid var(--line);padding:22px;margin:14px 0;background:#11120fd9}}p,small{{color:var(--muted)}}form{{display:inline-flex;gap:10px;align-items:end;margin:5px 8px 5px 0}}label{{display:grid;gap:7px}}input{{background:#090a08;color:var(--ink);border:1px solid var(--line);padding:12px}}button,.pair{{display:inline-block;border:0;background:var(--acid);color:#15170d;padding:12px 15px;font:700 11px/1 monospace;text-transform:uppercase;text-decoration:none;cursor:pointer}}button.secondary{{background:#34362e;color:var(--ink)}}button.danger{{background:#713a34;color:#fff}}.usage{{color:var(--ink);text-underline-offset:4px}}.usage:hover{{color:var(--acid)}}.pair-result{{border-top:1px solid var(--line);margin-top:17px;padding-top:17px}}.pair-url{{width:100%;margin:5px 0 12px}}.repo{{padding:16px 0;border-top:1px solid var(--line)}}.repo:first-of-type{{border-top:0}}code{{color:var(--ink);overflow-wrap:anywhere}}.meta{{display:grid;grid-template-columns:100px 1fr;gap:5px 12px}}.notice{{border:1px solid #6f752f;padding:13px;margin-bottom:14px}}.changed{{color:var(--danger)}}footer{{margin-top:42px;color:#67685f;font-size:10px;text-transform:uppercase;letter-spacing:.12em}}@media(max-width:600px){{.meta{{grid-template-columns:1fr}}form{{display:flex;flex-wrap:wrap}}}}
+</style></head><body><main><header><small>Private control plane · {}</small><h1>T3 Code<br>Admin.</h1><a class="usage" href="/usage">Public usage dashboard ↗</a></header>{notice}{action}<footer>Host-owned administration surface</footer></main></body></html>"#,
         config.portal_port
     )
 }
@@ -659,6 +665,16 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &impl serde::Serialize) 
     let _ = stream.write_all(&body);
 }
 
+fn send_usage_dashboard(stream: &mut TcpStream) {
+    let body = usage_dashboard::PAGE;
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+}
+
 fn redirect(stream: &mut TcpStream, location: &str) {
     redirect_with_headers(stream, location, &[]);
 }
@@ -795,6 +811,29 @@ mod tests {
         assert!(response.contains("\"anthropic\""));
         assert!(response.contains("\"openai\""));
         assert!(response.contains("\"ollama\""));
+    }
+
+    #[test]
+    fn serves_usage_dashboard_without_authentication() {
+        let workspace = temporary_workspace("dashboard");
+        std::fs::create_dir(&workspace).unwrap();
+        let config = test_config(&workspace);
+
+        let response = make_request(
+            &config,
+            "GET /usage?view=human HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        let admin = make_request(&config, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        std::fs::remove_dir(&workspace).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Content-Type: text/html; charset=utf-8\r\n"));
+        assert!(response.contains("connect-src 'self'"));
+        assert!(response.contains("Plan usage · Claude Sandbox"));
+        assert!(response.contains("href=\"/api/usage\""));
+        assert!(response.contains("fetch(\"/api/usage\""));
+        assert!(!response.contains("Set-Cookie"));
+        assert!(admin.contains("href=\"/usage\""));
     }
 
     #[test]
