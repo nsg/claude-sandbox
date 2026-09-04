@@ -35,6 +35,11 @@ codex exec --skip-git-repo-check --sandbox workspace-write \
 GPT models are excellent literal instruction-followers; the brief is the quality lever. Be exhaustive and specific:
 
 - State inherited/partial state explicitly ("do NOT discard the uncommitted diff; re-visit partially-done files").
+- For work expected to remain active for roughly 30 minutes or longer, include
+  the `delegate` skill's long-running usage guard with provider `openai` and
+  propagate an adapted guard to nested delegates. Because `workspace-write`
+  blocks sockets, use orchestrator-side endpoint checks and provider-only
+  follow-ups or a shared status file rather than weakening the sandbox.
 - Enumerate scope precisely: globs, explicit exclusions, out-of-scope paths.
 - Give mechanical self-check commands (exact grep/diff invocations) to run before the gates.
 - List gates with expected reference outputs — test totals, known flakes and how to treat them.

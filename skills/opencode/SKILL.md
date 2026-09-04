@@ -24,6 +24,11 @@ opencode run -m ollama-cloud/deepseek-v4-pro --variant high "prompt"
   3. Attach with `-f`, but ONLY as `-f brief.md -- "message"`. `-f` is variadic: without `--` it swallows the following positional message as another file path and fails with `File not found: <your message>`. And `"message" -f brief.md` (file after message) parses without error but the attachment silently never reaches the model — verified: the model reports no file. Attachment failures are silent, so prefer options 1–2.
 - `--dir <path>` sets the working directory without cd'ing; `--format json` emits raw event JSON for parsing.
 - Long tasks: launch from the orchestrator's own background Bash, same pattern and rationale as the `codex` skill (a child process of a subagent dies with that subagent's turn). Capture stdout to a file; there is no `-o` report flag, the final answer is just the last stdout text.
+- For work expected to remain active for roughly 30 minutes or longer, include
+  the `delegate` skill's long-running usage guard with provider `ollama` and
+  require any nested delegates to receive a guard for their actual provider.
+  If the runner cannot reach the endpoint, supply provider-only updates from
+  the orchestrator without broadening its permissions.
 - Sessions persist: `-c` continues the last one, `-s <id>` a specific one, `--fork` branches it. `opencode stats` shows usage; `opencode export` dumps a session.
 
 ## Permission model (verified by probing)

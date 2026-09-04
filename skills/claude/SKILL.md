@@ -38,6 +38,11 @@ State destructive-action, commit, push, deployment, and external-write boundarie
 
 Prefer a foreground `claude -p` process launched from the orchestrator's own background shell when the harness provides reliable process completion; this keeps edits in the current tree and produces an explicit report file. A child launched by a short-lived subagent may die with that subagent. Keep the report and log under `/workspace/.claude-sandbox/`, not `/tmp` or the home directory.
 
+For work expected to remain active for roughly 30 minutes or longer, include
+the `delegate` skill's long-running usage guard in the brief with provider
+`anthropic`. Require any nested delegates to receive their own guard for the
+provider they actually use.
+
 Claude Code also supports detached sessions:
 
 ```bash

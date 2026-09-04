@@ -45,6 +45,26 @@ were unavailable; never query provider APIs or infer headroom from missing data.
   resets over the percentages — 95% resetting within the hour is safe to schedule
   behind, 60% with six days left and a heavy job already queued is not.
 
+### Long-running usage guard
+
+Every worker brief for a job expected to remain active for roughly 30 minutes
+or longer must carry the operational guard from `plan-usage`; copy it into the
+actual brief rather than assuming an external runner can load the local skill.
+State the worker's provider key and require a check at startup and about every
+30 minutes while work is active. The worker considers only its own provider
+and applicable model/tier buckets, predicts whether it can reach the next check
+or finish with margin, and checkpoints before pausing, waiting for a nearby
+reset, or ending cleanly.
+
+Propagate this requirement through nested delegation, adapting the provider at
+each edge. For example, an Opus parent is guarded against `anthropic`, while a
+GPT-5.6-Sol child it launches is separately guarded against `openai`; neither
+needs to reason about the other's buckets. Include permission to reduce or
+defer optional work when necessary, but do not let quota handling silently
+change vendors or expand scope. If a runner sandbox cannot reach the endpoint,
+keep the sandbox intact and arrange orchestrator-side checks with provider-only
+updates through a follow-up channel or shared status file.
+
 ## Parallel Fan-Out
 
 The three subscriptions are three independent lanes: concurrent runs on

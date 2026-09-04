@@ -102,6 +102,41 @@ to interpret the percentages, while excluding credentials and tokens, account
 identifiers, billing amounts, costs and credits, and raw provider errors. Do
 not use it as an authentication, billing, or enforcement authority.
 
+## Guard long-running delegated work
+
+Jobs expected to remain active for roughly 30 minutes or longer need a usage
+guard in their brief. Name the worker's billing provider explicitly as
+`anthropic`, `openai`, or `ollama`; a nested worker uses its own provider, not
+its parent's. The worker should:
+
+1. Read usage at startup and about once per 30 minutes of active work, ideally
+   at a durable task boundary. The cache refreshes on that cadence, so faster
+   polling normally adds no information.
+2. Inspect only its assigned provider. Within that provider, consider overall
+   buckets and any model bucket that clearly applies to the selected model or
+   tier; ignore unrelated providers and model buckets. Do not invent a match
+   when the response leaves a bucket's scope ambiguous.
+3. Compare remaining headroom, reset time, observed consumption since the last
+   reading, and estimated work remaining. Act before a relevant bucket is
+   likely to reach 100% before the next check or before completion. A large
+   percentage alone is not decisive when its reset is imminent.
+4. Before pausing, waiting, or stopping, make the work resumable: save partial
+   output, record completed and pending steps, the last successful checks, the
+   applicable usage snapshot, and the exact next action. Stop starting new
+   child work once the guard trips.
+5. Choose the least disruptive safe response: reduce concurrency, throttle or
+   defer optional work; checkpoint and end cleanly; or, when a known reset is
+   close, arrange a detached wait/resume and recheck after the reset. Short
+   session windows are especially suitable for checkpoint-and-resume. Do not
+   keep an interactive orchestrator turn blocked in a long blind sleep.
+
+If the worker's sandbox cannot reach the host endpoint, do not weaken the
+sandbox for telemetry. Have the orchestrator perform the same 30-minute check
+and expose only that worker's provider snapshot through the runner's supported
+follow-up mechanism or a shared status file. `stale` or `unknown` data is not
+proof of available headroom: checkpoint conservatively and report the missing
+signal rather than querying provider APIs or guessing.
+
 ## Diagnose access without crossing boundaries
 
 Check the reverse-forwarded admin service only:
