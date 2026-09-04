@@ -2,5 +2,6 @@
 dist/
 claude-sandbox/target/
 .claude-sandbox/
+/.build-host/
 .playwright-output/
 .mcp.json
