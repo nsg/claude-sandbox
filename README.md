@@ -11,7 +11,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 
 ## Features
 
-- **Sandboxed GitHub CLI** — proxied `gh` access with an audited allowlist of safe commands
+- **Sandboxed GitHub CLI** — proxied `gh` access with an audited command allowlist and launch-snapshotted write targets
 - **SSH proxy** — filtered SSH access without exposing keys to the container
 - **Managed fetch approvals** — portal-approved, read-only access to exact private SSH repositories
 - **Git push bridge** — opt-in single-repository pushes plus portal-approved repositories for long-running T3 services
@@ -244,10 +244,15 @@ The first authenticated SSH fetch from an unapproved source and the first push
 from an unapproved repository are denied and add separate pending candidates to
 the portal. Choose **Approve once**, **Always allow**, or **Dismiss**. Fetch
 approval grants this sandbox instance read access to one exact SSH repository;
-it never grants push access. Push approval remains bound to a workspace-relative
-repository and its `origin`, and an origin change suspends it. Approvals are
-stored outside the mounted workspace under `~/.claude-sandbox/projects/`, where
-the container cannot modify them.
+it never grants push or GitHub CLI write access. Push approval remains bound to
+a workspace-relative repository and its `origin`, and an origin change suspends
+it. Approvals are stored outside the mounted workspace under
+`~/.claude-sandbox/projects/`, where the container cannot modify them.
+
+Managed fetch and push approvals are independent of the GitHub CLI proxy. `gh`
+writes do not consult the portal or create approval candidates; their targets
+come only from the repositories snapshotted beneath the workspace when the
+sandbox starts.
 
 The portal uses plain HTTP. Anyone able to observe the traffic can recover both
 the PIN and generated pairing token, and a short PIN can be guessed. Never
@@ -313,35 +318,44 @@ A session started with `claude-sandbox --wrap` uses the default name `claude-san
 
 ## GitHub CLI Proxy
 
-The container includes a sandboxed `gh` proxy that gives Claude safe access to GitHub without exposing your credentials directly. The proxy runs on the host and communicates with the container over a Unix socket.
+The container includes a sandboxed `gh` proxy that gives agents restricted access to GitHub without exposing your credentials directly. The proxy runs on the host and communicates with the container over a Unix socket.
 
 Each launch gets a private set of host proxy sockets, mounted read-only at `/run/claude-sandbox` inside that container. The launcher waits until every enabled proxy accepts connections and aborts startup if one fails, preventing stale sockets or another session's permissions from being reused. Proxy logs live in private host-side project state under `~/.claude-sandbox/projects/<project>/logs/`.
+
+At launch, the host discovers GitHub repositories beneath the mounted workspace and snapshots each repository's pinned path and `origin` identity. Discovery reads only a bounded, pinned local Git config with includes disabled; Git directories outside the workspace are rejected. The container forwards its current working directory with every request, but the host executes `gh` from a neutral directory and supplies the snapshotted repository explicitly. Hooks and later worktree configuration changes therefore cannot influence the host-side command.
 
 **Read commands** work against any repository:
 
 | Group | Commands |
 |-------|----------|
+| `auth` | `status` (token output is blocked) |
 | `pr` | `list`, `view`, `diff`, `checks` |
 | `issue` | `list`, `view` |
-| `repo` | `view` |
+| `repo` | `view`, `list` |
 | `release` | `list`, `view` |
 | `run` | `list`, `view`, `watch` |
+| `workflow` | `list` |
+| `search` | `code`, `commits`, `issues`, `prs`, `repos` |
 
-**Write commands** are restricted to the workspace repository (no `--repo`/`-R` flag):
+**Write commands** target the launch-snapshotted repository containing the current working directory. The proxy rejects `--repo`/`-R` and positional issue or pull-request URLs that name another repository. An agent may `cd` between repositories that were present beneath the workspace at launch. New repositories and changed `origin` values do not expand access until the sandbox is restarted:
 
 | Group | Commands |
 |-------|----------|
-| `pr` | `create`, `comment` |
+| `pr` | `comment` |
 | `issue` | `create`, `comment`, `close`, `edit` |
 | `run` | `rerun` |
+
+`gh pr create` is intentionally unavailable because GitHub CLI may run host-side Git operations against the caller's worktree while preparing a pull request.
 
 **Extension commands** add custom functionality:
 
 | Command | Description |
 |---------|-------------|
-| `gh ext run-logs <run-id>` | Download workflow run logs as a zip file |
-| `gh ext milestone-create <title>` | Create a milestone (supports `--description`, `--due-on`) |
-| `gh ext milestone-list` | List milestones (supports `--state open\|closed\|all`) |
+| `gh ext run-logs <run-id>` | Download workflow run logs for the current snapshotted repository as a zip file |
+| `gh ext milestone-create <title>` | Create a milestone in the current snapshotted repository (supports `--description`, `--due-on`) |
+| `gh ext milestone-list` | List milestones in the current snapshotted repository (supports `--state open\|closed\|all`) |
+
+Repository-mutating extensions use the same current-working-directory selection and launch snapshot as other write commands.
 
 All commands are flag-validated against a strict allowlist. Every request is logged to `~/.claude-sandbox/projects/<project>/logs/gh-proxy.log`.
 
@@ -415,7 +429,7 @@ grep DENIED ~/.claude-sandbox/projects/*/logs/ssh-proxy.log
 
 Use the denied command line to determine which rule type and entry to add. If the proxy is disabled because the config is empty or missing, no deny log is written. The proxy must be restarted for config changes to take effect (restart the container).
 
-## Managed Fetch Approvals
+## Managed SSH Fetch Approvals
 
 Launch T3 Code with managed fetch access when an agent needs to read private SSH
 repositories without receiving your SSH keys:

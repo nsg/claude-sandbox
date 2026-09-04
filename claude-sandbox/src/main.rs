@@ -162,6 +162,9 @@ enum Commands {
         /// Persistent log path
         #[arg(long)]
         log: PathBuf,
+        /// Host workspace root used to resolve container working directories
+        #[arg(long)]
+        workspace_root: PathBuf,
     },
     /// Start the git push proxy (internal, spawned automatically)
     GitProxy {
@@ -877,7 +880,7 @@ fn start_proxy(name: &str, socket_path: &Path, mut command: Command) -> Result<(
     })
 }
 
-fn ensure_gh_proxy(runtime_dir: &Path) -> Result<(), String> {
+fn ensure_gh_proxy(runtime_dir: &Path, workspace_root: &Path) -> Result<(), String> {
     let socket_path = runtime_dir.join(GH_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
     command
@@ -885,7 +888,9 @@ fn ensure_gh_proxy(runtime_dir: &Path) -> Result<(), String> {
         .arg("--socket")
         .arg(&socket_path)
         .arg("--log")
-        .arg(proxy_log_path("gh-proxy.log")?);
+        .arg(proxy_log_path("gh-proxy.log")?)
+        .arg("--workspace-root")
+        .arg(workspace_root);
     start_proxy("gh-proxy", &socket_path, command)
 }
 
@@ -1127,7 +1132,7 @@ fn run_container(
         });
     };
 
-    require_proxy(ensure_gh_proxy(&proxy_runtime_dir));
+    require_proxy(ensure_gh_proxy(&proxy_runtime_dir, &cwd));
     require_proxy(ensure_clipboard_proxy(&proxy_runtime_dir));
 
     match (managed_push_state, allow_push, git_proxy::origin_url()) {
@@ -1300,8 +1305,12 @@ fn run_container(
 
 fn run_internal_command(command: Option<&Commands>) -> bool {
     match command {
-        Some(Commands::GhProxy { socket, log }) => {
-            gh_proxy::run(socket, log);
+        Some(Commands::GhProxy {
+            socket,
+            log,
+            workspace_root,
+        }) => {
+            gh_proxy::run(socket, log, workspace_root);
         }
         Some(Commands::GitProxy {
             socket,
