@@ -1,3 +1,6 @@
+[sandbox_workspace_write]
+network_access = true
+
 [mcp_servers.playwright]
 command = "playwright-mcp"
 args = ["--headless", "--browser=chrome", "--no-sandbox"]
