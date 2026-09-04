@@ -992,7 +992,6 @@ struct SshConfig {
     host_port: u16,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn podman_image_ids(args: &[&str]) -> Vec<String> {
     Command::new("podman")
         .args(["images", "--format", "{{.Id}}"])
@@ -1023,6 +1022,15 @@ fn stale_image_ids(
     stale.sort();
     stale.dedup();
     stale
+}
+
+fn admin_pasta_network(container_env: &[String]) -> Option<String> {
+    container_env.iter().find_map(|entry| {
+        entry
+            .strip_prefix("T3CODE_ADMIN_PORT=")
+            .and_then(|port| port.parse::<u16>().ok())
+            .map(|port| format!("pasta:-T,{port}"))
+    })
 }
 
 fn update_container_image(quiet: bool) {
@@ -1057,6 +1065,7 @@ fn update_container_image(quiet: bool) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_container(
     extra_args: &[&str],
     pull_image: bool,
@@ -1150,6 +1159,9 @@ fn run_container(
     }
     if quiet {
         cmd.arg("--quiet");
+    }
+    if let Some(network) = admin_pasta_network(container_env) {
+        cmd.arg("--network").arg(network);
     }
     if mount_workspace {
         cmd.arg("-v").arg(format!("{}:/workspace", cwd.display()));
@@ -1665,6 +1677,13 @@ mod tests {
     fn stale_images_are_empty_without_a_current_image() {
         let candidates = ["old"].map(String::from);
         assert!(stale_image_ids(&[], candidates).is_empty());
+    }
+
+    #[test]
+    fn admin_port_enables_pasta_reverse_forward() {
+        let env = vec!["T3CODE_ADMIN_PORT=3774".to_string()];
+        assert_eq!(admin_pasta_network(&env).as_deref(), Some("pasta:-T,3774"));
+        assert_eq!(admin_pasta_network(&[]), None);
     }
 
     #[test]
