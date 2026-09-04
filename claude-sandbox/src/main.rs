@@ -2,6 +2,7 @@ mod clipboard_proxy;
 mod gh_proxy;
 mod git_proxy;
 mod logging;
+mod managed_fetch;
 mod managed_push;
 mod proxy_log;
 mod proxy_socket;
@@ -120,6 +121,10 @@ struct Cli {
     #[arg(long = "t3-managed-push", conflicts_with = "allow_push")]
     t3_managed_push: bool,
 
+    /// Let the T3 admin portal approve private repositories for SSH fetches
+    #[arg(long = "t3-managed-fetch")]
+    t3_managed_fetch: bool,
+
     /// Enable SSH server in the container
     #[arg(long)]
     ssh: bool,
@@ -191,9 +196,13 @@ enum Commands {
         #[arg(long)]
         state_dir: PathBuf,
         #[arg(long)]
+        fetch_state_dir: PathBuf,
+        #[arg(long)]
         usage_state_dir: PathBuf,
         #[arg(long)]
         managed_push: bool,
+        #[arg(long)]
+        managed_fetch: bool,
     },
     /// Start the clipboard image proxy (internal, spawned automatically)
     ClipboardProxy {
@@ -215,6 +224,12 @@ enum Commands {
         /// Config as JSON string
         #[arg(long)]
         config_json: String,
+        /// Host workspace root used to validate managed fetch request context
+        #[arg(long)]
+        managed_fetch_workspace_root: Option<PathBuf>,
+        /// Host-only managed fetch approval state
+        #[arg(long)]
+        managed_fetch_state_dir: Option<PathBuf>,
     },
     /// Run a command inside the container
     Run {
@@ -442,8 +457,10 @@ struct T3AdminConfig<'a> {
     t3_base_dir: &'a str,
     workspace_root: &'a Path,
     state_dir: &'a Path,
+    fetch_state_dir: &'a Path,
     usage_state_dir: &'a Path,
     managed_push: bool,
+    managed_fetch: bool,
 }
 
 fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
@@ -463,6 +480,8 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
         .arg(config.workspace_root)
         .arg("--state-dir")
         .arg(config.state_dir)
+        .arg("--fetch-state-dir")
+        .arg(config.fetch_state_dir)
         .arg("--usage-state-dir")
         .arg(config.usage_state_dir)
         .stdin(std::process::Stdio::null())
@@ -470,6 +489,9 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
         .stderr(std::process::Stdio::null());
     if config.managed_push {
         command.arg("--managed-push");
+    }
+    if config.managed_fetch {
+        command.arg("--managed-fetch");
     }
     if let Err(error) = command.spawn() {
         eprintln!("Warning: failed to start T3 admin portal: {error}");
@@ -972,7 +994,11 @@ fn save_ssh_proxy_config(config: &ssh_proxy::Config) {
     }
 }
 
-fn ensure_ssh_proxy(runtime_dir: &Path, config: &ssh_proxy::Config) -> Result<(), String> {
+fn ensure_ssh_proxy(
+    runtime_dir: &Path,
+    config: &ssh_proxy::Config,
+    managed_fetch: Option<(&Path, &Path)>,
+) -> Result<(), String> {
     let socket_path = runtime_dir.join(SSH_PROXY_SOCKET_NAME);
     let config_json = serde_json::to_string(config).expect("Failed to serialize ssh-proxy config");
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -984,6 +1010,13 @@ fn ensure_ssh_proxy(runtime_dir: &Path, config: &ssh_proxy::Config) -> Result<()
         .arg(proxy_log_path("ssh-proxy.log")?)
         .arg("--config-json")
         .arg(config_json);
+    if let Some((workspace_root, state_dir)) = managed_fetch {
+        command
+            .arg("--managed-fetch-workspace-root")
+            .arg(workspace_root)
+            .arg("--managed-fetch-state-dir")
+            .arg(state_dir);
+    }
     start_proxy("ssh-proxy", &socket_path, command)
 }
 
@@ -1079,6 +1112,7 @@ fn run_container(
     wrap: bool,
     allow_push: bool,
     managed_push_state: Option<&Path>,
+    managed_fetch_state: Option<&Path>,
     explicit_container_name: Option<&str>,
 ) {
     let cwd = env::current_dir().expect("Could not get current directory");
@@ -1116,10 +1150,14 @@ fn run_container(
     }
 
     let ssh_proxy_config = load_ssh_proxy_config();
-    if ssh_proxy::is_empty(&ssh_proxy_config) {
+    if ssh_proxy::is_empty(&ssh_proxy_config) && managed_fetch_state.is_none() {
         save_ssh_proxy_config(&ssh_proxy_config);
     } else {
-        require_proxy(ensure_ssh_proxy(&proxy_runtime_dir, &ssh_proxy_config));
+        require_proxy(ensure_ssh_proxy(
+            &proxy_runtime_dir,
+            &ssh_proxy_config,
+            managed_fetch_state.map(|state_dir| (cwd.as_path(), state_dir)),
+        ));
     }
     ensure_ssh_proxy_symlink();
 
@@ -1302,8 +1340,10 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             t3_base_dir,
             workspace_root,
             state_dir,
+            fetch_state_dir,
             usage_state_dir,
             managed_push,
+            managed_fetch,
         }) => {
             t3_admin::run(t3_admin::RunOptions {
                 portal_port: *port,
@@ -1312,8 +1352,10 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 t3_base_dir,
                 workspace_root,
                 state_dir,
+                fetch_state_dir,
                 usage_state_dir,
                 managed_push: *managed_push,
+                managed_fetch: *managed_fetch,
             });
         }
         Some(Commands::ClipboardProxy { socket, log }) => {
@@ -1323,13 +1365,31 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             socket,
             log,
             config_json,
+            managed_fetch_workspace_root,
+            managed_fetch_state_dir,
         }) => {
             let config: ssh_proxy::Config =
                 serde_json::from_str(config_json).unwrap_or_else(|error| {
                     eprintln!("ssh-proxy: invalid config JSON: {error}");
                     std::process::exit(1);
                 });
-            ssh_proxy::run(socket, log, &config);
+            let managed_fetch = match (
+                managed_fetch_workspace_root.as_ref(),
+                managed_fetch_state_dir.as_ref(),
+            ) {
+                (Some(workspace_root), Some(state_dir)) => Some(ssh_proxy::ManagedFetch {
+                    workspace_root: workspace_root.clone(),
+                    state_dir: state_dir.clone(),
+                }),
+                (None, None) => None,
+                _ => {
+                    eprintln!(
+                        "ssh-proxy managed fetch requires both --managed-fetch-workspace-root and --managed-fetch-state-dir"
+                    );
+                    std::process::exit(2);
+                }
+            };
+            ssh_proxy::run(socket, log, &config, managed_fetch.as_ref());
         }
         _ => return false,
     }
@@ -1341,8 +1401,12 @@ fn main() {
     if run_internal_command(cli.command.as_ref()) {
         return;
     }
-    if cli.t3_managed_push && !matches!(&cli.command, Some(Commands::T3code { .. })) {
-        eprintln!("Error: --t3-managed-push can only be used with the t3code command");
+    if (cli.t3_managed_push || cli.t3_managed_fetch)
+        && !matches!(&cli.command, Some(Commands::T3code { .. }))
+    {
+        eprintln!(
+            "Error: --t3-managed-push and --t3-managed-fetch can only be used with the t3code command"
+        );
         std::process::exit(2);
     }
     let client = Client::new();
@@ -1408,6 +1472,7 @@ fn main() {
                 cli.allow_push,
                 None,
                 None,
+                None,
             );
         }
         Some(Commands::Install { target }) => {
@@ -1442,6 +1507,7 @@ fn main() {
                 cli.allow_push,
                 None,
                 None,
+                None,
             );
         }
         Some(Commands::Codex { args }) => {
@@ -1462,6 +1528,7 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                None,
                 None,
                 None,
             );
@@ -1486,6 +1553,7 @@ fn main() {
                 cli.allow_push,
                 None,
                 None,
+                None,
             );
         }
         Some(Commands::T3code { args }) => {
@@ -1499,9 +1567,9 @@ fn main() {
                 eprintln!("T3CODE_PAIR_ADMIN_PIN must contain 4 to 12 digits");
                 std::process::exit(2);
             }
-            if cli.t3_managed_push && pair_admin_pin.is_none() {
+            if (cli.t3_managed_push || cli.t3_managed_fetch) && pair_admin_pin.is_none() {
                 eprintln!(
-                    "Error: --t3-managed-push requires T3CODE_PAIR_ADMIN_PIN so repositories can be approved"
+                    "Error: managed Git access requires T3CODE_PAIR_ADMIN_PIN so repositories can be approved"
                 );
                 std::process::exit(2);
             }
@@ -1520,19 +1588,37 @@ fn main() {
             let instance_name = project_instance_name(&cwd);
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
             let mut push_state_dir = managed_push::state_dir(&home_dir(), &instance_name);
+            let mut fetch_state_dir = managed_fetch::state_dir(&home_dir(), &instance_name);
+            let canonical_workspace = if cli.t3_managed_push || cli.t3_managed_fetch {
+                Some(fs::canonicalize(&cwd).unwrap_or_else(|error| {
+                    eprintln!("Error: could not resolve T3 workspace: {error}");
+                    std::process::exit(1);
+                }))
+            } else {
+                None
+            };
             if cli.t3_managed_push {
                 push_state_dir =
                     managed_push::prepare_state_dir(&push_state_dir).unwrap_or_else(|error| {
                         eprintln!("Error: could not prepare managed push state: {error}");
                         std::process::exit(1);
                     });
-                let canonical_workspace = fs::canonicalize(&cwd).unwrap_or_else(|error| {
-                    eprintln!("Error: could not resolve T3 workspace: {error}");
-                    std::process::exit(1);
-                });
-                if push_state_dir.starts_with(&canonical_workspace) {
+                if push_state_dir.starts_with(canonical_workspace.as_ref().unwrap()) {
                     eprintln!(
                         "Error: managed push state must be outside the agent-mounted T3 workspace"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            if cli.t3_managed_fetch {
+                fetch_state_dir = managed_fetch::prepare_state_dir(&fetch_state_dir)
+                    .unwrap_or_else(|error| {
+                        eprintln!("Error: could not prepare managed fetch state: {error}");
+                        std::process::exit(1);
+                    });
+                if fetch_state_dir.starts_with(canonical_workspace.as_ref().unwrap()) {
+                    eprintln!(
+                        "Error: managed fetch state must be outside the agent-mounted T3 workspace"
                     );
                     std::process::exit(1);
                 }
@@ -1570,8 +1656,10 @@ fn main() {
                     t3_base_dir: &instance_dir,
                     workspace_root: &cwd,
                     state_dir: &push_state_dir,
+                    fetch_state_dir: &fetch_state_dir,
                     usage_state_dir,
                     managed_push: cli.t3_managed_push,
+                    managed_fetch: cli.t3_managed_fetch,
                 });
             }
 
@@ -1583,6 +1671,7 @@ fn main() {
                 container_env.push(format!("T3CODE_ADMIN_PORT={pair_admin_port}"));
             }
             let managed_state = cli.t3_managed_push.then_some(push_state_dir.as_path());
+            let managed_fetch_state = cli.t3_managed_fetch.then_some(fetch_state_dir.as_path());
             let named_container = pair_admin_pin.as_ref().map(|_| container_name.as_str());
 
             run_container(
@@ -1598,6 +1687,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push || cli.t3_managed_push,
                 managed_state,
+                managed_fetch_state,
                 named_container,
             );
         }
@@ -1638,6 +1728,7 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                None,
                 None,
                 None,
             );

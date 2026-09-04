@@ -1,18 +1,22 @@
 use crate::logging::log_line;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{process, thread};
 
+use crate::managed_fetch;
 use crate::{proxy_log, proxy_socket};
 
 #[derive(Deserialize)]
 struct Request {
     args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -39,12 +43,43 @@ struct ParsedRequest {
     command: String,
 }
 
+#[derive(Clone)]
+pub struct ManagedFetch {
+    pub workspace_root: PathBuf,
+    pub state_dir: PathBuf,
+}
+
+struct GitWireCommand {
+    service: String,
+    repository: String,
+}
+
+#[derive(Debug)]
+enum Authorization {
+    Static,
+    ManagedFetch(Vec<String>),
+}
+
 const GIT_SERVICES: &[&str] = &["git-receive-pack", "git-upload-pack", "git-upload-archive"];
 
 const FRAME_EXIT: u8 = 0;
 const FRAME_STDOUT: u8 = 1;
 const FRAME_STDERR: u8 = 2;
 const MAX_FRAME: usize = 65536;
+const MAX_HANDSHAKE: usize = 16_384;
+const MAX_HOST_LEN: usize = 253;
+const MAX_REPOSITORY_LEN: usize = 1_024;
+const MAX_CONNECTIONS: usize = 32;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SESSION_DURATION: Duration = Duration::from_secs(30 * 60);
+
+struct ConnectionGuard(Arc<AtomicUsize>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 pub fn default_config() -> Config {
     Config {
@@ -147,13 +182,19 @@ fn is_git_command(command: &str) -> bool {
 
 fn is_valid_git_repo(repo: &str) -> bool {
     !repo.is_empty()
+        && repo.len() <= MAX_REPOSITORY_LEN
         && !repo.starts_with('-')
+        && !repo.starts_with("//")
         && repo
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+        && repo
+            .trim_start_matches('/')
+            .split('/')
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
 }
 
-fn parse_git_command(command: &str) -> Option<(&str, String)> {
+fn parse_git_wire_command(command: &str) -> Option<GitWireCommand> {
     let (service, rest) = command.split_once(' ')?;
     if !GIT_SERVICES.contains(&service) {
         return None;
@@ -180,13 +221,71 @@ fn parse_git_command(command: &str) -> Option<(&str, String)> {
         rest
     };
 
-    let repo = repo.strip_prefix('/').unwrap_or(repo);
-    let repo = repo.strip_suffix(".git").unwrap_or(repo);
     if is_valid_git_repo(repo) {
-        Some((service, repo.to_string()))
+        Some(GitWireCommand {
+            service: service.to_string(),
+            repository: repo.to_string(),
+        })
     } else {
         None
     }
+}
+
+fn parse_git_command(command: &str) -> Option<(String, String)> {
+    let parsed = parse_git_wire_command(command)?;
+    let repository = parsed
+        .repository
+        .strip_prefix('/')
+        .unwrap_or(&parsed.repository);
+    let repository = repository.strip_suffix(".git").unwrap_or(repository);
+    Some((parsed.service, repository.to_string()))
+}
+
+fn is_valid_managed_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > MAX_HOST_LEN || !host.is_ascii() {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+fn managed_request_context(workspace_root: &Path, cwd: &str) -> Result<String, String> {
+    let workspace_root = fs::canonicalize(workspace_root)
+        .map_err(|error| format!("could not resolve workspace root: {error}"))?;
+    let container_path = Path::new(cwd);
+    let relative = container_path
+        .strip_prefix("/workspace")
+        .map_err(|_| "working directory must be inside /workspace".to_string())?;
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err("working directory contains an invalid path component".to_string());
+    }
+    let resolved = fs::canonicalize(workspace_root.join(relative))
+        .map_err(|error| format!("could not resolve working directory: {error}"))?;
+    if !resolved.starts_with(&workspace_root) {
+        return Err("working directory escapes the mounted workspace".to_string());
+    }
+    let relative = resolved
+        .strip_prefix(&workspace_root)
+        .map_err(|_| "working directory escapes the mounted workspace".to_string())?;
+    Ok(if relative.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        relative
+            .to_str()
+            .ok_or_else(|| "working directory is not UTF-8".to_string())?
+            .to_string()
+    })
 }
 
 #[cfg(test)]
@@ -259,10 +358,114 @@ fn check_allowed(args: &[String], config: &Config) -> Result<(), String> {
     ))
 }
 
+fn managed_fetch_args(source: &managed_fetch::Source) -> Vec<String> {
+    vec![
+        "-T".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ClearAllForwardings=yes".to_string(),
+        "-o".to_string(),
+        "ForwardAgent=no".to_string(),
+        "-o".to_string(),
+        "ForwardX11=no".to_string(),
+        "-o".to_string(),
+        "PermitLocalCommand=no".to_string(),
+        "-o".to_string(),
+        "RequestTTY=no".to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=yes".to_string(),
+        "-o".to_string(),
+        "UpdateHostKeys=no".to_string(),
+        "-o".to_string(),
+        "NumberOfPasswordPrompts=0".to_string(),
+        format!("git@{}", source.host),
+        format!("git-upload-pack '{}'", source.repository),
+    ]
+}
+
+fn git_transport_args(args: &[String]) -> Result<&[String], String> {
+    if args.first().map(String::as_str) != Some("-o") {
+        return Ok(args);
+    }
+    if args.get(1).map(String::as_str) != Some("SendEnv=GIT_PROTOCOL") {
+        return Err("SSH flags are not supported".to_string());
+    }
+    let transport_args = &args[2..];
+    let request = parse_request(transport_args)?;
+    if request.user != "git" || parse_git_wire_command(&request.command).is_none() {
+        return Err("Git protocol negotiation is only accepted for Git SSH services".to_string());
+    }
+    Ok(transport_args)
+}
+
+fn authorize(
+    request: &Request,
+    config: &Config,
+    managed: Option<&ManagedFetch>,
+) -> Result<Authorization, String> {
+    let transport_args = git_transport_args(&request.args)?;
+    let parsed = parse_request(transport_args)?;
+    let service = parsed.command.split_ascii_whitespace().next();
+
+    if service == Some("git-upload-archive") && managed.is_some() {
+        return Err("managed fetch mode does not permit git-upload-archive".to_string());
+    }
+
+    if service == Some("git-upload-pack")
+        && let Some(managed) = managed
+    {
+        if parsed.user != "git" {
+            return Err("managed fetches require the git SSH user".to_string());
+        }
+        if !is_valid_managed_host(&parsed.host) {
+            return Err("managed fetch destination is not a valid DNS hostname".to_string());
+        }
+        let command = parse_git_wire_command(&parsed.command)
+            .filter(|command| command.service == "git-upload-pack")
+            .ok_or_else(|| "managed fetch command is not valid".to_string())?;
+        let cwd = request.cwd.as_deref().ok_or_else(|| {
+            "managed fetch request did not include a working directory".to_string()
+        })?;
+        let requested_from = managed_request_context(&managed.workspace_root, cwd)
+            .map_err(|error| format!("managed fetch request context is invalid: {error}"))?;
+        let source = managed_fetch::Source {
+            host: parsed.host.to_ascii_lowercase(),
+            repository: command.repository,
+        };
+
+        match managed_fetch::read_approval(&managed.state_dir, &source)? {
+            Some(approval) => {
+                if !managed_fetch::consume_once(&managed.state_dir, &approval)? {
+                    return Err(
+                        "the one-time fetch approval was already consumed; approve this source again"
+                            .to_string(),
+                    );
+                }
+                return Ok(Authorization::ManagedFetch(managed_fetch_args(&source)));
+            }
+            None => {
+                let id =
+                    managed_fetch::record_candidate(&managed.state_dir, &source, &requested_from)?;
+                return Err(format!(
+                    "fetch pending approval for {} (candidate {id}); open the T3 admin portal, approve it, and retry",
+                    source.display()
+                ));
+            }
+        }
+    }
+
+    check_allowed(transport_args, config)?;
+    Ok(Authorization::Static)
+}
+
+fn log_safe(value: &str) -> String {
+    value.chars().flat_map(char::escape_default).collect()
+}
+
 fn read_handshake_line(stream: &mut impl Read) -> Option<String> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
-    let limit = 1_048_576;
     loop {
         match stream.read(&mut byte) {
             Ok(0) => return None,
@@ -271,7 +474,7 @@ fn read_handshake_line(stream: &mut impl Read) -> Option<String> {
                     return String::from_utf8(line).ok();
                 }
                 line.push(byte[0]);
-                if line.len() >= limit {
+                if line.len() >= MAX_HANDSHAKE {
                     return None;
                 }
             }
@@ -291,8 +494,12 @@ fn write_frame(writer: &Mutex<impl Write>, frame_type: u8, data: &[u8]) -> std::
 fn handle_connection(
     mut stream: std::os::unix::net::UnixStream,
     config: &Config,
+    managed_fetch: Option<&ManagedFetch>,
     log: &Arc<Mutex<File>>,
 ) {
+    if stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).is_err() {
+        return;
+    }
     let line = match read_handshake_line(&mut stream) {
         Some(l) => l,
         None => return,
@@ -312,18 +519,21 @@ fn handle_connection(
         }
     };
 
-    let cmd_line = req.args.join(" ");
+    let cmd_line = log_safe(&req.args.join(" "));
 
-    if let Err(reason) = check_allowed(&req.args, config) {
-        log_line(log, &format!("DENIED  {}", cmd_line));
-        let resp = HandshakeResponse {
-            status: "denied".to_string(),
-            reason: Some(reason),
-        };
-        let _ = serde_json::to_writer(&mut stream, &resp);
-        let _ = stream.write_all(b"\n");
-        return;
-    }
+    let authorization = match authorize(&req, config, managed_fetch) {
+        Ok(authorization) => authorization,
+        Err(reason) => {
+            log_line(log, &format!("DENIED  {}", cmd_line));
+            let resp = HandshakeResponse {
+                status: "denied".to_string(),
+                reason: Some(reason),
+            };
+            let _ = serde_json::to_writer(&mut stream, &resp);
+            let _ = stream.write_all(b"\n");
+            return;
+        }
+    };
 
     log_line(log, &format!("ALLOWED {}", cmd_line));
 
@@ -333,9 +543,14 @@ fn handle_connection(
     };
     let _ = serde_json::to_writer(&mut stream, &resp);
     let _ = stream.write_all(b"\n");
+    let _ = stream.set_read_timeout(None);
 
+    let (ssh_args, session_limit) = match authorization {
+        Authorization::Static => (req.args, None),
+        Authorization::ManagedFetch(args) => (args, Some(MAX_SESSION_DURATION)),
+    };
     let mut child = match Command::new("/usr/bin/ssh")
-        .args(&req.args)
+        .args(&ssh_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -414,8 +629,27 @@ fn handle_connection(
         }
     });
 
-    let status = child.wait().unwrap();
-    let exit_code = status.code().unwrap_or(255);
+    let exit_code = if let Some(limit) = session_limit {
+        let deadline = Instant::now() + limit;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.code().unwrap_or(255),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+                Ok(None) => {
+                    log_line(log, &format!("TIMEOUT {}", cmd_line));
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break 124;
+                }
+                Err(_) => break 255,
+            }
+        }
+    } else {
+        child
+            .wait()
+            .map(|status| status.code().unwrap_or(255))
+            .unwrap_or(255)
+    };
 
     let _ = thread_b.join();
     let _ = thread_c.join();
@@ -423,12 +657,18 @@ fn handle_connection(
     let _ = write_frame(&writer, FRAME_EXIT, &(exit_code as i32).to_be_bytes());
 
     drop(writer);
+    let _ = stream.shutdown(std::net::Shutdown::Read);
     let _ = thread_a.join();
 
     log_line(log, &format!("EXIT    {} -> {}", cmd_line, exit_code));
 }
 
-pub fn run(socket_path: &str, log_path: &Path, config: &Config) {
+pub fn run(
+    socket_path: &str,
+    log_path: &Path,
+    config: &Config,
+    managed_fetch: Option<&ManagedFetch>,
+) {
     let path = Path::new(socket_path);
     let log_file = proxy_log::open(log_path).unwrap_or_else(|e| {
         eprintln!(
@@ -455,6 +695,16 @@ pub fn run(socket_path: &str, log_path: &Path, config: &Config) {
             config.git, config.command, config.host
         ),
     );
+    if let Some(managed) = managed_fetch {
+        log_line(
+            &log,
+            &format!(
+                "managed fetch: workspace={} state={}",
+                managed.workspace_root.display(),
+                managed.state_dir.display()
+            ),
+        );
+    }
 
     let parent_pid = std::os::unix::process::parent_id();
     let watchdog_socket = socket_identity.clone();
@@ -478,14 +728,30 @@ pub fn run(socket_path: &str, log_path: &Path, config: &Config) {
     });
 
     let config = Arc::new(config.clone());
+    let managed_fetch = managed_fetch.cloned().map(Arc::new);
+    let active_connections = Arc::new(AtomicUsize::new(0));
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
+            Ok(mut stream) => {
+                if active_connections.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
+                    active_connections.fetch_sub(1, Ordering::Relaxed);
+                    log_line(&log, "DENIED  connection limit reached");
+                    let response = HandshakeResponse {
+                        status: "denied".to_string(),
+                        reason: Some("too many concurrent SSH proxy connections".to_string()),
+                    };
+                    let _ = serde_json::to_writer(&mut stream, &response);
+                    let _ = stream.write_all(b"\n");
+                    continue;
+                }
                 let log = Arc::clone(&log);
                 let config = Arc::clone(&config);
+                let managed_fetch = managed_fetch.as_ref().map(Arc::clone);
+                let guard = ConnectionGuard(Arc::clone(&active_connections));
                 thread::spawn(move || {
-                    handle_connection(stream, &config, &log);
+                    let _guard = guard;
+                    handle_connection(stream, &config, managed_fetch.as_deref(), &log);
                 });
             }
             Err(e) => {
@@ -1106,7 +1372,6 @@ mod tests {
         };
         let args = strs(&["git@github.com", "git-receive-pack '../other-org/repo.git'"]);
         let req = parse_request(&args).unwrap();
-        // extract_repo gets "../other-org/repo" which doesn't match myorg/*
         assert!(!check_git_rules(&req, &config.git));
     }
 
@@ -1251,11 +1516,203 @@ mod tests {
             host: vec![],
         };
         assert!(check_allowed(&strs(&["git@host\nevil", "cmd"]), &config).is_err());
+        assert_eq!(log_safe("git@host\nevil"), "git@host\\nevil");
     }
 
     #[test]
     fn test_null_byte_in_arg() {
         let req = parse_request(&strs(&["git@host\0evil", "cmd"])).unwrap();
         assert_eq!(req.host, "host\0evil");
+    }
+
+    fn managed_test_root(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "claude-sandbox-ssh-managed-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn managed_request(host: &str, repository: &str) -> Request {
+        Request {
+            args: strs(&[
+                &format!("git@{host}"),
+                &format!("git-upload-pack '{repository}'"),
+            ]),
+            cwd: Some("/workspace/project".to_string()),
+        }
+    }
+
+    fn managed_fixture(label: &str) -> (PathBuf, ManagedFetch) {
+        let root = managed_test_root(label);
+        let workspace = root.join("workspace");
+        let state = root.join("state");
+        fs::create_dir_all(workspace.join("project")).unwrap();
+        let state = managed_fetch::prepare_state_dir(&state).unwrap();
+        (
+            root,
+            ManagedFetch {
+                workspace_root: workspace,
+                state_dir: state,
+            },
+        )
+    }
+
+    #[test]
+    fn managed_fetch_requires_exact_approval_and_reconstructs_ssh_args() {
+        let (root, managed) = managed_fixture("approval");
+        let config = default_config();
+        let request = managed_request("GitHub.COM", "org/project.git");
+
+        let denied = authorize(&request, &config, Some(&managed)).unwrap_err();
+        assert!(denied.contains("pending approval"));
+        let candidates = managed_fetch::list_candidates(&managed.state_dir).unwrap();
+        assert_eq!(candidates.len(), 1);
+        let source = candidates[0].1.source.clone();
+        assert_eq!(source.host, "github.com");
+        assert_eq!(source.repository, "org/project.git");
+        assert_eq!(candidates[0].1.requested_from, "project");
+
+        managed_fetch::approve(
+            &managed.state_dir,
+            &source,
+            crate::managed_push::ApprovalScope::Persistent,
+        )
+        .unwrap();
+        let allowed = authorize(&request, &config, Some(&managed)).unwrap();
+        let Authorization::ManagedFetch(args) = allowed else {
+            panic!("managed fetch used the static authorization path");
+        };
+        assert_eq!(args.last().unwrap(), "git-upload-pack 'org/project.git'");
+        assert!(args.contains(&"git@github.com".to_string()));
+        assert!(args.contains(&"StrictHostKeyChecking=yes".to_string()));
+        assert!(args.contains(&"UpdateHostKeys=no".to_string()));
+        assert!(!args.iter().any(|arg| arg.contains("receive-pack")));
+        let mut protocol_request = request;
+        protocol_request
+            .args
+            .splice(0..0, ["-o".to_string(), "SendEnv=GIT_PROTOCOL".to_string()]);
+        assert!(matches!(
+            authorize(&protocol_request, &config, Some(&managed)),
+            Ok(Authorization::ManagedFetch(_))
+        ));
+        let push = Request {
+            args: git_push("github.com", "org/project"),
+            cwd: Some("/workspace/project".to_string()),
+        };
+        assert!(authorize(&push, &config, Some(&managed)).is_err());
+
+        let other = managed_request("github.com", "org/other.git");
+        assert!(authorize(&other, &config, Some(&managed)).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_fetch_overrides_static_read_rules_without_changing_explicit_write_rules() {
+        let (root, managed) = managed_fixture("read-only");
+        let config = Config {
+            git: strs(&["github.com"]),
+            command: vec![],
+            host: vec![],
+        };
+        let fetch = managed_request("github.com", "org/project.git");
+        assert!(authorize(&fetch, &config, Some(&managed)).is_err());
+
+        let archive = Request {
+            args: strs(&["git@github.com", "git-upload-archive 'org/project.git'"]),
+            cwd: Some("/workspace/project".to_string()),
+        };
+        assert!(authorize(&archive, &config, Some(&managed)).is_err());
+
+        let push = Request {
+            args: git_push("github.com", "org/project"),
+            cwd: Some("/workspace/project".to_string()),
+        };
+        assert!(matches!(
+            authorize(&push, &config, Some(&managed)),
+            Ok(Authorization::Static)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_fetch_rejects_invalid_host_repo_and_context() {
+        let (root, managed) = managed_fixture("invalid");
+        let config = default_config();
+        for host in [
+            "-github.com",
+            "github..com",
+            "github.com:22",
+            "github.com\nevil",
+        ] {
+            assert!(
+                authorize(
+                    &managed_request(host, "org/repo.git"),
+                    &config,
+                    Some(&managed)
+                )
+                .is_err()
+            );
+        }
+        for repository in [
+            "../repo.git",
+            "org/../repo.git",
+            "org//repo.git",
+            "//org/repo.git",
+            "org/repo;evil",
+        ] {
+            assert!(
+                authorize(
+                    &managed_request("github.com", repository),
+                    &config,
+                    Some(&managed)
+                )
+                .is_err()
+            );
+        }
+        let outside = Request {
+            cwd: Some("/workspace/../outside".to_string()),
+            ..managed_request("github.com", "org/repo.git")
+        };
+        assert!(authorize(&outside, &config, Some(&managed)).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_protocol_option_is_narrowly_scoped_to_structural_git_requests() {
+        let config = Config {
+            git: strs(&["github.com"]),
+            command: vec![],
+            host: strs(&["admin@example.com"]),
+        };
+        let valid = Request {
+            args: strs(&[
+                "-o",
+                "SendEnv=GIT_PROTOCOL",
+                "git@github.com",
+                "git-upload-pack 'org/repo.git'",
+            ]),
+            cwd: None,
+        };
+        assert!(matches!(
+            authorize(&valid, &config, None),
+            Ok(Authorization::Static)
+        ));
+
+        for args in [
+            strs(&[
+                "-o",
+                "ProxyCommand=evil",
+                "git@github.com",
+                "git-upload-pack 'org/repo.git'",
+            ]),
+            strs(&["-o", "SendEnv=GIT_PROTOCOL", "admin@example.com", "uptime"]),
+            strs(&["-o", "SendEnv=GIT_PROTOCOL", "git@github.com", "bash"]),
+        ] {
+            assert!(authorize(&Request { args, cwd: None }, &config, None).is_err());
+        }
     }
 }

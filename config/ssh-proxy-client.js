@@ -10,7 +10,7 @@ const SOCKET_PATH = fs.existsSync(RUNTIME_DIR)
   : "/workspace/.claude-sandbox/ssh-proxy.sock";
 
 const args = process.argv.slice(2);
-const request = JSON.stringify({ args }) + "\n";
+const request = JSON.stringify({ args, cwd: process.cwd() }) + "\n";
 
 const socket = new net.Socket({ allowHalfOpen: true });
 

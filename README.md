@@ -13,6 +13,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 
 - **Sandboxed GitHub CLI** — proxied `gh` access with an audited allowlist of safe commands
 - **SSH proxy** — filtered SSH access without exposing keys to the container
+- **Managed fetch approvals** — portal-approved, read-only access to exact private SSH repositories
 - **Git push bridge** — opt-in single-repository pushes plus portal-approved repositories for long-running T3 services
 - **Clipboard image bridge** — paste screenshots from your host into the container via `xclip`/`wl-paste`
 - **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
@@ -73,6 +74,10 @@ claude-sandbox t3code
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
 # For a long-running T3 service, approve push repositories from that portal
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-push t3code
+# Approve private SSH fetch sources from the same portal
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch t3code
+# Enable independent read and write approvals together
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch --t3-managed-push t3code
 
 # Run opencode TUI
 claude-sandbox opencode
@@ -228,19 +233,21 @@ refreshers. Because those files are user-owned rather than managed by this
 repository, remove any old refresh trigger separately after upgrading; a
 status line may remain as a display-only consumer.
 
-For a long-running T3 service whose workspace contains several repositories,
-enable managed pushes:
+For a long-running T3 service, enable managed fetches, pushes, or both:
 
 ```bash
-T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-push t3code
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox \
+  --t3-managed-fetch --t3-managed-push t3code
 ```
 
-The first `git push` from an unapproved repository is denied and adds a pending
-candidate to the portal. The page shows the repository's workspace-relative
-path, branch, and `origin`; choose **Approve once**, **Always allow**, or
-**Dismiss**. An origin change suspends an existing approval and requires a new
-review. Approvals are stored outside the mounted workspace under
-`~/.claude-sandbox/projects/`, where the container cannot modify them.
+The first authenticated SSH fetch from an unapproved source and the first push
+from an unapproved repository are denied and add separate pending candidates to
+the portal. Choose **Approve once**, **Always allow**, or **Dismiss**. Fetch
+approval grants this sandbox instance read access to one exact SSH repository;
+it never grants push access. Push approval remains bound to a workspace-relative
+repository and its `origin`, and an origin change suspends it. Approvals are
+stored outside the mounted workspace under `~/.claude-sandbox/projects/`, where
+the container cannot modify them.
 
 The portal uses plain HTTP. Anyone able to observe the traffic can recover both
 the PIN and generated pairing token, and a short PIN can be guessed. Never
@@ -344,9 +351,9 @@ Run `gh -h` inside the container to see available commands.
 
 The container includes an SSH proxy that gives filtered SSH access without exposing your SSH keys to the container. The proxy runs on the host and communicates with the container over a Unix socket, the same pattern as the GitHub CLI proxy. Your SSH keys never enter the container.
 
-**How it works:** The SSH proxy is opt-in. When a non-empty SSH proxy config exists, `/usr/local/bin/ssh` inside the container forwards SSH invocations through the proxy. The host-side proxy validates each request against a typed rule set and only spawns the real `/usr/bin/ssh` if there's a match. Everything else is denied. SSH flags (like `-L`, `-D`, `-o`) are never accepted from the container.
+**How it works:** The SSH proxy is opt-in. When a non-empty SSH proxy config exists, `/usr/local/bin/ssh` inside the container forwards SSH invocations through the proxy. The host-side proxy validates each request against a typed rule set and only spawns the real `/usr/bin/ssh` if there's a match. Everything else is denied. Caller-selected SSH flags (like `-L`, `-D`, `-o`) are never accepted. The one exception is Git's exact `-o SendEnv=GIT_PROTOCOL` negotiation prefix when it precedes a structurally valid Git service request; managed fetches discard that input and reconstruct their own host command.
 
-**Default config** is empty, so the SSH proxy is disabled by default and no SSH proxy process is started. To enable it, create a non-empty config at `~/.claude-sandbox/projects/<project>/ssh-proxy.json`. Once enabled, a convenience symlink is placed at `.claude-sandbox/ssh-proxy.json`.
+**Default config** is empty, so the SSH proxy is normally disabled and no SSH proxy process is started. Managed fetch mode starts it independently of this file. To enable static rules, create a non-empty config at `~/.claude-sandbox/projects/<project>/ssh-proxy.json`. Once enabled, a convenience symlink is placed at `.claude-sandbox/ssh-proxy.json`.
 
 The config has three rule types:
 
@@ -368,6 +375,12 @@ The config has three rule types:
 ### `git` — allow git operations to a host
 
 Each entry is a hostname. The proxy structurally validates that the SSH invocation matches the exact shape git uses (`git-receive-pack`, `git-upload-pack`, `git-upload-archive`). Only `git@<host>` destinations are accepted.
+
+This static rule grants both reads and writes. When `--t3-managed-fetch` is
+active, `git-upload-pack` requests are instead governed by exact portal
+approvals; static `git`, `command`, and `host` rules cannot bypass the managed
+read check. Static rules can still independently grant pushes, so omit them when
+all writes should use the Git push bridge.
 
 - `github.com` — all repos on GitHub
 - `github.com/myorg/*` — only repos under that org
@@ -401,6 +414,31 @@ grep DENIED ~/.claude-sandbox/projects/*/logs/ssh-proxy.log
 ```
 
 Use the denied command line to determine which rule type and entry to add. If the proxy is disabled because the config is empty or missing, no deny log is written. The proxy must be restarted for config changes to take effect (restart the container).
+
+## Managed Fetch Approvals
+
+Launch T3 Code with managed fetch access when an agent needs to read private SSH
+repositories without receiving your SSH keys:
+
+```bash
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch t3code
+```
+
+The container runs ordinary `git fetch` and `git pull` commands locally. For an
+SSH remote, the host proxy permits only a reconstructed `git-upload-pack`
+command for an exact source approved in the admin portal. It rejects
+caller-selected SSH flags, non-`git` users, other Git services, invalid
+hostnames, unsafe repository paths, and requests whose reported working
+directory does not resolve beneath the mounted workspace. One-time approval is
+consumed atomically before SSH starts. Managed sessions require an already
+trusted host key and cannot modify the host's `known_hosts` file.
+
+The requesting workspace path shown in the portal is context, not an isolation
+boundary. Every process in one container can read data returned to that
+container, so use separate sandbox instances when repositories require separate
+confidentiality boundaries. This feature controls use of host credentials; it
+does not prevent downloading public code over the container's ordinary network.
+Private HTTPS remotes and Git LFS authentication are not bridged by this mode.
 
 ## Git Push Bridge
 

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{process, thread};
 
+use crate::managed_fetch;
 use crate::managed_push::{self, ApprovalScope};
 use crate::usage_api;
 use crate::usage_collector;
@@ -27,8 +28,10 @@ struct Config {
     t3_base_dir: String,
     workspace_root: PathBuf,
     state_dir: PathBuf,
+    fetch_state_dir: PathBuf,
     usage_state_dir: PathBuf,
     managed_push: bool,
+    managed_fetch: bool,
     pin: String,
     csrf_token: String,
     session_token: String,
@@ -62,8 +65,10 @@ pub struct RunOptions<'a> {
     pub t3_base_dir: &'a str,
     pub workspace_root: &'a Path,
     pub state_dir: &'a Path,
+    pub fetch_state_dir: &'a Path,
     pub usage_state_dir: &'a Path,
     pub managed_push: bool,
+    pub managed_fetch: bool,
 }
 
 pub fn run(options: RunOptions<'_>) {
@@ -79,8 +84,10 @@ pub fn run(options: RunOptions<'_>) {
         t3_base_dir: options.t3_base_dir.to_string(),
         workspace_root: options.workspace_root.to_path_buf(),
         state_dir: options.state_dir.to_path_buf(),
+        fetch_state_dir: options.fetch_state_dir.to_path_buf(),
         usage_state_dir: options.usage_state_dir.to_path_buf(),
         managed_push: options.managed_push,
+        managed_fetch: options.managed_fetch,
         pin,
         csrf_token: random_token(24),
         session_token: random_token(32),
@@ -203,6 +210,13 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
         ("POST", "/approve") if config.managed_push => approve_candidate(config, &form),
         ("POST", "/dismiss") if config.managed_push => dismiss_candidate(config, &form),
         ("POST", "/revoke") if config.managed_push => revoke_approval(config, &form),
+        ("POST", "/approve-fetch") if config.managed_fetch => {
+            approve_fetch_candidate(config, &form)
+        }
+        ("POST", "/dismiss-fetch") if config.managed_fetch => {
+            dismiss_fetch_candidate(config, &form)
+        }
+        ("POST", "/revoke-fetch") if config.managed_fetch => revoke_fetch_approval(config, &form),
         _ => {
             redirect(&mut stream, "/");
             return;
@@ -360,6 +374,56 @@ fn revoke_approval(config: &Config, form: &HashMap<String, String>) -> Result<St
     ))
 }
 
+fn approve_fetch_candidate(
+    config: &Config,
+    form: &HashMap<String, String>,
+) -> Result<String, String> {
+    let id = form.get("id").ok_or("Candidate identifier is missing")?;
+    let scope = match form.get("scope").map(String::as_str) {
+        Some("once") => ApprovalScope::Once,
+        Some("persistent") => ApprovalScope::Persistent,
+        _ => return Err("Invalid approval scope".to_string()),
+    };
+    let candidate = managed_fetch::read_candidate(&config.fetch_state_dir, id)?;
+    managed_fetch::approve(&config.fetch_state_dir, &candidate.source, scope)?;
+    managed_fetch::remove_candidate(&config.fetch_state_dir, id)?;
+    Ok(match scope {
+        ApprovalScope::Once => format!("Approved one fetch from {}.", candidate.source.display()),
+        ApprovalScope::Persistent => {
+            format!(
+                "Approved persistent fetches from {}.",
+                candidate.source.display()
+            )
+        }
+    })
+}
+
+fn dismiss_fetch_candidate(
+    config: &Config,
+    form: &HashMap<String, String>,
+) -> Result<String, String> {
+    let id = form.get("id").ok_or("Candidate identifier is missing")?;
+    managed_fetch::remove_candidate(&config.fetch_state_dir, id)?;
+    Ok("Pending fetch request dismissed.".to_string())
+}
+
+fn revoke_fetch_approval(
+    config: &Config,
+    form: &HashMap<String, String>,
+) -> Result<String, String> {
+    let id = form.get("id").ok_or("Approval identifier is missing")?;
+    let approvals = managed_fetch::list_approvals(&config.fetch_state_dir)?;
+    let (_, approval) = approvals
+        .into_iter()
+        .find(|(approval_id, _)| approval_id == id)
+        .ok_or("Approval no longer exists")?;
+    managed_fetch::revoke(&config.fetch_state_dir, &approval.source)?;
+    Ok(format!(
+        "Revoked fetches from {}.",
+        approval.source.display()
+    ))
+}
+
 fn create_pairing_link(config: &Config, host: Option<&String>) -> Result<String, String> {
     let hostname = host
         .and_then(|value| parse_hostname(value))
@@ -426,6 +490,9 @@ fn render_page(
         let mut sections = render_pairing_controls(&config.csrf_token, pair_url);
         if config.managed_push {
             sections.push_str(&render_push_controls(config));
+        }
+        if config.managed_fetch {
+            sections.push_str(&render_fetch_controls(config));
         }
         sections
     };
@@ -504,6 +571,48 @@ fn render_push_controls(config: &Config) -> String {
         html.push_str(&format!(
             r#"<div class="repo"><div class="meta"><span>Repository</span><strong>{}</strong><span>Origin</span><code>{}</code><span>Status</span><span>{}</span></div><form method="post" action="/revoke"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button class="danger">Revoke</button></form></div>"#,
             escape_html(&approval.repository.relative_path), escape_html(&approval.repository.origin), status, config.csrf_token, id
+        ));
+    }
+    html.push_str("</section>");
+    html
+}
+
+fn render_fetch_controls(config: &Config) -> String {
+    let candidates = managed_fetch::list_candidates(&config.fetch_state_dir).unwrap_or_default();
+    let approvals = managed_fetch::list_approvals(&config.fetch_state_dir).unwrap_or_default();
+    let mut html = String::from("<section><h2>Pending fetch approvals</h2>");
+    html.push_str("<p>Approval grants this sandbox read access to the exact SSH repository. The requesting checkout is shown for context and is not an isolation boundary inside a shared container.</p>");
+    if candidates.is_empty() {
+        html.push_str(
+            "<p>No repositories are waiting. A denied authenticated SSH fetch will appear here automatically.</p>",
+        );
+    }
+    for (id, candidate) in candidates {
+        html.push_str(&format!(
+            r#"<div class="repo"><div class="meta"><span>Source</span><code>{}</code><span>Requested from</span><strong>{}</strong></div><form method="post" action="/approve-fetch"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button name="scope" value="once">Approve once</button><button name="scope" value="persistent">Always allow</button></form><form method="post" action="/dismiss-fetch"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button class="secondary">Dismiss</button></form></div>"#,
+            escape_html(&candidate.source.display()),
+            escape_html(&candidate.requested_from),
+            config.csrf_token,
+            id,
+            config.csrf_token,
+            id
+        ));
+    }
+    html.push_str("</section><section><h2>Approved fetch sources</h2>");
+    if approvals.is_empty() {
+        html.push_str("<p>No private SSH repositories are approved for reading.</p>");
+    }
+    for (id, approval) in approvals {
+        let scope = match approval.scope {
+            ApprovalScope::Once => "next fetch only",
+            ApprovalScope::Persistent => "persistent",
+        };
+        html.push_str(&format!(
+            r#"<div class="repo"><div class="meta"><span>Source</span><code>{}</code><span>Status</span><span>{}</span><span>Capability</span><span>read only</span></div><form method="post" action="/revoke-fetch"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button class="danger">Revoke</button></form></div>"#,
+            escape_html(&approval.source.display()),
+            scope,
+            config.csrf_token,
+            id
         ));
     }
     html.push_str("</section>");
@@ -787,6 +896,53 @@ mod tests {
     }
 
     #[test]
+    fn manages_fetch_approvals_independently_from_pushes() {
+        let workspace = temporary_workspace("fetch-approval");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut config = test_config(&workspace);
+        config.fetch_state_dir = managed_fetch::prepare_state_dir(&config.fetch_state_dir).unwrap();
+        config.managed_fetch = true;
+        let source = managed_fetch::Source {
+            host: "github.com".to_string(),
+            repository: "org/private.git".to_string(),
+        };
+        let id = managed_fetch::record_candidate(&config.fetch_state_dir, &source, "services/api")
+            .unwrap();
+
+        let html = render_page(&config, false, None, None);
+        assert!(html.contains("Pending fetch approvals"));
+        assert!(html.contains("git@github.com:org/private.git"));
+        assert!(html.contains("services/api"));
+        assert!(!html.contains("Pending push approvals"));
+
+        let form = HashMap::from([
+            ("id".to_string(), id),
+            ("scope".to_string(), "persistent".to_string()),
+        ]);
+        approve_fetch_candidate(&config, &form).unwrap();
+        let html = render_page(&config, false, None, None);
+        assert!(html.contains("Capability"));
+        assert!(html.contains("read only"));
+        assert!(
+            managed_fetch::read_approval(&config.fetch_state_dir, &source)
+                .unwrap()
+                .is_some()
+        );
+        let approval_id = managed_fetch::list_approvals(&config.fetch_state_dir)
+            .unwrap()
+            .remove(0)
+            .0;
+        revoke_fetch_approval(&config, &HashMap::from([("id".to_string(), approval_id)])).unwrap();
+        assert!(
+            managed_fetch::read_approval(&config.fetch_state_dir, &source)
+                .unwrap()
+                .is_none()
+        );
+
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn serves_usage_without_authentication_and_does_not_enable_cors() {
         let workspace = temporary_workspace("empty");
         std::fs::create_dir(&workspace).unwrap();
@@ -901,8 +1057,10 @@ mod tests {
             t3_base_dir: "unused".to_string(),
             workspace_root: workspace.to_path_buf(),
             state_dir: workspace.to_path_buf(),
+            fetch_state_dir: workspace.join("fetch"),
             usage_state_dir: workspace.join("usage"),
             managed_push: false,
+            managed_fetch: false,
             pin: "1234".to_string(),
             csrf_token: "csrf".to_string(),
             session_token: "session".to_string(),
