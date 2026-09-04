@@ -6,5 +6,5 @@ BASE_DIR="${T3CODE_BASE_DIR:?}"
 
 export T3CODE_HOME="$BASE_DIR"
 
-t3 serve --host 0.0.0.0 --port "$PORT" --base-dir "$BASE_DIR" \
+exec t3 serve --host 0.0.0.0 --port "$PORT" --base-dir "$BASE_DIR" \
   --auto-bootstrap-project-from-cwd "$@"

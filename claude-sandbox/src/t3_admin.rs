@@ -6,7 +6,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{process, thread};
 
@@ -35,6 +36,8 @@ struct Config {
     pin: String,
     csrf_token: String,
     session_token: String,
+    restart_tx: mpsc::Sender<()>,
+    restart_queued: AtomicBool,
     failed_logins: Mutex<HashMap<String, LoginFailures>>,
 }
 
@@ -77,6 +80,7 @@ pub fn run(options: RunOptions<'_>) {
         eprintln!("t3-admin: T3CODE_PAIR_ADMIN_PIN must contain 4 to 12 digits");
         process::exit(2);
     }
+    let (restart_tx, restart_rx) = mpsc::channel();
     let config = Arc::new(Config {
         portal_port: options.portal_port,
         t3_port: options.t3_port,
@@ -91,15 +95,9 @@ pub fn run(options: RunOptions<'_>) {
         pin,
         csrf_token: random_token(24),
         session_token: random_token(32),
+        restart_tx,
+        restart_queued: AtomicBool::new(false),
         failed_logins: Mutex::new(HashMap::new()),
-    });
-
-    let listener = TcpListener::bind(("0.0.0.0", options.portal_port)).unwrap_or_else(|error| {
-        eprintln!(
-            "t3-admin: failed to bind port {}: {}",
-            options.portal_port, error
-        );
-        process::exit(1);
     });
 
     usage_collector::start(
@@ -117,14 +115,65 @@ pub fn run(options: RunOptions<'_>) {
         }
     });
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    let listener = bind_listener(options.portal_port);
+    loop {
+        if restart_rx.try_recv().is_ok() {
+            match stop_sandbox(&config.container_name) {
+                Ok(()) => process::exit(0),
+                Err(error) => {
+                    eprintln!("t3-admin: sandbox restart failed: {error}");
+                    while restart_rx.try_recv().is_ok() {}
+                    config.restart_queued.store(false, Ordering::Release);
+                }
+            }
+        }
+
+        match listener.accept() {
+            Ok((stream, _)) => {
                 let config = Arc::clone(&config);
                 thread::spawn(move || handle_connection(stream, &config));
             }
-            Err(error) => eprintln!("t3-admin: connection error: {error}"),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                eprintln!("t3-admin: connection error: {error}");
+                thread::sleep(Duration::from_millis(50));
+            }
         }
+    }
+}
+
+fn bind_listener(port: u16) -> TcpListener {
+    let listener = TcpListener::bind(("0.0.0.0", port)).unwrap_or_else(|error| {
+        eprintln!("t3-admin: failed to bind port {port}: {error}");
+        process::exit(1);
+    });
+    listener.set_nonblocking(true).unwrap_or_else(|error| {
+        eprintln!("t3-admin: failed to configure port {port}: {error}");
+        process::exit(1);
+    });
+    listener
+}
+
+fn sandbox_stop_command(container_name: &str) -> Command {
+    let mut command = Command::new("podman");
+    command
+        .args(["stop", "--time=10", container_name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+fn stop_sandbox(container_name: &str) -> Result<(), String> {
+    let status = sandbox_stop_command(container_name)
+        .status()
+        .map_err(|error| format!("could not start podman stop: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("podman stop exited with {status}"))
     }
 }
 
@@ -201,6 +250,26 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
             ),
             &[],
         );
+        return;
+    }
+
+    if request.method == "POST" && request.path == "/restart" {
+        let queued = !config.restart_queued.swap(true, Ordering::AcqRel);
+        let notice = if queued {
+            "Restart requested. The admin page will be unavailable briefly."
+        } else {
+            "A sandbox restart is already in progress."
+        };
+        send_html(
+            &mut stream,
+            200,
+            &render_page(config, false, None, Some(notice)),
+            &[],
+        );
+        let _ = stream.flush();
+        if queued {
+            let _ = config.restart_tx.send(());
+        }
         return;
     }
 
@@ -494,6 +563,7 @@ fn render_page(
         if config.managed_fetch {
             sections.push_str(&render_fetch_controls(config));
         }
+        sections.push_str(&render_restart_controls(&config.csrf_token));
         sections
     };
     let notice = notice
@@ -518,6 +588,13 @@ fn render_pairing_controls(csrf_token: &str, pair_url: Option<&str>) -> String {
         .unwrap_or_default();
     format!(
         r#"<section><h2>Client pairing</h2><p>Create a five-minute, single-use client credential.</p><form method="post" action="/pair"><input type="hidden" name="csrf" value="{}"><button>Create pairing link</button></form>{result}</section>"#,
+        escape_html(csrf_token)
+    )
+}
+
+fn render_restart_controls(csrf_token: &str) -> String {
+    format!(
+        r#"<section><h2>Sandbox lifecycle</h2><p>Stop the current T3 container. When this launcher is supervised with a restart policy, the service starts a fresh sandbox.</p><details><summary>Restart sandbox</summary><form method="post" action="/restart"><input type="hidden" name="csrf" value="{}"><button class="danger">Confirm restart</button></form></details></section>"#,
         escape_html(csrf_token)
     )
 }
@@ -1041,6 +1118,70 @@ mod tests {
         assert!(!response.contains("private-plan"));
     }
 
+    #[test]
+    fn restart_control_is_authenticated_and_csrf_protected() {
+        let workspace = temporary_workspace("restart");
+        std::fs::create_dir(&workspace).unwrap();
+        let (config, restart_rx) = test_config_with_restart(&workspace);
+
+        let locked = render_page(&config, true, None, None);
+        let unlocked = render_page(&config, false, None, None);
+        assert!(!locked.contains("action=\"/restart\""));
+        assert!(unlocked.contains("action=\"/restart\""));
+        assert!(unlocked.contains("Confirm restart"));
+
+        let unauthorized = make_request(
+            &config,
+            "POST /restart HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\n\r\ncsrf=csrf",
+        );
+        assert!(unauthorized.starts_with("HTTP/1.1 303 See Other"));
+        assert!(restart_rx.try_recv().is_err());
+
+        let bad_csrf = make_request(
+            &config,
+            "POST /restart HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\nContent-Length: 8\r\n\r\ncsrf=bad",
+        );
+        assert!(bad_csrf.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(restart_rx.try_recv().is_err());
+
+        let get = make_request(
+            &config,
+            "GET /restart HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
+        );
+        assert!(get.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(restart_rx.try_recv().is_err());
+
+        let accepted = make_request(
+            &config,
+            "POST /restart HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\nContent-Length: 9\r\n\r\ncsrf=csrf",
+        );
+        assert!(accepted.starts_with("HTTP/1.1 200 OK"));
+        assert!(accepted.contains("Restart requested"));
+        restart_rx.try_recv().unwrap();
+
+        let repeated = make_request(
+            &config,
+            "POST /restart HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\nContent-Length: 9\r\n\r\ncsrf=csrf",
+        );
+        assert!(repeated.contains("already in progress"));
+        assert!(restart_rx.try_recv().is_err());
+
+        std::fs::remove_dir(&workspace).unwrap();
+    }
+
+    #[test]
+    fn sandbox_stop_command_has_a_fixed_target() {
+        let command = sandbox_stop_command("sandbox-t3-123");
+        assert_eq!(command.get_program(), "podman");
+        assert_eq!(
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["stop", "--time=10", "sandbox-t3-123"]
+        );
+    }
+
     fn temporary_workspace(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "claude-sandbox-usage-api-{label}-{}-{}",
@@ -1050,7 +1191,12 @@ mod tests {
     }
 
     fn test_config(workspace: &Path) -> Config {
-        Config {
+        test_config_with_restart(workspace).0
+    }
+
+    fn test_config_with_restart(workspace: &Path) -> (Config, mpsc::Receiver<()>) {
+        let (restart_tx, restart_rx) = mpsc::channel();
+        let config = Config {
             portal_port: 0,
             t3_port: 0,
             container_name: "unused".to_string(),
@@ -1064,8 +1210,11 @@ mod tests {
             pin: "1234".to_string(),
             csrf_token: "csrf".to_string(),
             session_token: "session".to_string(),
+            restart_tx,
+            restart_queued: AtomicBool::new(false),
             failed_logins: Mutex::new(HashMap::new()),
-        }
+        };
+        (config, restart_rx)
     }
 
     fn make_request(config: &Config, request: &str) -> String {

@@ -186,6 +186,12 @@ reach before generating the link; a link created through `localhost` only
 works on the host. The PIN stays on the host, is neither generated nor stored
 by claude-sandbox, and must be provided again on every launch.
 
+After unlocking the portal, expand **Restart sandbox** and confirm the action
+to stop the exact named T3 container. The launcher runs attached to that
+container, so its exit returns control to the service supervisor. This button
+is intended for a systemd service configured with `Restart=always` (or an
+equivalent restart policy); a manually launched sandbox remains stopped.
+
 The same host-side server exposes account-level plan-limit usage without
 authentication. Append `/api/usage` to the admin URL printed at startup:
 
