@@ -12,6 +12,7 @@ mod t3_admin;
 mod usage_api;
 mod usage_collector;
 mod usage_dashboard;
+mod websocket;
 
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
