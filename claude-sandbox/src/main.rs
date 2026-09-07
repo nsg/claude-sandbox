@@ -4,6 +4,7 @@ mod git_proxy;
 mod logging;
 mod managed_fetch;
 mod managed_push;
+mod novnc_assets;
 mod proxy_log;
 mod proxy_socket;
 mod ssh_proxy;

@@ -37,6 +37,8 @@ RUN apt-get update && apt-get upgrade -y && \
         libasound2-plugins \
         tmux \
         xvfb \
+        x11vnc \
+        socat \
         openbox \
         dbus-x11 \
         xdotool \
