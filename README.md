@@ -20,6 +20,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
 - **MCP servers** — pre-configured Playwright with headless Chromium
 - **Agent-controlled GUI** — a headless Xvfb virtual display with Openbox, window management, screenshots, input, and accessibility-tree tools for Claude and Codex
+- **Live display** — view and control the sandbox's virtual X display from the T3 admin portal through the existing admin port, no extra ports
 - **Wrapped sessions** — run the command in a tmux session, inject keystrokes and read the screen from outside with `wrap-type` / `wrap-key` / `wrap-read`
 - **Auto-updates** — binary, skills, and container image updates are checked on every launch
 - **Port exposure** — forward ports from the container with `-p`
@@ -191,6 +192,16 @@ to stop the exact named T3 container. The launcher runs attached to that
 container, so its exit returns control to the service supervisor. This button
 is intended for a systemd service configured with `Restart=always` (or an
 equivalent restart policy); a manually launched sandbox remains stopped.
+
+The unlocked portal also links to **Open live display**, served at `/display`.
+It shows the sandbox's virtual X display in the browser with keyboard and mouse
+input enabled by default; tick **View only** to watch without interfering with
+an agent that is driving the display. The page uses the vendored noVNC client
+and a WebSocket on the same admin port, which the host relays to an `x11vnc`
+process started on demand inside the container with `podman exec`. No extra
+container port is opened and nothing listens inside the container between
+sessions. The display route requires the same PIN session as the rest of the
+portal and, like the portal, is served over plain HTTP.
 
 The same host-side server exposes account-level plan-limit usage without
 authentication. Append `/api/usage` to the admin URL printed at startup:

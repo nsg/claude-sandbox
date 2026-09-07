@@ -3,9 +3,9 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -13,6 +13,7 @@ use std::{process, thread};
 
 use crate::managed_fetch;
 use crate::managed_push::{self, ApprovalScope};
+use crate::novnc_assets;
 use crate::usage_api;
 use crate::usage_collector;
 use crate::usage_dashboard;
@@ -39,6 +40,7 @@ struct Config {
     restart_tx: mpsc::Sender<()>,
     restart_queued: AtomicBool,
     failed_logins: Mutex<HashMap<String, LoginFailures>>,
+    display_command: fn(&str) -> Command,
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +100,7 @@ pub fn run(options: RunOptions<'_>) {
         restart_tx,
         restart_queued: AtomicBool::new(false),
         failed_logins: Mutex::new(HashMap::new()),
+        display_command,
     });
 
     usage_collector::start(
@@ -166,6 +169,30 @@ fn sandbox_stop_command(container_name: &str) -> Command {
     command
 }
 
+// x11vnc needs a real socket on stdin (libvncserver peeks at it), so socat
+// bridges the exec pipes to a socketpair. x11vnc can deadlock while exiting
+// after the client goes away, so the session group is killed once socat ends.
+const DISPLAY_SESSION_SCRIPT: &str = "export DISPLAY=:99; . /run/claude-display.env 2>/dev/null; socat STDIO EXEC:\"x11vnc -inetd -q -nopw -once -shared -xkb\"; pkill -KILL -g 0 -x x11vnc; exit 0";
+
+fn display_command(container_name: &str) -> Command {
+    let mut command = Command::new("podman");
+    command
+        .args([
+            "exec",
+            "-i",
+            container_name,
+            "setsid",
+            "-w",
+            "sh",
+            "-c",
+            DISPLAY_SESSION_SCRIPT,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
 fn stop_sandbox(container_name: &str) -> Result<(), String> {
     let status = sandbox_stop_command(container_name)
         .status()
@@ -174,6 +201,253 @@ fn stop_sandbox(container_name: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("podman stop exited with {status}"))
+    }
+}
+
+fn header_has_token(value: Option<&String>, expected: &str) -> bool {
+    value.is_some_and(|value| {
+        value
+            .split(',')
+            .any(|token| token.trim().eq_ignore_ascii_case(expected))
+    })
+}
+
+fn handle_display_socket(
+    stream: &mut TcpStream,
+    request: &Request,
+    config: &Config,
+) -> Result<(), String> {
+    let valid_upgrade = request
+        .headers
+        .get("upgrade")
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+        && header_has_token(request.headers.get("connection"), "upgrade")
+        && request
+            .headers
+            .get("sec-websocket-version")
+            .is_some_and(|value| value == "13")
+        && request.headers.contains_key("sec-websocket-key");
+    if !valid_upgrade {
+        send_html(
+            stream,
+            400,
+            &render_error(
+                "Invalid WebSocket request",
+                "Required WebSocket headers are missing.",
+            ),
+            &[],
+        );
+        return Ok(());
+    }
+
+    let valid_origin = request.headers.get("host").is_some_and(|host| {
+        request.headers.get("origin").is_some_and(|origin| {
+            origin.eq_ignore_ascii_case(&format!("http://{host}"))
+                || origin.eq_ignore_ascii_case(&format!("https://{host}"))
+        })
+    });
+    if !valid_origin {
+        send_html(
+            stream,
+            403,
+            &render_error(
+                "Forbidden",
+                "The WebSocket origin does not match this admin portal.",
+            ),
+            &[],
+        );
+        return Ok(());
+    }
+
+    stream
+        .set_read_timeout(None)
+        .map_err(|error| format!("could not clear socket timeout: {error}"))?;
+    let accept = crate::websocket::accept_key(&request.headers["sec-websocket-key"]);
+    write!(
+        stream,
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    )
+    .and_then(|()| stream.flush())
+    .map_err(|error| format!("could not complete WebSocket handshake: {error}"))?;
+
+    let child = (config.display_command)(&config.container_name)
+        .spawn()
+        .map_err(|error| format!("could not start x11vnc: {error}"))?;
+    relay_display_session(stream, child)
+}
+
+fn send_frame(
+    writer: &Mutex<TcpStream>,
+    opcode: crate::websocket::Opcode,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let mut writer = writer
+        .lock()
+        .map_err(|_| std::io::Error::other("display socket lock was poisoned"))?;
+    crate::websocket::write_frame(&mut *writer, opcode, payload)?;
+    writer.flush()
+}
+
+fn send_close_once(
+    writer: &Mutex<TcpStream>,
+    close_sent: &AtomicBool,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    if close_sent.swap(true, Ordering::AcqRel) {
+        Ok(())
+    } else {
+        send_frame(writer, crate::websocket::Opcode::Close, payload)
+    }
+}
+
+fn relay_display_session(
+    stream: &mut TcpStream,
+    mut child: std::process::Child,
+) -> Result<(), String> {
+    let writer_stream = match stream.try_clone() {
+        Ok(stream) => stream,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("could not clone display socket: {error}"));
+        }
+    };
+    let Some(mut child_stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("x11vnc stdin was not piped".to_string());
+    };
+    let Some(mut child_stdout) = child.stdout.take() else {
+        drop(child_stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("x11vnc stdout was not piped".to_string());
+    };
+    let writer = Arc::new(Mutex::new(writer_stream));
+    let close_sent = Arc::new(AtomicBool::new(false));
+    let pump_writer = Arc::clone(&writer);
+    let pump_close_sent = Arc::clone(&close_sent);
+    let pump = thread::spawn(move || -> std::io::Result<()> {
+        let mut buffer = [0_u8; 64 * 1024];
+        let result = loop {
+            match child_stdout.read(&mut buffer) {
+                Ok(0) => break send_close_once(&pump_writer, &pump_close_sent, &[]),
+                Ok(count) => {
+                    if let Err(error) = send_frame(
+                        &pump_writer,
+                        crate::websocket::Opcode::Binary,
+                        &buffer[..count],
+                    ) {
+                        break Err(error);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => break Err(error),
+            }
+        };
+        if let Ok(socket) = pump_writer.lock() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+        result
+    });
+
+    let mut session_error = None;
+    loop {
+        let frame = match crate::websocket::read_frame(stream) {
+            Ok(frame) => frame,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                break;
+            }
+            Err(error) => {
+                session_error = Some(format!("could not read WebSocket frame: {error}"));
+                break;
+            }
+        };
+        match frame.opcode {
+            crate::websocket::Opcode::Binary | crate::websocket::Opcode::Continuation => {
+                if let Err(error) = child_stdin
+                    .write_all(&frame.payload)
+                    .and_then(|()| child_stdin.flush())
+                {
+                    session_error = Some(format!("could not write to x11vnc: {error}"));
+                    break;
+                }
+            }
+            crate::websocket::Opcode::Ping => {
+                if let Err(error) =
+                    send_frame(&writer, crate::websocket::Opcode::Pong, &frame.payload)
+                {
+                    session_error = Some(format!("could not send WebSocket pong: {error}"));
+                    break;
+                }
+            }
+            crate::websocket::Opcode::Close => {
+                if let Err(error) = send_close_once(&writer, &close_sent, &frame.payload) {
+                    session_error = Some(format!("could not send WebSocket close: {error}"));
+                }
+                break;
+            }
+            crate::websocket::Opcode::Text | crate::websocket::Opcode::Pong => {}
+        }
+    }
+
+    drop(child_stdin);
+    if let Err(error) = finish_display_child(&mut child) {
+        session_error.get_or_insert(error);
+    }
+    let _ = stream.shutdown(Shutdown::Both);
+    match pump.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ) => {}
+        Ok(Err(error)) => {
+            session_error.get_or_insert_with(|| format!("display output pump failed: {error}"));
+        }
+        Err(_) => {
+            session_error.get_or_insert_with(|| "display output pump panicked".to_string());
+        }
+    }
+    session_error.map_or(Ok(()), Err)
+}
+
+fn finish_display_child(child: &mut std::process::Child) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut poll_error = None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => break,
+            Err(error) => {
+                poll_error = Some(error);
+                break;
+            }
+        }
+    }
+    let kill_result = child.kill();
+    match child.wait() {
+        Ok(_) => poll_error.map_or(Ok(()), |error| {
+            Err(format!("could not poll x11vnc before stopping it: {error}"))
+        }),
+        Err(wait_error) => Err(match kill_result {
+            Ok(()) => format!("could not reap x11vnc: {wait_error}"),
+            Err(kill_error) => {
+                format!("could not stop x11vnc: {kill_error}; could not reap it: {wait_error}")
+            }
+        }),
     }
 }
 
@@ -215,6 +489,33 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
 
     if request.method == "POST" && request.path == "/login" {
         handle_login(&mut stream, &request, config);
+        return;
+    }
+
+    if request.method == "GET" && request.path == "/display/socket" {
+        if !is_authorized(&request, config) {
+            redirect(&mut stream, "/");
+        } else if let Err(error) = handle_display_socket(&mut stream, &request, config) {
+            eprintln!("t3-admin: display session error: {error}");
+        }
+        return;
+    }
+
+    if request.method == "GET" && request.path == "/display" {
+        if !is_authorized(&request, config) {
+            redirect(&mut stream, "/");
+        } else {
+            send_display_page(&mut stream);
+        }
+        return;
+    }
+
+    if request.method == "GET" && request.path.starts_with("/display/novnc/") {
+        if !is_authorized(&request, config) {
+            redirect(&mut stream, "/");
+        } else {
+            send_novnc_asset(&mut stream, &request.path[15..]);
+        }
         return;
     }
 
@@ -563,6 +864,7 @@ fn render_page(
         if config.managed_fetch {
             sections.push_str(&render_fetch_controls(config));
         }
+        sections.push_str(render_display_controls());
         sections.push_str(&render_restart_controls(&config.csrf_token));
         sections
     };
@@ -575,6 +877,93 @@ fn render_page(
 </style></head><body><main><header><small>Private control plane · {}</small><h1>T3 Code<br>Admin.</h1><a class="usage" href="/usage">Public usage dashboard ↗</a></header>{notice}{action}<footer>Host-owned administration surface</footer></main></body></html>"#,
         config.portal_port
     )
+}
+
+fn render_display_controls() -> &'static str {
+    r#"<section><h2>Display</h2><p>View and control the sandbox's virtual X display in this browser.</p><a class="pair" href="/display">Open live display ↗</a></section>"#
+}
+
+const DISPLAY_PAGE: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>T3 Code · Display</title><style>
+:root{--ink:#f4f1e8;--muted:#a4a49b;--line:#353630;--acid:#d8ff4f;--danger:#ff8c7e;--bg:#11120f}*{box-sizing:border-box}body{margin:0;min-height:100vh;color:var(--ink);background:radial-gradient(circle at 85% 10%,#293315 0,transparent 30%),var(--bg);font:14px/1.55 "IBM Plex Mono","Courier New",monospace}main{width:min(1400px,calc(100% - 32px));margin:auto;padding:24px 0}header{border-top:1px solid var(--acid);padding-top:16px;margin-bottom:20px;display:flex;align-items:baseline;justify-content:space-between;gap:20px}h1{font:400 clamp(32px,6vw,56px)/.95 Georgia,serif;letter-spacing:-.05em;margin:12px 0}a{color:var(--ink);text-underline-offset:4px}.toolbar{display:flex;align-items:center;gap:18px;flex-wrap:wrap;border:1px solid var(--line);padding:12px 14px;background:#11120fd9}.toolbar label{display:flex;align-items:center;gap:7px}.status{color:var(--muted);margin-right:auto}.status[data-connected="true"]{color:var(--acid)}button{border:0;background:var(--acid);color:#15170d;padding:10px 13px;font:700 11px/1 monospace;text-transform:uppercase;cursor:pointer}#screen{width:100%;height:calc(100vh - 190px);min-height:360px;margin-top:14px;border:1px solid var(--line);background:var(--bg);overflow:hidden}#screen canvas{outline:none}
+</style></head><body><main><header><div><small>Private control plane</small><h1>Live display.</h1></div><a href="/">← Admin</a></header><div class="toolbar"><span id="status" class="status">Disconnected</span><label><input id="view-only" type="checkbox"> View only</label><label><input id="fit" type="checkbox" checked> Fit to window</label><button id="reconnect" type="button">Reconnect</button></div><div id="screen"></div></main><script type="module">
+import RFB from '/display/novnc/core/rfb.js';
+const screen = document.querySelector('#screen');
+const status = document.querySelector('#status');
+const viewOnly = document.querySelector('#view-only');
+const fit = document.querySelector('#fit');
+const socketUrl = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/display/socket';
+let rfb;
+let reconnectRequested = false;
+function updateStatus(message, connected = false) {
+  status.textContent = message;
+  status.dataset.connected = String(connected);
+}
+function connect() {
+  updateStatus('Connecting…');
+  const connection = new RFB(screen, socketUrl);
+  rfb = connection;
+  connection.viewOnly = viewOnly.checked;
+  connection.scaleViewport = fit.checked;
+  connection.focusOnClick = true;
+  connection.resizeSession = false;
+  connection.background = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  connection.addEventListener('connect', () => {
+    updateStatus('Connected', true);
+    connection.focus({ preventScroll: true });
+  });
+  connection.addEventListener('disconnect', event => {
+    if (rfb !== connection) return;
+    rfb = null;
+    updateStatus(event.detail.clean ? 'Disconnected' : 'Connection lost');
+    if (reconnectRequested) {
+      reconnectRequested = false;
+      connect();
+    }
+  });
+}
+viewOnly.addEventListener('change', () => { if (rfb) rfb.viewOnly = viewOnly.checked; });
+fit.addEventListener('change', () => { if (rfb) rfb.scaleViewport = fit.checked; });
+document.querySelector('#reconnect').addEventListener('click', () => {
+  if (!rfb) {
+    connect();
+    return;
+  }
+  reconnectRequested = true;
+  updateStatus('Reconnecting…');
+  rfb.disconnect();
+});
+connect();
+</script></body></html>"#;
+
+fn send_display_page(stream: &mut TcpStream) {
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src data:; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        DISPLAY_PAGE.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(DISPLAY_PAGE.as_bytes());
+}
+
+fn send_novnc_asset(stream: &mut TcpStream, path: &str) {
+    let Some(contents) = (!path.contains(".."))
+        .then(|| novnc_assets::asset(path))
+        .flatten()
+    else {
+        send_html(
+            stream,
+            404,
+            &render_error("Not found", "The requested noVNC asset does not exist."),
+            &[],
+        );
+        return;
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: private, max-age=3600\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        contents.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(contents);
 }
 
 fn render_pairing_controls(csrf_token: &str, pair_url: Option<&str>) -> String {
@@ -818,6 +1207,7 @@ fn send_html(stream: &mut TcpStream, status: u16, body: &str, extra_headers: &[(
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
+        404 => "Not Found",
         429 => "Too Many Requests",
         _ => "Error",
     };
@@ -1070,6 +1460,178 @@ mod tests {
     }
 
     #[test]
+    fn display_page_and_assets_are_authenticated() {
+        let workspace = temporary_workspace("display-routes");
+        std::fs::create_dir(&workspace).unwrap();
+        let config = test_config(&workspace);
+
+        let unauthorized =
+            make_request(&config, "GET /display HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(unauthorized.starts_with("HTTP/1.1 303 See Other\r\n"));
+
+        let page = make_request(
+            &config,
+            "GET /display HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
+        );
+        assert!(page.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(page.contains("/display/novnc/core/rfb.js"));
+        assert!(page.contains("/display/socket"));
+        assert!(page.contains("connect-src 'self' ws: wss:"));
+        assert!(page.contains("img-src data:"));
+
+        let asset = make_request(
+            &config,
+            "GET /display/novnc/core/rfb.js HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
+        );
+        assert!(asset.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(asset.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
+        assert!(asset.contains("export default class RFB"));
+
+        let unknown = make_request(
+            &config,
+            "GET /display/novnc/core/missing.js HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
+        );
+        assert!(unknown.starts_with("HTTP/1.1 404 Not Found\r\n"));
+
+        let asset_unauthorized = make_request(
+            &config,
+            "GET /display/novnc/core/rfb.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(asset_unauthorized.starts_with("HTTP/1.1 303 See Other\r\n"));
+
+        let admin = make_request(
+            &config,
+            "GET / HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
+        );
+        assert!(admin.contains("href=\"/display\""));
+        std::fs::remove_dir(&workspace).unwrap();
+    }
+
+    #[test]
+    fn display_socket_validates_auth_origin_and_upgrade_headers() {
+        let workspace = temporary_workspace("display-socket-validation");
+        std::fs::create_dir(&workspace).unwrap();
+        let config = test_config(&workspace);
+        let upgrade = "Upgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+
+        let unauthorized = make_request(
+            &config,
+            &format!(
+                "GET /display/socket HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\n{upgrade}\r\n"
+            ),
+        );
+        assert!(unauthorized.starts_with("HTTP/1.1 303 See Other\r\n"));
+
+        for origin in ["", "Origin: http://elsewhere.test\r\n"] {
+            let forbidden = make_request(
+                &config,
+                &format!(
+                    "GET /display/socket HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n{origin}{upgrade}\r\n"
+                ),
+            );
+            assert!(forbidden.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+        }
+
+        let missing_host = make_request(
+            &config,
+            &format!(
+                "GET /display/socket HTTP/1.1\r\nOrigin: http://localhost\r\nCookie: t3_admin_session=session\r\n{upgrade}\r\n"
+            ),
+        );
+        assert!(missing_host.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+
+        let bad_upgrade = make_request(
+            &config,
+            "GET /display/socket HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
+        );
+        assert!(bad_upgrade.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        std::fs::remove_dir(&workspace).unwrap();
+    }
+
+    #[test]
+    fn display_socket_relays_bytes_and_closes_cleanly() {
+        let workspace = temporary_workspace("display-socket-relay");
+        std::fs::create_dir(&workspace).unwrap();
+        let config = Arc::new(test_config(&workspace));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let server_config = Arc::clone(&config);
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, &server_config);
+            done_tx.send(()).unwrap();
+        });
+
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        client
+            .write_all(
+                b"GET /display/socket HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nCookie: t3_admin_session=session\r\nUpgrade: WebSocket\r\nConnection: keep-alive, upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+            )
+            .unwrap();
+        let response = read_http_headers(&mut client);
+        assert!(response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(response.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
+
+        client
+            .write_all(&masked_client_frame(
+                crate::websocket::Opcode::Binary,
+                b"hello",
+            ))
+            .unwrap();
+        let (opcode, payload) = read_server_frame(&mut client);
+        assert_eq!(opcode, crate::websocket::Opcode::Binary);
+        assert_eq!(payload, b"hello");
+
+        client
+            .write_all(&masked_client_frame(
+                crate::websocket::Opcode::Ping,
+                b"still here",
+            ))
+            .unwrap();
+        let (opcode, payload) = read_server_frame(&mut client);
+        assert_eq!(opcode, crate::websocket::Opcode::Pong);
+        assert_eq!(payload, b"still here");
+
+        client
+            .write_all(&masked_client_frame(crate::websocket::Opcode::Close, &[]))
+            .unwrap();
+        let (opcode, payload) = read_server_frame(&mut client);
+        assert_eq!(opcode, crate::websocket::Opcode::Close);
+        assert!(payload.is_empty());
+
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        server.join().unwrap();
+        drop(config);
+        std::fs::remove_dir(&workspace).unwrap();
+    }
+
+    #[test]
+    fn display_command_is_fixed_and_gives_x11vnc_a_socket() {
+        let command = display_command("sandbox-t3-123");
+        assert_eq!(command.get_program(), "podman");
+        assert_eq!(
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            [
+                "exec",
+                "-i",
+                "sandbox-t3-123",
+                "setsid",
+                "-w",
+                "sh",
+                "-c",
+                DISPLAY_SESSION_SCRIPT,
+            ]
+        );
+    }
+
+    #[test]
     fn serves_sanitized_cached_usage() {
         let workspace = temporary_workspace("cached");
         let config = test_config(&workspace);
@@ -1213,8 +1775,19 @@ mod tests {
             restart_tx,
             restart_queued: AtomicBool::new(false),
             failed_logins: Mutex::new(HashMap::new()),
+            display_command: echo_display_command,
         };
         (config, restart_rx)
+    }
+
+    fn echo_display_command(_container_name: &str) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exec cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command
     }
 
     fn make_request(config: &Config, request: &str) -> String {
@@ -1232,5 +1805,62 @@ mod tests {
         let (stream, _) = listener.accept().unwrap();
         handle_connection(stream, config);
         client.join().unwrap()
+    }
+
+    fn read_http_headers(stream: &mut TcpStream) -> String {
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            assert!(response.len() < MAX_REQUEST_BYTES);
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            response.push(byte[0]);
+        }
+        String::from_utf8(response).unwrap()
+    }
+
+    fn masked_client_frame(opcode: crate::websocket::Opcode, payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() <= 125);
+        let mask = [0x12, 0x34, 0x56, 0x78];
+        let mut frame = vec![0x80 | opcode as u8, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % mask.len()]),
+        );
+        frame
+    }
+
+    fn read_server_frame(stream: &mut TcpStream) -> (crate::websocket::Opcode, Vec<u8>) {
+        let mut header = [0; 2];
+        stream.read_exact(&mut header).unwrap();
+        assert_eq!(header[0] & 0x80, 0x80);
+        assert_eq!(header[1] & 0x80, 0, "server frames must be unmasked");
+        let opcode = match header[0] & 0x0f {
+            0 => crate::websocket::Opcode::Continuation,
+            1 => crate::websocket::Opcode::Text,
+            2 => crate::websocket::Opcode::Binary,
+            8 => crate::websocket::Opcode::Close,
+            9 => crate::websocket::Opcode::Ping,
+            10 => crate::websocket::Opcode::Pong,
+            value => panic!("unexpected opcode {value}"),
+        };
+        let length = match header[1] & 0x7f {
+            126 => {
+                let mut bytes = [0; 2];
+                stream.read_exact(&mut bytes).unwrap();
+                u16::from_be_bytes(bytes) as usize
+            }
+            127 => {
+                let mut bytes = [0; 8];
+                stream.read_exact(&mut bytes).unwrap();
+                usize::try_from(u64::from_be_bytes(bytes)).unwrap()
+            }
+            length => length as usize,
+        };
+        let mut payload = vec![0; length];
+        stream.read_exact(&mut payload).unwrap();
+        (opcode, payload)
     }
 }
