@@ -341,6 +341,10 @@ Each launch gets a private set of host proxy sockets, mounted read-only at `/run
 
 At launch, the host discovers GitHub repositories beneath the mounted workspace and snapshots each repository's pinned path and `origin` identity. Discovery reads only a bounded, pinned local Git config with includes disabled; Git directories outside the workspace are rejected. The container forwards its current working directory with every request, but the host executes `gh` from a neutral directory and supplies the snapshotted repository explicitly. Hooks and later worktree configuration changes therefore cannot influence the host-side command.
 
+The account-scoped identity probe `gh api user --jq .login` is also available.
+It is an exact command that returns only the authenticated login; all other
+`gh api` forms remain blocked.
+
 **Read commands** work against any repository:
 
 | Group | Commands |

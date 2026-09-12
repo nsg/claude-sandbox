@@ -678,6 +678,8 @@ const EXT_COMMANDS: &[ExtCommandDef] = &[
     },
 ];
 
+const ACCOUNT_PROBE_HELP: &str = "gh api user --jq .login (read-only account-name probe)\n";
+
 fn find_ext_command(group: &str, subcommand: &str) -> Option<&'static ExtCommandDef> {
     EXT_COMMANDS
         .iter()
@@ -1463,6 +1465,7 @@ fn help_toplevel() -> String {
 
     let mut out =
         String::from("gh - GitHub CLI (proxy, restricted subset)\n\nAvailable command groups:\n");
+    out.push_str("  api          user --jq .login\n");
     for group in &groups {
         let mut subs: Vec<&str> = COMMANDS
             .iter()
@@ -1482,6 +1485,10 @@ fn help_toplevel() -> String {
 }
 
 fn help_group(group: &str) -> Option<String> {
+    if group == "api" {
+        return Some(ACCOUNT_PROBE_HELP.to_string());
+    }
+
     let cmds: Vec<&CommandDef> = COMMANDS.iter().filter(|c| c.group == group).collect();
     let exts: Vec<&ExtCommandDef> = EXT_COMMANDS.iter().filter(|c| c.group == group).collect();
     if cmds.is_empty() && exts.is_empty() {
@@ -1504,6 +1511,10 @@ fn help_group(group: &str) -> Option<String> {
 }
 
 fn help_command(group: &str, subcommand: &str) -> Option<String> {
+    if group == "api" && subcommand == "user" {
+        return Some(ACCOUNT_PROBE_HELP.to_string());
+    }
+
     if let Some(ext) = find_ext_command(group, subcommand) {
         return Some(ext.help_text.to_string());
     }
@@ -1687,7 +1698,7 @@ fn has_repo_flag(args: &[String]) -> bool {
 
 fn read_command_uses_current_repo(args: &[String]) -> bool {
     match (args[0].as_str(), args[1].as_str()) {
-        ("auth", _) | ("repo", "list") | ("search", _) => false,
+        ("api", _) | ("auth", _) | ("repo", "list") | ("search", _) => false,
         ("repo", "view") => {
             let mut skip_value = false;
             for arg in &args[2..] {
@@ -1718,8 +1729,24 @@ fn read_command_uses_current_repo(args: &[String]) -> bool {
     }
 }
 
+fn read_command_needs_repo_selector(args: &[String]) -> bool {
+    !has_repo_flag(args) && read_command_uses_current_repo(args)
+}
+
+fn is_safe_account_probe(args: &[String]) -> bool {
+    args.len() == 4
+        && args[0] == "api"
+        && args[1] == "user"
+        && args[2] == "--jq"
+        && args[3] == ".login"
+}
+
 fn reject_reason(args: &[String]) -> Option<String> {
     if args.len() == 1 && args[0] == "--version" {
+        return None;
+    }
+
+    if is_safe_account_probe(args) {
         return None;
     }
 
@@ -1730,10 +1757,16 @@ fn reject_reason(args: &[String]) -> Option<String> {
     let group = args[0].as_str();
     let subcommand = args[1].as_str();
 
+    if group == "api" && subcommand == "user" {
+        return Some(
+            "command not allowed: only 'gh api user --jq .login' is available".to_string(),
+        );
+    }
+
     // Guide callers trying to use `gh api` for milestones to the extension commands
     if group == "api" && args[1..].iter().any(|a| a.contains("milestone")) {
         return Some(
-            "command not allowed: gh api is not available. \
+            "command not allowed: general gh api access is not available. \
              Use 'gh ext milestone-list' and 'gh ext milestone-create <title>' instead."
                 .to_string(),
         );
@@ -1824,7 +1857,7 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
                 log,
                 &format!("ROUTED  gh {} -> {}", cmd_str, grant.repository.selector()),
             );
-        } else if !has_repo_flag(&req.args) && read_command_uses_current_repo(&req.args) {
+        } else if read_command_needs_repo_selector(&req.args) {
             match resolve_grant(config, req.cwd.as_deref()) {
                 Ok(grant) => {
                     append_repo_selector(&mut execution_args, &grant.repository);
@@ -2010,10 +2043,129 @@ mod tests {
     }
 
     #[test]
+    fn test_t3_code_read_commands_allowed() {
+        let commands = [
+            strs(&["--version"]),
+            strs(&["auth", "status", "--json", "hosts"]),
+            strs(&["api", "user", "--jq", ".login"]),
+            strs(&[
+                "pr",
+                "list",
+                "--head",
+                "owner:feature",
+                "--state",
+                "open",
+                "--limit",
+                "1",
+                "--json",
+                "number,title,url,baseRefName,headRefName,state,mergedAt,isCrossRepository,headRepository,headRepositoryOwner",
+            ]),
+            strs(&[
+                "pr",
+                "list",
+                "--head",
+                "owner:feature",
+                "--state",
+                "all",
+                "--limit",
+                "20",
+                "--json",
+                "number,title,url,baseRefName,headRefName,state,mergedAt,updatedAt,isCrossRepository,headRepository,headRepositoryOwner",
+            ]),
+            strs(&[
+                "pr",
+                "view",
+                "123",
+                "--json",
+                "number,title,url,baseRefName,headRefName,state,mergedAt,isCrossRepository,headRepository,headRepositoryOwner",
+            ]),
+            strs(&[
+                "repo",
+                "view",
+                "owner/project",
+                "--json",
+                "nameWithOwner,url,sshUrl",
+            ]),
+            strs(&[
+                "repo",
+                "view",
+                "--json",
+                "defaultBranchRef",
+                "--jq",
+                ".defaultBranchRef.name",
+            ]),
+            strs(&[
+                "pr",
+                "list",
+                "--repo",
+                "github.com/owner/project",
+                "--author",
+                "viewer",
+                "--search",
+                "fix",
+                "--state",
+                "open",
+                "--limit",
+                "21",
+                "--json",
+                "number,title,url,baseRefName,headRefName,state",
+            ]),
+            strs(&[
+                "pr",
+                "view",
+                "123",
+                "--repo",
+                "github.com/owner/project",
+                "--json",
+                "number,title,url,comments,reviews",
+            ]),
+            strs(&[
+                "pr",
+                "diff",
+                "123",
+                "--repo",
+                "github.com/owner/project",
+                "--color",
+                "never",
+            ]),
+            strs(&[
+                "repo",
+                "view",
+                "github.com/owner/project",
+                "--json",
+                "viewerPermission,mergeCommitAllowed,rebaseMergeAllowed,squashMergeAllowed",
+            ]),
+        ];
+
+        for args in commands {
+            assert_eq!(reject_reason(&args), None, "gh {}", args.join(" "));
+        }
+    }
+
+    #[test]
     fn test_auth_status_blocks_token_output() {
         assert!(reject_reason(&strs(&["auth", "status", "--show-token"])).is_some());
         assert!(reject_reason(&strs(&["auth", "status", "-t"])).is_some());
         assert!(reject_reason(&strs(&["auth", "token"])).is_some());
+    }
+
+    #[test]
+    fn test_account_probe_allowance_is_exact() {
+        assert!(reject_reason(&strs(&["api", "user", "--jq", ".login"])).is_none());
+        for args in [
+            strs(&["api", "user"]),
+            strs(&["api", "user", "--jq", ".id"]),
+            strs(&["api", "user", "--jq", ".login", "--hostname", "github.com"]),
+            strs(&["api", "user", "--jq", ".login", "--method", "DELETE"]),
+            strs(&["api", "user", "--jq=.login"]),
+            strs(&["api", "--jq", ".login", "user"]),
+        ] {
+            assert!(reject_reason(&args).is_some(), "gh {}", args.join(" "));
+        }
+
+        let args = strs(&["api", "user", "--jq", ".login"]);
+        assert!(find_command("api", "user").is_none());
+        assert!(!read_command_needs_repo_selector(&args));
     }
 
     #[test]
@@ -2128,6 +2280,109 @@ mod tests {
     }
 
     #[test]
+    fn test_t3_code_commands_outside_proxy_boundary_remain_denied() {
+        let commands = [
+            strs(&["repo", "create", "owner/new-project", "--private"]),
+            strs(&["repo", "create", "owner/new-project", "--public"]),
+            strs(&["repo", "create", "owner/new-project", "--internal"]),
+            strs(&[
+                "pr",
+                "create",
+                "--base",
+                "main",
+                "--head",
+                "owner:feature",
+                "--title",
+                "New pull request",
+                "--body-file",
+                "/tmp/t3code-pr-body.md",
+            ]),
+            strs(&["pr", "checkout", "123"]),
+            strs(&["pr", "checkout", "123", "--force"]),
+            strs(&["api", "graphql", "--hostname", "github.com", "--input", "-"]),
+            strs(&[
+                "api",
+                "--hostname",
+                "github.com",
+                "repos/owner/project/pulls/123/files?per_page=100&page=1",
+            ]),
+            strs(&[
+                "api",
+                "--method",
+                "POST",
+                "--hostname",
+                "github.com",
+                "repos/owner/project/pulls/123/reviews",
+                "--input",
+                "-",
+            ]),
+            strs(&[
+                "pr",
+                "comment",
+                "123",
+                "--repo",
+                "github.com/owner/project",
+                "--body-file",
+                "-",
+            ]),
+            strs(&[
+                "pr",
+                "merge",
+                "123",
+                "--repo",
+                "github.com/owner/project",
+                "--squash",
+            ]),
+            strs(&[
+                "pr",
+                "update-branch",
+                "123",
+                "--repo",
+                "github.com/owner/project",
+                "--rebase",
+            ]),
+            strs(&["pr", "ready", "123", "--repo", "github.com/owner/project"]),
+            strs(&["pr", "close", "123", "--repo", "github.com/owner/project"]),
+            strs(&["pr", "reopen", "123", "--repo", "github.com/owner/project"]),
+        ];
+
+        for args in commands {
+            assert!(reject_reason(&args).is_some(), "gh {}", args.join(" "));
+        }
+    }
+
+    #[test]
+    fn test_t3_code_read_commands_route_only_when_repository_is_implicit() {
+        assert!(read_command_needs_repo_selector(&strs(&[
+            "pr",
+            "list",
+            "--head",
+            "owner:feature"
+        ])));
+        assert!(read_command_needs_repo_selector(&strs(&[
+            "repo",
+            "view",
+            "--json",
+            "defaultBranchRef"
+        ])));
+        assert!(!read_command_needs_repo_selector(&strs(&[
+            "repo",
+            "view",
+            "owner/project",
+            "--json",
+            "nameWithOwner"
+        ])));
+        assert!(!read_command_needs_repo_selector(&strs(&[
+            "pr",
+            "list",
+            "--repo",
+            "github.com/owner/project",
+            "--state",
+            "open"
+        ])));
+    }
+
+    #[test]
     fn test_empty_args() {
         assert!(reject_reason(&[]).is_some());
     }
@@ -2142,6 +2397,7 @@ mod tests {
     #[test]
     fn test_help_toplevel() {
         let h = maybe_help(&[]).unwrap();
+        assert!(h.contains("user --jq .login"));
         assert!(h.contains("pr"));
         assert!(h.contains("issue"));
         assert!(h.contains("repo"));
@@ -2168,6 +2424,9 @@ mod tests {
         // Via `gh help pr`
         let h2 = maybe_help(&strs(&["help", "pr"])).unwrap();
         assert!(h2.contains("list"));
+
+        let api = maybe_help(&strs(&["api", "-h"])).unwrap();
+        assert!(api.contains("user --jq .login"));
     }
 
     #[test]
@@ -2186,6 +2445,9 @@ mod tests {
         // Via `gh help pr list`
         let h3 = maybe_help(&strs(&["help", "pr", "list"])).unwrap();
         assert!(h3.contains("--state"));
+
+        let api = maybe_help(&strs(&["api", "user", "--help"])).unwrap();
+        assert!(api.contains("read-only account-name probe"));
     }
 
     #[test]
