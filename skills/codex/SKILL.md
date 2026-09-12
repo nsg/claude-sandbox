@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Delegate implementation or review work to OpenAI GPT-5.6 models (Sol/Terra/Luna) via the Codex CLI — invocation pattern, sandbox limits, briefing style, verification split
+description: Delegate implementation or review work to OpenAI GPT-6 Astra and GPT-5.6 models (Sol/Terra/Luna) via the Codex CLI — invocation pattern, sandbox limits, briefing style, verification split
 ---
 
 # Codex Delegation
@@ -21,7 +21,8 @@ codex exec --skip-git-repo-check --sandbox workspace-write \
 - **Launch from the orchestrator's own background Bash** (`run_in_background: true`), never from inside a subagent — a codex process started by a subagent dies when that subagent's turn ends. The harness completion notification replaces any watcher; do not poll.
 - `-o <file>` writes codex's final message to a file, keeping a long report out of context until deliberately read.
 - Write the brief to a file and pipe it via `- < brief.md`; don't inline large prompts as shell arguments.
-- Reasoning effort: `-c model_reasoning_effort=high|medium|low`.
+- Reasoning effort: `-c model_reasoning_effort=high|medium|low` (also `xhigh`).
+- `-m gpt-6-astra` takes the same flags. `high` is its token-efficient setting; `xhigh` erases that efficiency, so use it only on a problem `high` has already failed on. Its sandbox escalations pass through Codex's automatic approval reviewer, which can reject an action `sol` would have been allowed.
 - Ensure the shell cwd is the target repo before launching; `--sandbox workspace-write` scopes writes to cwd, while the paired network override deliberately allows unrestricted outbound access.
 - For read-only review work, omit `--sandbox` — the default read-only sandbox suffices (this is the consensus-review pattern).
 
