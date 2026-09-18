@@ -554,6 +554,7 @@ claude-sandbox install skills
 | `/git` | Git operations with small, atomic commits and clean history |
 | `/github-actions` | GitHub Actions workflow development with official actions preference |
 | `/readme` | README writing and maintenance guidelines |
+| `/testing` | Testing strategy: test only our code, keep suites and CI minimal, prune once the code works |
 | `/plan-usage` | Check plan-limit headroom and reset timing before routing substantial agent work |
 | `/gui` | Run and test GUI applications on the virtual X display |
 | `/wrap` | Run and drive interactive terminal programs in a tmux session |
