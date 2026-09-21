@@ -1,14 +1,17 @@
 ---
 name: plan-usage
-description: Use when an agent inside claude-sandbox needs current Anthropic, OpenAI Codex, or Ollama Cloud plan headroom to choose a runner, schedule substantial work, or answer questions about bucket utilization and reset timing.
+description: Use when an agent inside claude-sandbox is about to delegate work to any metered pool (codex, opencode, a substantial Anthropic subagent, a fan-out or review round) and has no usage figures under an hour old, needs plan headroom to choose a runner or schedule work, or must answer questions about bucket utilization and reset timing.
 ---
 
 # Plan Usage
 
 Read the cached public usage summary from the host-side T3 admin server. Use it
-before a substantial delegation or fan-out when quota could change provider
-routing, and when the user asks for current usage or reset timing. Do not query
-it for every ordinary task.
+before every delegation to a metered pool — a `codex` or `opencode` launch, a
+substantial subagent, a fan-out, a review round — and when the user asks for
+current usage or reset timing. Figures already in the conversation and under
+about an hour old can be reused. Work you do yourself without delegating needs
+no check. What to do with the numbers — when a pool counts as pressed and what
+it is then reserved for — is in the `delegate` skill under **Live Headroom**.
 
 ## Connect from the sandbox
 

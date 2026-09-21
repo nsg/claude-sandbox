@@ -7,6 +7,22 @@ description: Delegate implementation or review work to OpenAI GPT-6 Astra and GP
 
 Run OpenAI models non-interactively through `codex exec` to offload work from the Anthropic budget. Which model/effort to pick is ranked in the `delegate` skill; this skill is the how.
 
+## Before launching: check the OpenAI pool
+
+Every `codex exec` spends the OpenAI weekly quota, and Astra drains it two to
+three times faster than `sol`. Read usage with the `plan-usage` skill before
+launching (figures under an hour old in the conversation will do) and apply the
+**Live Headroom** rules in `delegate`:
+
+- Pool roomy → proceed, and mention the figure when announcing the run.
+- Pool pressed (usage ahead of the clock, or above ~60% with more than a day to
+  the reset) → launch only if `sol` or Astra is distinctly the best option for
+  this job: correctness-critical algorithmic code, the hardest science, security
+  work, the cross-vendor half of a high-stakes review. Generic code, refactors,
+  tests and legwork go to `opus` / `sonnet` instead.
+- A routing line that says "code → codex" is a default for a roomy pool, not
+  permission to skip this check.
+
 ## Invocation (proven 2026-08)
 
 ```bash

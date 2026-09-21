@@ -31,18 +31,53 @@ one; otherwise load the `claude`, `codex`, or `opencode` skill for that CLI.
 
 Affordability above is a baseline; it cannot say which pool is pressed today, and
 the best baseline is the wrong pick when that pool is the one running dry.
+**Routing without the live numbers is a guess. Read them first.**
 
-Load the `plan-usage` skill when current headroom would affect routing. It reads
-the passive, account-global host API and explains freshness and reset timing.
-If that endpoint is unavailable, select on the baseline and say the live numbers
-were unavailable; never query provider APIs or infer headroom from missing data.
+### Check before you spend
 
-- **Reuse figures already in the conversation.** These move over hours, not
-  turns, so a recent API result usually still holds.
-- **Call it when it would change the plan.** Before a long run, a wide fan-out or
-  a multi-round review; when two pools fit equally; when a fallback crosses
-  vendors; whenever the pick is between `fable` and `gpt-6-astra`. Not before an
-  ordinary delegation.
+Read usage through the `plan-usage` skill **before every delegation to a
+metered pool** — any `codex` or `opencode` launch, any Fable or Opus subagent
+doing more than a quick lookup, every fan-out, every review round. It is one
+local `curl`; there is no delegation too ordinary for it. No routing table,
+here or in a CLAUDE.md, overrides what the numbers say.
+
+- **Reuse figures already in the conversation** when they are under about an
+  hour old and no heavy job has run on that pool since. Otherwise read again.
+- **Say what you saw.** When announcing a delegation, name the pool and its
+  relevant bucket in one line ("Codex weekly 34%, resets in 5 days"), so the
+  user can veto the pick before the quota is spent.
+- If the endpoint is unavailable, select on the baseline, say the live numbers
+  were unavailable, and treat the scarcer pools (OpenAI, Fable) as pressed.
+  Never query provider APIs or infer headroom from missing data.
+
+### When a pool is pressed
+
+Judge a bucket by pace, not by percentage alone: compare `used_percent` with how
+much of its window has elapsed.
+
+- **Roomy** — usage is at or behind the clock (40% used, 60% of the week gone).
+  Route on fit from the table.
+- **Pressed** — usage is ahead of the clock, or above roughly 60% with more than
+  a day to the reset. 71% with three days of a week left is pressed. A model
+  bucket (Fable) and the overall bucket both count; the tighter one decides.
+- **Nearly dry** — above roughly 90% with the reset not imminent. Nothing goes
+  there without the user's say-so.
+- A high figure that resets within the hour is not pressed; read the reset.
+
+A pressed pool is **reserved for work where its models are distinctly the best
+option**, and everything generic moves to a roomy pool:
+
+| Pressed pool | Still worth spending it on | Moves elsewhere |
+|---|---|---|
+| OpenAI | `sol` high on algorithmically hard, correctness-critical code (parsers, concurrency, numerics); `gpt-6-astra` on the hardest science, security work, or a fact hunt through a huge codebase; the second vendor of a genuinely high-stakes review | ordinary feature code, refactors, glue, UI, tests → `opus` (or `sonnet` for the routine parts); legwork → `sonnet` / `haiku`; ordinary reviews → Anthropic only, and say it was single-vendor |
+| Anthropic (or the Fable bucket) | `fable` for judging, taste and inventive architecture; `opus` where design and idiom are the hard part | code → `sol`; architecture → `gpt-6-astra`; legwork → `sol` low / `luna` |
+| Ollama | nothing is unique to it | bulk non-code work → `sonnet`, `haiku` or `luna` |
+
+Ask "would a roomy pool's model do this nearly as well?" If yes, the pressed
+pool does not get the job — a feature in an ordinary TypeScript or Python
+codebase is generic work, however large. When both big pools are pressed, do
+less in parallel, prefer the one whose reset is nearer, and tell the user.
+
 - **Scheduling needs it most.** Queued work spends a quota unwatched, so read the
   resets over the percentages — 95% resetting within the hour is safe to schedule
   behind, 60% with six days left and a heavy job already queued is not.
@@ -104,7 +139,7 @@ feeding the pieces through one delegate in turn.
 
 ## Selection Logic
 
-- **Three subscriptions, spent independently.** All the same shape — a quota refilling on its own clock: an Anthropic plan behind a native `Agent` or the `claude` CLI, an OpenAI one behind a native Codex worker or the `codex` CLI, and an Ollama one behind `opencode`, metered in GPU-time rather than tokens. One running dry says nothing about the other two; the work moves to whichever still has room rather than stopping.
+- **Three subscriptions, spent independently.** All the same shape — a quota refilling on its own clock: an Anthropic plan behind a native `Agent` or the `claude` CLI, an OpenAI one behind a native Codex worker or the `codex` CLI, and an Ollama one behind `opencode`, metered in GPU-time rather than tokens. One running dry says nothing about the other two; the work moves to whichever still has room rather than stopping — and moves early: a pressed pool is saved for the work only its models do best (see **Live Headroom**).
 - **Affordability is one currency: headroom.** Not a dollar price — how much of a quota a run really eats, already reconciled across the three: how generous each plan is, and how many tokens the model spends reaching the same finish line. Codex wins on both, which is why `sol` outscores its Anthropic peers. Compare it freely across rows; it is a baseline, and the live numbers — see **Live Headroom** above — say which pool is pressed today. Astra is billed near Fable per token but thinks in far fewer of them, so it lands at roughly half Fable's spend on the roomier plan — and two to three times `sol` high on the same one. It draws from the same OpenAI buckets as `sol` and is not reported separately by the usage API; it simply drains them faster, so a heavy Astra run shrinks the headroom every Codex worker sees.
 - **Two frontier brains, different flavours.** Fable and Astra are the baseline of tens; both carry the most knowledge unaided and both can hold something large whole — a codebase, a mission, an objective — and see the pattern running through it. They differ in kind. Astra digs: large patterns, complex science, hunting a fact down through a big codebase, holding rigorously to the brief. Fable invents: creative reframing, taste, going off the brief when the brief is wrong. Both architect well, in different styles — pick by whether the job is finding the shape that already exists or inventing one that doesn't, and for the biggest decisions ask both and let one judge.
 - **Frontier models are for judgment, not throughput.** Use Fable or Astra to arbitrate between competing designs, settle disagreements between other models' reviews, crack problems where taste or depth is the bottleneck, and lay out the overall architecture of a project — then hand the individual parts to `sol` to implement. On anything lookup-able `sol` arrives at the same place by working the tools harder; what it cannot substitute for is the overview. Every mechanical task run on a frontier model is a judging call unavailable later.
@@ -113,7 +148,7 @@ feeding the pieces through one delegate in turn.
 - **Brief them differently.** Astra follows the brief literally: give it the spec, the scope, and the acceptance criteria. Fable treats the brief as a goal and will deviate when it sees a better path: give it the problem and only the constraints that actually matter, and expect it to reinterpret the rest.
 - **Security work goes to Astra first.** Fable's safety measures can quietly downgrade a security request to Opus or even Sonnet, so a Fable security audit may not be a Fable audit. Astra is usually more permissive but not guaranteed — its sandbox escalations pass through Codex's automatic approval reviewer. Route audits and security research to Astra by default, use Fable as the second opinion, and if either balks fall back to the other, never down a tier.
 - **Sol-high vs Opus is capability, not just cost.** Sol-high is the stronger implementer for parsers, concurrency, numerics, and other correctness-critical work (Science 10). Opus wins when the hard part is API shape, module boundaries, or idiomatic fit — but it does not have to justify itself to write ordinary code; while the plan has room, that is a fine use of it.
-- **The open-weight models do not write code.** Not a quick fix, not a mechanical loop, not the boring half of a refactor. They are cheap because they are worse, and code is the place where worse compounds — it gets committed, and someone reads it for years. Long grinds that write code go to `sol`, even when codex is the pressed pool.
+- **The open-weight models do not write code.** Not a quick fix, not a mechanical loop, not the boring half of a refactor. They are cheap because they are worse, and code is the place where worse compounds — it gets committed, and someone reads it for years. Long grinds that write code go to `sol`, or to `opus` when the OpenAI pool is pressed (see **Live Headroom**) — never to an open-weight model.
 - **What the open-weight models are for.** Bulk work on material that is not code and whose output nobody commits: trawling logs, summarising long output, answering research questions, drafting prose. `deepseek-v4-pro` when the question needs real reasoning, `glm-5.2` for long agentic runs, `deepseek-v4-flash` when volume and latency dominate.
 - **Fall back sideways, not downwards.** When the intended pick is unavailable, replace it with the nearest model doing the same kind of work: architecture off `fable` goes to `gpt-6-astra`, then `opus`; architecture off Astra goes to `fable`, then `opus`; implementation off codex goes to `opus` or `sonnet` through a native Anthropic agent or the `claude` CLI. Code never falls through to an open-weight model — write less of it instead.
 - **Cross-vendor diversity has independent value.** Same-vendor models share blind spots; for high-stakes reviews or decisions, get opinions from two vendors so failures are uncorrelated. Opus + Sol is the pair for ordinary reviews; Fable + Astra is the pair for the decisions that matter most, since they disagree in useful ways.

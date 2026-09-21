@@ -9,6 +9,8 @@ Run open-weight models non-interactively through `opencode run`, billed to the O
 
 These models do not write code — send them bulk non-code work (logs, summaries, research, prose) and route anything that ends up committed to codex or an Anthropic model instead.
 
+Before launching, read usage with the `plan-usage` skill and apply the **Live Headroom** rules in `delegate`: a pressed Ollama pool is reserved for work its models do distinctly best, and generic work moves to a roomier pool.
+
 ## Invocation
 
 ```bash

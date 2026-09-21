@@ -7,6 +7,8 @@ description: Delegate architecture, implementation, review, or research to Anthr
 
 Run Anthropic models non-interactively through `claude -p`. Which model to pick is ranked in the `delegate` skill; this skill covers runner mechanics. From an existing Claude Code session, prefer its native `Agent` tool instead of starting a nested CLI.
 
+Before launching, read usage with the `plan-usage` skill and apply the **Live Headroom** rules in `delegate`: a pressed Anthropic pool is reserved for work its models do distinctly best, and generic work moves to a roomier pool.
+
 ## One-shot invocation (verified with Claude Code 2.1.226)
 
 ```bash
