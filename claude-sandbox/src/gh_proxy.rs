@@ -2008,8 +2008,22 @@ fn denied_response(reason: String) -> Response {
     }
 }
 
+/// Render a request for the log on a single line, so an argument cannot
+/// forge further log entries.
+fn loggable_command(args: &[String]) -> String {
+    let mut command = String::new();
+    for character in args.join(" ").chars() {
+        if character.is_control() || character == '\\' {
+            command.extend(character.escape_default());
+        } else {
+            command.push(character);
+        }
+    }
+    command
+}
+
 fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) -> Response {
-    let cmd_str = req.args.join(" ");
+    let cmd_str = loggable_command(&req.args);
 
     if let Some(help_text) = maybe_help(&req.args) {
         log_line(log, &format!("HELP    gh {}", cmd_str));
@@ -3069,6 +3083,15 @@ mod tests {
                 .contains("fork")
         );
         assert!(refuse_fork_head("1", b"{}").is_err());
+    }
+
+    #[test]
+    fn test_logged_command_stays_on_one_line() {
+        let args = strs(&["pr", "comment", "1", "--body", "a\nDENIED gh\r\\n"]);
+        assert_eq!(
+            loggable_command(&args),
+            r"pr comment 1 --body a\nDENIED gh\r\\n"
+        );
     }
 
     #[test]
