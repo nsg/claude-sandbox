@@ -65,6 +65,7 @@ struct ProxyConfig {
     workspace_root: PathBuf,
     neutral_dir: PathBuf,
     grants: Vec<RepositoryGrant>,
+    allow_merge: bool,
 }
 
 struct CommandDef {
@@ -580,6 +581,30 @@ const COMMANDS: &[CommandDef] = &[
         is_write: true,
         allowed_flags: &["--body", "-b", "--edit-last", "--web", "-w"],
     },
+    // Opt-in (--allow-merge) and planned by plan_pr_merge: no --admin,
+    // --delete-branch, --body-file/-F or --author-email.
+    CommandDef {
+        group: "pr",
+        subcommand: "merge",
+        is_write: true,
+        allowed_flags: &[
+            "-m",
+            "--merge",
+            "-s",
+            "--squash",
+            "-r",
+            "--rebase",
+            "--auto",
+            "--disable-auto",
+            "--match-head-commit",
+            "-t",
+            "--subject",
+            "-b",
+            "--body",
+            "-R",
+            "--repo",
+        ],
+    },
     CommandDef {
         group: "issue",
         subcommand: "create",
@@ -679,6 +704,16 @@ const EXT_COMMANDS: &[ExtCommandDef] = &[
 ];
 
 const ACCOUNT_PROBE_HELP: &str = "gh api user --jq .login (read-only account-name probe)\n";
+
+const MERGE_DISABLED: &str = "gh pr merge is disabled for this session; \
+                              relaunch with 'claude-sandbox --allow-merge' to enable it";
+
+const MERGE_HELP: &str = "\nOnly available when the sandbox was launched with --allow-merge.\n\
+                          Takes one pull request number or URL in the current repository and exactly\n\
+                          one of --merge, --squash or --rebase; --disable-auto stands alone.\n\
+                          -R/--repo may only name the current repository.\n\
+                          Pull requests from forks are refused, and branch protection is never\n\
+                          bypassed (--admin is unavailable).\n";
 
 fn find_ext_command(group: &str, subcommand: &str) -> Option<&'static ExtCommandDef> {
     EXT_COMMANDS
@@ -1521,15 +1556,20 @@ fn help_command(group: &str, subcommand: &str) -> Option<String> {
 
     let cmd = find_command(group, subcommand)?;
 
-    let rw = if cmd.is_write {
-        " (write — current launch-snapshotted repo only, no -R/--repo)"
-    } else {
+    let rw = if !cmd.is_write {
         " (read)"
+    } else if cmd.allowed_flags.contains(&"--repo") {
+        " (write — current launch-snapshotted repo only)"
+    } else {
+        " (write — current launch-snapshotted repo only, no -R/--repo)"
     };
     let mut out = format!("gh {} {}{}\n\nAllowed flags:\n", group, subcommand, rw);
     for line in format_flags(cmd.allowed_flags) {
         out.push_str(&line);
         out.push('\n');
+    }
+    if is_pr_merge(group, subcommand) {
+        out.push_str(MERGE_HELP);
     }
     Some(out)
 }
@@ -1691,6 +1731,177 @@ fn validate_write_targets(args: &[String], grant: &RepositoryGrant) -> Result<()
     }
 }
 
+fn is_pr_merge(group: &str, subcommand: &str) -> bool {
+    group == "pr" && subcommand == "merge"
+}
+
+fn repository_from_selector(selector: &str) -> Option<RepositoryId> {
+    match selector.split_once('/') {
+        Some((host, path)) if path.contains('/') => repository_from_path(host, path),
+        _ => repository_from_path("github.com", selector),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MergePlan {
+    number: String,
+    flags: Vec<String>,
+}
+
+impl MergePlan {
+    fn lands_changes(&self) -> bool {
+        self.flags != ["--disable-auto"]
+    }
+
+    fn args(&self, repository: &RepositoryId) -> Vec<String> {
+        let mut args = vec![
+            "pr".to_string(),
+            "merge".to_string(),
+            self.number.clone(),
+            "--repo".to_string(),
+            repository.selector(),
+        ];
+        args.extend(self.flags.iter().cloned());
+        args
+    }
+}
+
+/// Rebuild a `gh pr merge` invocation from scratch so that only understood
+/// arguments reach gh: one pull request of the granted repository, addressed
+/// by number, with flags re-emitted in canonical long form.
+fn plan_pr_merge(args: &[String], grant: &RepositoryGrant) -> Result<MergePlan, String> {
+    let mut target = None;
+    let mut methods = 0;
+    let mut disable_auto = false;
+    let mut flags = Vec::new();
+    let mut index = 2;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if arg.starts_with("--") => (flag, Some(value)),
+            _ => (arg, None),
+        };
+        let canonical = match flag {
+            "-m" => "--merge",
+            "-s" => "--squash",
+            "-r" => "--rebase",
+            "-t" => "--subject",
+            "-b" => "--body",
+            "-R" => "--repo",
+            other => other,
+        };
+        match canonical {
+            "--merge" | "--squash" | "--rebase" | "--auto" | "--disable-auto" => {
+                if inline.is_some() {
+                    return Err(format!("{flag} does not take a value"));
+                }
+                match canonical {
+                    "--disable-auto" => disable_auto = true,
+                    "--auto" => flags.push(canonical.to_string()),
+                    _ => {
+                        methods += 1;
+                        flags.push(canonical.to_string());
+                    }
+                }
+            }
+            "--match-head-commit" | "--subject" | "--body" | "--repo" => {
+                let value = match inline {
+                    Some(value) => value,
+                    None => {
+                        index += 1;
+                        args.get(index)
+                            .ok_or_else(|| format!("missing value for {flag}"))?
+                    }
+                };
+                if canonical != "--repo" {
+                    flags.push(format!("{canonical}={value}"));
+                } else if !repository_from_selector(value)
+                    .is_some_and(|repository| grant.repository.matches(&repository))
+                {
+                    return Err(format!(
+                        "{flag} {value} is outside the current repository {}",
+                        grant.repository.selector()
+                    ));
+                }
+            }
+            _ if arg.starts_with('-') => {
+                return Err(format!("flag not allowed for gh pr merge: {flag}"));
+            }
+            _ if target.is_none() => target = Some(arg),
+            _ => return Err("gh pr merge takes exactly one pull request".to_string()),
+        }
+        index += 1;
+    }
+
+    let target =
+        target.ok_or_else(|| "gh pr merge requires a pull request number or URL".to_string())?;
+    validate_item_target(target, "pr", grant, false)?;
+    let path = target.split(['?', '#']).next().unwrap_or(target);
+    let number = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("invalid pr target: {target}"));
+    }
+
+    if disable_auto {
+        if !flags.is_empty() {
+            return Err("--disable-auto cannot be combined with other merge flags".to_string());
+        }
+        flags.push("--disable-auto".to_string());
+    } else if methods != 1 {
+        return Err("exactly one of --merge, --squash or --rebase is required".to_string());
+    }
+
+    Ok(MergePlan {
+        number: number.to_string(),
+        flags,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeCandidate {
+    is_cross_repository: bool,
+}
+
+fn refuse_fork_head(number: &str, candidate: &[u8]) -> Result<(), String> {
+    let candidate: MergeCandidate = serde_json::from_slice(candidate)
+        .map_err(|error| format!("could not inspect pull request #{number}: {error}"))?;
+    if candidate.is_cross_repository {
+        return Err(format!(
+            "pull request #{number} comes from a fork; review and merge it on GitHub instead"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a merge request and return the argv to run. A merge may only land
+/// a branch of the granted repository itself, so the code was pushed by
+/// someone with write access rather than proposed by an arbitrary fork.
+fn route_pr_merge(
+    args: &[String],
+    grant: &RepositoryGrant,
+    config: &ProxyConfig,
+) -> Result<Vec<String>, String> {
+    let plan = plan_pr_merge(args, grant)?;
+    if plan.lands_changes() {
+        let selector = grant.repository.selector();
+        let output = safe_gh_command(config)
+            .args(["pr", "view", &plan.number, "--repo", &selector])
+            .args(["--json", "isCrossRepository"])
+            .output()
+            .map_err(|error| format!("failed to execute gh: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "could not inspect pull request #{}: {}",
+                plan.number,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        refuse_fork_head(&plan.number, &output.stdout)?;
+    }
+    Ok(plan.args(&grant.repository))
+}
+
 fn has_repo_flag(args: &[String]) -> bool {
     args.iter()
         .any(|arg| matches!(arg.as_str(), "--repo" | "-R") || arg.starts_with("--repo="))
@@ -1841,6 +2052,11 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
         && let Some(command) = find_command(&req.args[0], &req.args[1])
     {
         if command.is_write {
+            let merge = is_pr_merge(command.group, command.subcommand);
+            if merge && !config.allow_merge {
+                log_line(log, &format!("DENIED  gh {} (merge not enabled)", cmd_str));
+                return denied_response(MERGE_DISABLED.to_string());
+            }
             let grant = match resolve_grant(config, req.cwd.as_deref()) {
                 Ok(grant) => grant,
                 Err(reason) => {
@@ -1848,11 +2064,22 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
                     return denied_response(reason);
                 }
             };
-            if let Err(reason) = validate_write_targets(&req.args, grant) {
-                log_line(log, &format!("DENIED  gh {} ({})", cmd_str, reason));
-                return denied_response(reason);
-            }
-            append_repo_selector(&mut execution_args, &grant.repository);
+            let routed = if merge {
+                route_pr_merge(&req.args, grant, config)
+            } else {
+                validate_write_targets(&req.args, grant).map(|()| {
+                    let mut args = req.args.clone();
+                    append_repo_selector(&mut args, &grant.repository);
+                    args
+                })
+            };
+            execution_args = match routed {
+                Ok(args) => args,
+                Err(reason) => {
+                    log_line(log, &format!("DENIED  gh {} ({})", cmd_str, reason));
+                    return denied_response(reason);
+                }
+            };
             log_line(
                 log,
                 &format!("ROUTED  gh {} -> {}", cmd_str, grant.repository.selector()),
@@ -1897,7 +2124,7 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
     }
 }
 
-pub fn run(socket_path: &str, log_path: &Path, workspace_root: &Path) {
+pub fn run(socket_path: &str, log_path: &Path, workspace_root: &Path, allow_merge: bool) {
     let path = Path::new(socket_path);
     let log_file = proxy_log::open(log_path).unwrap_or_else(|e| {
         eprintln!("gh-proxy: failed to open log {}: {}", log_path.display(), e);
@@ -1926,6 +2153,7 @@ pub fn run(socket_path: &str, log_path: &Path, workspace_root: &Path) {
         workspace_root,
         neutral_dir,
         grants,
+        allow_merge,
     });
 
     let bound = proxy_socket::bind(path).unwrap_or_else(|e| {
@@ -1938,9 +2166,14 @@ pub fn run(socket_path: &str, log_path: &Path, workspace_root: &Path) {
     log_line(
         &log,
         &format!(
-            "listening on {} with {} launch-approved repositories",
+            "listening on {} with {} launch-approved repositories (merge {})",
             socket_path,
-            config.grants.len()
+            config.grants.len(),
+            if config.allow_merge {
+                "enabled"
+            } else {
+                "disabled"
+            }
         ),
     );
 
@@ -2267,7 +2500,6 @@ mod tests {
         assert!(reject_reason(&strs(&["secret", "set"])).is_some());
         assert!(reject_reason(&strs(&["ssh-key", "list"])).is_some());
         assert!(reject_reason(&strs(&["gpg-key", "list"])).is_some());
-        assert!(reject_reason(&strs(&["pr", "merge", "123"])).is_some());
         assert!(reject_reason(&strs(&["pr", "close", "123"])).is_some());
         assert!(reject_reason(&strs(&["pr", "edit", "123"])).is_some());
         assert!(reject_reason(&strs(&["issue", "delete", "42"])).is_some());
@@ -2324,14 +2556,6 @@ mod tests {
                 "github.com/owner/project",
                 "--body-file",
                 "-",
-            ]),
-            strs(&[
-                "pr",
-                "merge",
-                "123",
-                "--repo",
-                "github.com/owner/project",
-                "--squash",
             ]),
             strs(&[
                 "pr",
@@ -2442,6 +2666,11 @@ mod tests {
         assert!(h2.contains("--body"));
         assert!(h2.contains("launch-snapshotted repo only"));
 
+        let merge = maybe_help(&strs(&["pr", "merge", "--help"])).unwrap();
+        assert!(merge.contains("-s, --squash"));
+        assert!(merge.contains("--allow-merge"));
+        assert!(!merge.contains("no -R/--repo"));
+
         // Via `gh help pr list`
         let h3 = maybe_help(&strs(&["help", "pr", "list"])).unwrap();
         assert!(h3.contains("--state"));
@@ -2472,6 +2701,7 @@ mod tests {
         ProxyConfig {
             workspace_root: root.clone(),
             neutral_dir: root.clone(),
+            allow_merge: false,
             grants: vec![RepositoryGrant {
                 root,
                 handle,
@@ -2599,6 +2829,7 @@ mod tests {
             neutral_dir: workspace_root.clone(),
             workspace_root,
             grants,
+            allow_merge: false,
         };
         assert_eq!(
             resolve_grant(&config, Some("/workspace/one"))
@@ -2679,6 +2910,165 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // ── Pull request merge ─────────────────────────────────────────
+
+    fn merge_plan(args: &[&str]) -> Result<Vec<String>, String> {
+        let config = test_config();
+        let mut full = strs(&["pr", "merge"]);
+        full.extend(strs(args));
+        assert_eq!(reject_reason(&full), None, "gh {}", full.join(" "));
+        let grant = &config.grants[0];
+        plan_pr_merge(&full, grant).map(|plan| plan.args(&grant.repository))
+    }
+
+    #[test]
+    fn test_merge_is_denied_unless_enabled_at_launch() {
+        let log = Arc::new(Mutex::new(File::create("/dev/null").unwrap()));
+        let request = Request {
+            args: strs(&["pr", "merge", "123", "--squash"]),
+            cwd: None,
+        };
+        let response = handle_request(request, &log, &test_config());
+        assert_eq!(response.exit_code, 1);
+        assert!(response.stderr.contains("--allow-merge"));
+    }
+
+    #[test]
+    fn test_merge_plan_is_rebuilt_for_the_granted_repository() {
+        assert_eq!(
+            merge_plan(&["123", "--repo", "github.com/example/project", "--squash"]),
+            Ok(strs(&[
+                "pr",
+                "merge",
+                "123",
+                "--repo",
+                "example/project",
+                "--squash"
+            ]))
+        );
+        assert_eq!(
+            merge_plan(&[
+                "https://github.com/example/project/pull/45",
+                "-R",
+                "Example/Project",
+                "--auto",
+                "-m",
+                "-b",
+                "done",
+                "--match-head-commit=abc123",
+            ]),
+            Ok(strs(&[
+                "pr",
+                "merge",
+                "45",
+                "--repo",
+                "example/project",
+                "--auto",
+                "--merge",
+                "--body=done",
+                "--match-head-commit=abc123",
+            ]))
+        );
+        assert_eq!(
+            merge_plan(&["7", "--disable-auto"]),
+            Ok(strs(&[
+                "pr",
+                "merge",
+                "7",
+                "--repo",
+                "example/project",
+                "--disable-auto"
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_merge_flag_values_cannot_become_flags() {
+        assert_eq!(
+            merge_plan(&["1", "--rebase", "--subject=--admin", "--body=-d"]),
+            Ok(strs(&[
+                "pr",
+                "merge",
+                "1",
+                "--repo",
+                "example/project",
+                "--rebase",
+                "--subject=--admin",
+                "--body=-d",
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_only_a_lone_disable_auto_skips_the_fork_check() {
+        let config = test_config();
+        let plan = |args: &[&str]| plan_pr_merge(&strs(args), &config.grants[0]).unwrap();
+        assert!(plan(&["pr", "merge", "1", "--squash"]).lands_changes());
+        assert!(plan(&["pr", "merge", "1", "--auto", "--merge"]).lands_changes());
+        assert!(!plan(&["pr", "merge", "1", "--disable-auto"]).lands_changes());
+    }
+
+    #[test]
+    fn test_merge_cannot_target_another_repository() {
+        for args in [
+            &["1", "--squash", "--repo", "other/project"][..],
+            &["1", "--squash", "--repo=github.example.com/example/project"],
+            &["1", "--squash", "-R", "example/project/extra/part"],
+            &["https://github.com/other/project/pull/1", "--squash"],
+            &["https://github.com/example/project/issues/1", "--squash"],
+        ] {
+            assert!(merge_plan(args).is_err(), "gh pr merge {}", args.join(" "));
+        }
+    }
+
+    #[test]
+    fn test_merge_requires_one_numbered_pull_request_and_one_method() {
+        for args in [
+            &["--squash"][..],
+            &["", "--squash"],
+            &["feature-branch", "--squash"],
+            &["1", "2", "--squash"],
+            &["1"],
+            &["1", "--auto"],
+            &["1", "--squash", "--rebase"],
+            &["1", "--squash=false"],
+            &["1", "--disable-auto", "--squash"],
+            &["1", "--squash", "--body"],
+            &["1", "--squash", "--", "2"],
+        ] {
+            assert!(merge_plan(args).is_err(), "gh pr merge {}", args.join(" "));
+        }
+    }
+
+    #[test]
+    fn test_merge_blocks_flags_that_widen_its_reach() {
+        for flag in [
+            "--admin",
+            "--delete-branch",
+            "-d",
+            "--body-file",
+            "-F",
+            "--author-email",
+            "-A",
+            "-sd",
+        ] {
+            let args = strs(&["pr", "merge", "1", "--squash", flag]);
+            assert!(reject_reason(&args).is_some(), "gh {}", args.join(" "));
+            assert!(plan_pr_merge(&args, &test_config().grants[0]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_merge_refuses_fork_pull_requests() {
+        assert!(refuse_fork_head("1", br#"{"isCrossRepository":false}"#).is_ok());
+        assert!(
+            refuse_fork_head("1", br#"{"isCrossRepository":true}"#)
+                .unwrap_err()
+                .contains("fork")
+        );
+        assert!(refuse_fork_head("1", b"{}").is_err());
     }
 
     #[test]

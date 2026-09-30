@@ -119,6 +119,10 @@ struct Cli {
     #[arg(long = "allow-push")]
     allow_push: bool,
 
+    /// Allow the agent to merge same-repository pull requests with `gh pr merge`
+    #[arg(long = "allow-merge")]
+    allow_merge: bool,
+
     /// Let the T3 admin portal approve repositories for host-side pushes
     #[arg(long = "t3-managed-push", conflicts_with = "allow_push")]
     t3_managed_push: bool,
@@ -167,6 +171,9 @@ enum Commands {
         /// Host workspace root used to resolve container working directories
         #[arg(long)]
         workspace_root: PathBuf,
+        /// Permit `gh pr merge` in launch-approved repositories
+        #[arg(long)]
+        allow_merge: bool,
     },
     /// Start the git push proxy (internal, spawned automatically)
     GitProxy {
@@ -882,7 +889,11 @@ fn start_proxy(name: &str, socket_path: &Path, mut command: Command) -> Result<(
     })
 }
 
-fn ensure_gh_proxy(runtime_dir: &Path, workspace_root: &Path) -> Result<(), String> {
+fn ensure_gh_proxy(
+    runtime_dir: &Path,
+    workspace_root: &Path,
+    allow_merge: bool,
+) -> Result<(), String> {
     let socket_path = runtime_dir.join(GH_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
     command
@@ -893,6 +904,9 @@ fn ensure_gh_proxy(runtime_dir: &Path, workspace_root: &Path) -> Result<(), Stri
         .arg(proxy_log_path("gh-proxy.log")?)
         .arg("--workspace-root")
         .arg(workspace_root);
+    if allow_merge {
+        command.arg("--allow-merge");
+    }
     start_proxy("gh-proxy", &socket_path, command)
 }
 
@@ -1118,6 +1132,7 @@ fn run_container(
     mount_workspace: bool,
     wrap: bool,
     allow_push: bool,
+    allow_merge: bool,
     managed_push_state: Option<&Path>,
     managed_fetch_state: Option<&Path>,
     explicit_container_name: Option<&str>,
@@ -1134,7 +1149,7 @@ fn run_container(
         });
     };
 
-    require_proxy(ensure_gh_proxy(&proxy_runtime_dir, &cwd));
+    require_proxy(ensure_gh_proxy(&proxy_runtime_dir, &cwd, allow_merge));
     require_proxy(ensure_clipboard_proxy(&proxy_runtime_dir));
 
     match (managed_push_state, allow_push, git_proxy::origin_url()) {
@@ -1311,8 +1326,9 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             socket,
             log,
             workspace_root,
+            allow_merge,
         }) => {
-            gh_proxy::run(socket, log, workspace_root);
+            gh_proxy::run(socket, log, workspace_root, *allow_merge);
         }
         Some(Commands::GitProxy {
             socket,
@@ -1481,6 +1497,7 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                cli.allow_merge,
                 None,
                 None,
                 None,
@@ -1516,6 +1533,7 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                cli.allow_merge,
                 None,
                 None,
                 None,
@@ -1539,6 +1557,7 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                cli.allow_merge,
                 None,
                 None,
                 None,
@@ -1562,6 +1581,7 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                cli.allow_merge,
                 None,
                 None,
                 None,
@@ -1697,6 +1717,7 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push || cli.t3_managed_push,
+                cli.allow_merge,
                 managed_state,
                 managed_fetch_state,
                 named_container,
@@ -1739,6 +1760,7 @@ fn main() {
                 true,
                 cli.wrap,
                 cli.allow_push,
+                cli.allow_merge,
                 None,
                 None,
                 None,

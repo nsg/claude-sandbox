@@ -58,6 +58,9 @@ claude-sandbox -p 8080 -p 3000 -p 5173
 # Allow the agent to git push (executed on the host, see "Git Push Bridge")
 claude-sandbox --allow-push
 
+# Allow the agent to merge pull requests (see "GitHub CLI Proxy")
+claude-sandbox --allow-merge
+
 # Open an interactive shell
 claude-sandbox shell
 
@@ -362,11 +365,25 @@ It is an exact command that returns only the authenticated login; all other
 
 | Group | Commands |
 |-------|----------|
-| `pr` | `comment` |
+| `pr` | `comment`, `merge` (only with `--allow-merge`) |
 | `issue` | `create`, `comment`, `close`, `edit` |
 | `run` | `rerun` |
 
 `gh pr create` is intentionally unavailable because GitHub CLI may run host-side Git operations against the caller's worktree while preparing a pull request.
+
+**Merging pull requests** is off by default. Launch with `--allow-merge` to make `gh pr merge` available for that launch only:
+
+```bash
+claude-sandbox --allow-merge
+```
+
+The proxy rebuilds every merge request instead of forwarding it:
+
+- The target is one pull request number or URL in the launch-snapshotted repository containing the current working directory. Branch names are not accepted, and `--repo`/`-R` is accepted only when it names that same repository
+- Exactly one of `--merge`, `--squash`, or `--rebase` is required, optionally with `--auto`, `--subject`, `--body`, and `--match-head-commit <sha>` to merge only the commit that was reviewed. `--disable-auto` stands alone
+- `--admin` is never available, so branch protection, required reviews, and required checks still decide whether a merge happens
+- Pull requests from forks are refused: a merge can only land a branch of the repository itself, which someone with write access pushed
+- `--delete-branch`, `--body-file`, and `--author-email` are unavailable, and GitHub CLI always receives an explicit repository, so it performs no Git operations on the host
 
 **Extension commands** add custom functionality:
 
