@@ -24,6 +24,10 @@
 
 - The `wrap` commands run and drive interactive terminal programs (TUIs, REPLs, other agents) in named tmux sessions. Load the `wrap` skill before using them.
 
+## Virtual Machines
+
+- The `vm` command creates and drives real virtual machines through the host's Incus when the sandbox was launched with `--vm`. Load the `vm` skill before using it.
+
 ## The Sandbox
 
 - Every instance runs in its own container, sharing the agent config in `$HOME` while seeing its own project as `/workspace`. Nothing at runtime tells the instances apart.

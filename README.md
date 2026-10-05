@@ -692,6 +692,7 @@ claude-sandbox install skills
 | `/testing` | Testing strategy: test only our code, keep suites and CI minimal, prune once the code works |
 | `/plan-usage` | Check plan-limit headroom and reset timing before routing substantial agent work |
 | `/gui` | Run and test GUI applications on the virtual X display |
+| `/vm` | Create, boot, and drive virtual machines through the Incus bridge |
 | `/wrap` | Run and drive interactive terminal programs in a tmux session |
 | `/claude` | Delegate work to Anthropic models through the Claude Code CLI |
 | `/codex` | Delegate work to OpenAI models through the Codex CLI |
