@@ -15,6 +15,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 - **SSH proxy** — filtered SSH access without exposing keys to the container
 - **Managed fetch approvals** — portal-approved, read-only access to exact private SSH repositories
 - **Git push bridge** — opt-in single-repository pushes plus portal-approved repositories for long-running T3 services
+- **Virtual machine bridge** — opt-in creation and control of ephemeral Incus VMs without exposing host credentials or devices
 - **Clipboard image bridge** — paste screenshots from your host into the container via `xclip`/`wl-paste`
 - **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
@@ -57,6 +58,9 @@ claude-sandbox -p 8080 -p 3000 -p 5173
 
 # Allow the agent to git push (executed on the host, see "Git Push Bridge")
 claude-sandbox --allow-push
+
+# Allow the agent to create ephemeral Incus VMs (see "Virtual Machine Bridge")
+claude-sandbox --vm
 
 # Allow the agent to merge pull requests (see "GitHub CLI Proxy")
 claude-sandbox --allow-merge
@@ -528,6 +532,120 @@ working directory to a canonical repository beneath the mounted workspace.
 Paths outside that workspace and repositories not approved in the host-side
 admin portal are rejected. Persistent approvals survive service restarts;
 one-time approvals are consumed by the next push attempt.
+
+## Virtual Machine Bridge
+
+Launch with `--vm` to let an agent create and control Incus virtual machines
+through a host-side bridge:
+
+```bash
+claude-sandbox --vm
+```
+
+The agent never receives the Incus client certificate, the Incus Unix socket,
+or `/dev/kvm`. The bridge uses a dedicated project-restricted TLS certificate,
+requires an Incus project with security restrictions enabled, validates the
+small set of accepted values, and builds every Incus request itself. It creates
+VMs only, and every VM is ephemeral: **stopping a VM deletes it and its disk**.
+Imported ISO volumes and disk images are retained for later sessions.
+
+VMs use the network configured in the Incus `default` profile. Traffic on that
+Incus bridge is not filtered by the Podman sandbox, so apply any required
+network policy on the Incus bridge or upstream network.
+
+### One-time host setup
+
+Run the following as an Incus administrator. Replace the example resource
+limits with totals appropriate for this machine. The bridge requires the
+`limits.virtual-machines`, `limits.cpu`, `limits.memory`, and `limits.disk`
+settings shown below. Replace `default` and `incusbr0` if the host uses
+different storage-pool or managed-network names.
+
+```bash
+incus config set core.https_address 127.0.0.1:8443
+incus project create claude-sandbox -c restricted=true \
+    -c limits.containers=0 -c limits.virtual-machines=<n> \
+    -c limits.cpu=<n> -c limits.memory=<size> -c limits.disk=<size>
+incus profile device add default root disk path=/ pool=default --project claude-sandbox
+incus profile device add default eth0 nic network=incusbr0 name=eth0 --project claude-sandbox
+incus config trust add claude-sandbox --restricted --projects claude-sandbox
+```
+
+The last command prints a one-use trust token. As the user who runs
+claude-sandbox, enroll a new client in the bridge's dedicated configuration
+directory:
+
+```bash
+INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>
+```
+
+Launch from a project directory, not a directory such as your home directory
+that contains `~/.claude-sandbox`. The bridge refuses `--vm` when the workspace
+and its private Incus configuration or import snapshot directory overlap, which
+would expose the client key to the agent.
+
+Incus project limits for CPU and memory require corresponding per-instance
+limits; the bridge sets both on every VM. With `restricted=true`, Incus 6.0 and
+newer already block raw QEMU configuration, host-path disk devices, and PCI,
+GPU, USB, Unix-device, and proxy-device passthrough by default. See the official
+documentation for [project limits and restrictions](https://linuxcontainers.org/incus/docs/main/reference/projects/),
+[restricted TLS clients](https://linuxcontainers.org/incus/docs/main/howto/projects_confine/),
+and [the HTTPS listener and trust-token flow](https://linuxcontainers.org/incus/docs/main/howto/server_expose/).
+Newer releases also expose `restricted.virtual-machines.nesting` (default:
+`allow`); Incus 6.0 does not. The bridge never accepts `security.nesting`, so
+the common setup needs no version-specific override.
+
+When `--vm` is enabled, startup checks the client, dedicated configuration,
+HTTPS connection, certificate confinement, restricted project, and default
+profile. A missing NIC is a warning; every other failed check is reported with
+a remediation command. Setup failures never prevent the sandbox from starting:
+`vm help` remains available, `vm status` reruns and prints the full check, and
+other commands rerun the check and return the same report until setup is fixed.
+
+The bridge assumes that only one VM-enabled sandbox uses the dedicated project
+at a time. All project VMs are deleted when the bridge starts healthy and when
+the launcher exits. If the bridge process itself is killed directly (including
+by SIGTERM, SIGKILL, or the OOM killer), its VMs keep running until the next
+`--vm` start; check them with `incus list --project claude-sandbox`. Keep
+unrelated workloads out of the `claude-sandbox` project.
+
+Run `vm help` inside the container for the complete command reference:
+
+| Command | Description |
+|---------|-------------|
+| `vm help` | Show the complete in-container command reference |
+| `vm status` | Rerun the host preflight and print every check |
+| `vm list [--json]` | List VMs, addresses, CPU counts, and memory |
+| `vm info NAME [--json]` | Show one VM, including its addresses |
+| `vm launch NAME (--image images:ALIAS \| --image LOCAL \| --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot]` | Create and start an ephemeral VM; defaults are 2 CPUs, 4 GiB memory, and a 20 GiB disk |
+| `vm stop NAME [--force]` | Stop and therefore delete an ephemeral VM |
+| `vm restart NAME [--force]` | Restart a VM |
+| `vm delete NAME` | Force-delete a VM |
+| `vm screen NAME` | Start or reuse its SPICE relay and print `spice+unix:///run/claude-sandbox/vm-NAME.spice` |
+| `vm view NAME` | Open that display full-screen on the sandbox's virtual X display with `remote-viewer` |
+| `vm exec NAME [--timeout SECS] -- CMD [ARG...]` | Run a non-interactive command, with a default 120-second and maximum 3600-second timeout |
+| `vm console-log NAME` | Print the VM console log (requires an Incus server newer than 6.0.0) |
+| `vm import PATH NAME` | Import a workspace ISO as a custom volume or a qcow2 disk as an image alias, detected by content |
+| `vm media [--json]` | List imported ISO volumes and images |
+| `vm media-delete NAME` | Delete imported media |
+
+`vm exec` requires the Incus agent in the guest. Public `images:` VMs include
+it; a fresh ISO installation does not. Command stdout and stderr are each
+capped at 1 MiB with a truncation notice. Local imports accept ISO9660 and
+standalone qcow2 content only; convert raw disks first with
+`qemu-img convert -O qcow2`. ISO imports are capped at 16 GiB, qcow2 imports at
+64 GiB, and at most 16 imported media entries may be retained.
+
+The required `limits.disk` setting limits instance disks and custom volumes,
+but import accounting varies by Incus version. Incus 6.0 stages an ISO upload
+on the host before checking its quota, and retained images are not counted
+against later image imports, so the bridge's own import caps are the effective
+bound in those cases. Newer Incus releases check staging against the quota.
+
+With `vm view`, the guest fills the virtual display, so the agent reads it with
+`scrot` and sends keys and clicks with `xdotool`, and you can watch through the
+live display in the T3 admin portal. SPICE serves one viewer at a time: a
+second viewer drops the first. The `/vm` skill describes the workflow.
 
 ## Clipboard Image Bridge
 

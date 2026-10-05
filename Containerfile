@@ -45,6 +45,7 @@ RUN apt-get update && apt-get upgrade -y && \
         wmctrl \
         x11-utils \
         scrot \
+        virt-viewer \
         xterm \
         at-spi2-core \
         libglib2.0-bin \
@@ -124,6 +125,10 @@ RUN chmod +x /usr/local/bin/ssh
 COPY config/git-proxy-client.js /usr/local/bin/git-proxy-client
 COPY config/git-wrapper.sh /usr/local/bin/git
 RUN chmod +x /usr/local/bin/git-proxy-client /usr/local/bin/git
+
+# Virtual machine bridge (talks to host-side proxy via Unix socket; enabled with --vm)
+COPY config/vm-proxy-client.js /usr/local/bin/vm
+RUN chmod +x /usr/local/bin/vm
 
 # t3code instance launcher
 COPY config/t3code-register.sh /usr/local/bin/t3code-register

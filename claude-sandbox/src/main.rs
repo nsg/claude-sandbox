@@ -12,6 +12,7 @@ mod t3_admin;
 mod usage_api;
 mod usage_collector;
 mod usage_dashboard;
+mod vm_proxy;
 mod websocket;
 
 use clap::{Parser, Subcommand};
@@ -45,6 +46,7 @@ const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
 const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
 const GIT_PROXY_SOCKET_NAME: &str = "git-proxy.sock";
 const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
+const VM_PROXY_SOCKET_NAME: &str = "vm-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
 const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
 const SSHD_CONFIG_FILE: &str = "sshd.json";
@@ -122,6 +124,10 @@ struct Cli {
     /// Allow the agent to merge same-repository pull requests with `gh pr merge`
     #[arg(long = "allow-merge")]
     allow_merge: bool,
+
+    /// Allow the agent to create and drive virtual machines through Incus on the host (see "Virtual Machine Bridge")
+    #[arg(long)]
+    vm: bool,
 
     /// Let the T3 admin portal approve repositories for host-side pushes
     #[arg(long = "t3-managed-push", conflicts_with = "allow_push")]
@@ -224,6 +230,24 @@ enum Commands {
         /// Persistent log path
         #[arg(long)]
         log: PathBuf,
+    },
+    /// Start the virtual machine proxy (internal, spawned automatically)
+    VmProxy {
+        /// Socket path (absolute)
+        #[arg(long)]
+        socket: String,
+        /// Persistent log path
+        #[arg(long)]
+        log: PathBuf,
+        /// Host workspace root used to resolve container paths
+        #[arg(long)]
+        workspace_root: PathBuf,
+        /// Host proxy runtime directory used for SPICE relay sockets
+        #[arg(long)]
+        runtime_dir: PathBuf,
+        /// Launcher process to watch for shutdown
+        #[arg(long)]
+        parent_pid: u32,
     },
     /// Start the SSH proxy (internal, spawned automatically)
     SshProxy {
@@ -922,6 +946,25 @@ fn ensure_clipboard_proxy(runtime_dir: &Path) -> Result<(), String> {
     start_proxy("clipboard-proxy", &socket_path, command)
 }
 
+fn ensure_vm_proxy(runtime_dir: &Path, workspace_root: &Path) -> Result<(), String> {
+    let socket_path = runtime_dir.join(VM_PROXY_SOCKET_NAME);
+    let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
+    command
+        .arg("vm-proxy")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--log")
+        .arg(proxy_log_path("vm-proxy.log")?)
+        .arg("--workspace-root")
+        .arg(workspace_root)
+        .arg("--runtime-dir")
+        .arg(runtime_dir)
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .process_group(0);
+    start_proxy("vm-proxy", &socket_path, command)
+}
+
 fn ensure_git_proxy_single(runtime_dir: &Path, origin_url: &str) -> Result<(), String> {
     let socket_path = runtime_dir.join(GIT_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -1136,6 +1179,7 @@ fn run_container(
     managed_push_state: Option<&Path>,
     managed_fetch_state: Option<&Path>,
     explicit_container_name: Option<&str>,
+    vm_enabled: bool,
 ) {
     let cwd = env::current_dir().expect("Could not get current directory");
     let proxy_runtime_dir = create_proxy_runtime_dir().unwrap_or_else(|error| {
@@ -1151,6 +1195,18 @@ fn run_container(
 
     require_proxy(ensure_gh_proxy(&proxy_runtime_dir, &cwd, allow_merge));
     require_proxy(ensure_clipboard_proxy(&proxy_runtime_dir));
+
+    if vm_enabled {
+        let report = vm_proxy::preflight(&home_dir(), &cwd, &proxy_runtime_dir);
+        if !vm_proxy::preflight_is_healthy(&report) {
+            eprintln!("Warning: Virtual Machine Bridge setup is incomplete:");
+            eprintln!("{report}");
+            eprintln!("The sandbox will continue; see README section \"Virtual Machine Bridge\".");
+        }
+        if let Err(error) = ensure_vm_proxy(&proxy_runtime_dir, &cwd) {
+            eprintln!("Warning: failed to start vm-proxy: {error}");
+        }
+    }
 
     match (managed_push_state, allow_push, git_proxy::origin_url()) {
         (Some(state_dir), true, _) => {
@@ -1388,6 +1444,15 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
         Some(Commands::ClipboardProxy { socket, log }) => {
             clipboard_proxy::run(socket, log);
         }
+        Some(Commands::VmProxy {
+            socket,
+            log,
+            workspace_root,
+            runtime_dir,
+            parent_pid,
+        }) => {
+            vm_proxy::run(socket, log, workspace_root, runtime_dir, *parent_pid);
+        }
         Some(Commands::SshProxy {
             socket,
             log,
@@ -1501,6 +1566,7 @@ fn main() {
                 None,
                 None,
                 None,
+                cli.vm,
             );
         }
         Some(Commands::Install { target }) => {
@@ -1517,6 +1583,7 @@ fn main() {
             | Commands::GitProxy { .. }
             | Commands::T3Admin { .. }
             | Commands::ClipboardProxy { .. }
+            | Commands::VmProxy { .. }
             | Commands::SshProxy { .. },
         ) => unreachable!("internal commands are dispatched before update checks"),
         Some(Commands::Run { command }) => {
@@ -1537,6 +1604,7 @@ fn main() {
                 None,
                 None,
                 None,
+                cli.vm,
             );
         }
         Some(Commands::Codex { args }) => {
@@ -1561,6 +1629,7 @@ fn main() {
                 None,
                 None,
                 None,
+                cli.vm,
             );
         }
         Some(Commands::Opencode { args }) => {
@@ -1585,6 +1654,7 @@ fn main() {
                 None,
                 None,
                 None,
+                cli.vm,
             );
         }
         Some(Commands::T3code { args }) => {
@@ -1721,6 +1791,7 @@ fn main() {
                 managed_state,
                 managed_fetch_state,
                 named_container,
+                cli.vm,
             );
         }
         Some(Commands::WrapType {
@@ -1764,6 +1835,7 @@ fn main() {
                 None,
                 None,
                 None,
+                cli.vm,
             );
         }
     }

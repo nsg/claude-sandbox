@@ -832,7 +832,7 @@ fn repository_from_item_url(value: &str, group: &str) -> Result<Option<Repositor
         .ok_or_else(|| "invalid GitHub repository in item URL".to_string())
 }
 
-fn proc_fd_path(handle: &File) -> PathBuf {
+pub(crate) fn proc_fd_path(handle: &File) -> PathBuf {
     PathBuf::from(format!(
         "/proc/{}/fd/{}",
         std::process::id(),
@@ -840,7 +840,7 @@ fn proc_fd_path(handle: &File) -> PathBuf {
     ))
 }
 
-fn open_untrusted_path(path: &Path) -> Option<File> {
+pub(crate) fn open_untrusted_path(path: &Path) -> Option<File> {
     // Linux O_NONBLOCK prevents an attacker-controlled FIFO from hanging launch;
     // O_NOFOLLOW rejects a symlink in the final path component.
     const O_NONBLOCK: i32 = 0o4000;
