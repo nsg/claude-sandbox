@@ -34,12 +34,10 @@ struct RepositoryId {
 }
 
 impl RepositoryId {
+    /// Always host-qualified: gh resolves a bare `owner/name` against its
+    /// default host, which the host environment's `GH_HOST` can redirect.
     fn selector(&self) -> String {
-        if self.host.eq_ignore_ascii_case("github.com") {
-            format!("{}/{}", self.owner, self.name)
-        } else {
-            format!("{}/{}/{}", self.host, self.owner, self.name)
-        }
+        format!("{}/{}/{}", self.host, self.owner, self.name)
     }
 
     fn matches(&self, other: &Self) -> bool {
@@ -1080,10 +1078,7 @@ fn safe_gh_command(config: &ProxyConfig) -> Command {
 
 fn safe_gh_api_command(config: &ProxyConfig, repository: &RepositoryId) -> Command {
     let mut command = safe_gh_command(config);
-    command.arg("api");
-    if !repository.host.eq_ignore_ascii_case("github.com") {
-        command.args(["--hostname", &repository.host]);
-    }
+    command.args(["api", "--hostname", &repository.host]);
     command
 }
 
@@ -2790,6 +2785,12 @@ mod tests {
         };
         assert_eq!(enterprise.selector(), "github.example.com/team/project");
         assert_eq!(
+            repository_from_remote("git@github.com:octocat/hello-world.git")
+                .unwrap()
+                .selector(),
+            "github.com/octocat/hello-world"
+        );
+        assert_eq!(
             enterprise.api_path("/milestones"),
             "/repos/team/project/milestones"
         );
@@ -2836,7 +2837,7 @@ mod tests {
         assert!(
             grants
                 .iter()
-                .all(|grant| grant.repository.selector() != "private/outside")
+                .all(|grant| grant.repository.selector() != "github.com/private/outside")
         );
         let workspace_root = fs::canonicalize(&root).unwrap();
         let config = ProxyConfig {
@@ -2850,7 +2851,7 @@ mod tests {
                 .unwrap()
                 .repository
                 .selector(),
-            "example/one"
+            "github.com/example/one"
         );
 
         create_test_repository(&root.join("three"), "git@github.com:example/three.git");
@@ -2958,7 +2959,7 @@ mod tests {
                 "merge",
                 "123",
                 "--repo",
-                "example/project",
+                "github.com/example/project",
                 "--squash"
             ]))
         );
@@ -2978,7 +2979,7 @@ mod tests {
                 "merge",
                 "45",
                 "--repo",
-                "example/project",
+                "github.com/example/project",
                 "--auto",
                 "--merge",
                 "--body=done",
@@ -2992,7 +2993,7 @@ mod tests {
                 "merge",
                 "7",
                 "--repo",
-                "example/project",
+                "github.com/example/project",
                 "--disable-auto"
             ]))
         );
@@ -3007,7 +3008,7 @@ mod tests {
                 "merge",
                 "1",
                 "--repo",
-                "example/project",
+                "github.com/example/project",
                 "--rebase",
                 "--subject=--admin",
                 "--body=-d",
@@ -3100,7 +3101,14 @@ mod tests {
         append_repo_selector(&mut args, &test_config().grants[0].repository);
         assert_eq!(
             args,
-            strs(&["pr", "list", "--repo", "example/project", "--", "value"])
+            strs(&[
+                "pr",
+                "list",
+                "--repo",
+                "github.com/example/project",
+                "--",
+                "value"
+            ])
         );
     }
 
