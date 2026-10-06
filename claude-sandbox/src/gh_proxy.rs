@@ -1833,9 +1833,13 @@ fn plan_pr_merge(args: &[String], grant: &RepositoryGrant) -> Result<MergePlan, 
     validate_item_target(target, "pr", grant, false)?;
     let path = target.split(['?', '#']).next().unwrap_or(target);
     let number = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(format!("invalid pr target: {target}"));
-    }
+    // gh reads a number it cannot parse as a branch name, so only a value
+    // that is a pull request number to gh as well may pass.
+    let number = number
+        .parse::<i32>()
+        .ok()
+        .filter(|parsed| *parsed > 0 && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(|| format!("invalid pr target: {target}"))?;
 
     if disable_auto {
         if !flags.is_empty() {
@@ -1875,26 +1879,32 @@ fn refuse_fork_head(number: &str, candidate: &[u8]) -> Result<(), String> {
 fn route_pr_merge(
     args: &[String],
     grant: &RepositoryGrant,
-    config: &ProxyConfig,
+    inspect: impl FnOnce(&str) -> Result<Vec<u8>, String>,
 ) -> Result<Vec<String>, String> {
     let plan = plan_pr_merge(args, grant)?;
     if plan.lands_changes() {
-        let selector = grant.repository.selector();
-        let output = safe_gh_command(config)
-            .args(["pr", "view", &plan.number, "--repo", &selector])
-            .args(["--json", "isCrossRepository"])
-            .output()
-            .map_err(|error| format!("failed to execute gh: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "could not inspect pull request #{}: {}",
-                plan.number,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        refuse_fork_head(&plan.number, &output.stdout)?;
+        refuse_fork_head(&plan.number, &inspect(&plan.number)?)?;
     }
     Ok(plan.args(&grant.repository))
+}
+
+fn inspect_merge_candidate(
+    config: &ProxyConfig,
+    repository: &RepositoryId,
+    number: &str,
+) -> Result<Vec<u8>, String> {
+    let output = safe_gh_command(config)
+        .args(["pr", "view", number, "--repo", &repository.selector()])
+        .args(["--json", "isCrossRepository"])
+        .output()
+        .map_err(|error| format!("failed to execute gh: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "could not inspect pull request #{number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
 }
 
 fn has_repo_flag(args: &[String]) -> bool {
@@ -2074,7 +2084,9 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
                 }
             };
             let routed = if merge {
-                route_pr_merge(&req.args, grant, config)
+                route_pr_merge(&req.args, grant, |number| {
+                    inspect_merge_candidate(config, &grant.repository, number)
+                })
             } else {
                 validate_write_targets(&req.args, grant).map(|()| {
                     let mut args = req.args.clone();
@@ -3017,12 +3029,32 @@ mod tests {
     }
 
     #[test]
-    fn test_only_a_lone_disable_auto_skips_the_fork_check() {
+    fn test_merge_is_routed_only_after_the_fork_check() {
         let config = test_config();
-        let plan = |args: &[&str]| plan_pr_merge(&strs(args), &config.grants[0]).unwrap();
-        assert!(plan(&["pr", "merge", "1", "--squash"]).lands_changes());
-        assert!(plan(&["pr", "merge", "1", "--auto", "--merge"]).lands_changes());
-        assert!(!plan(&["pr", "merge", "1", "--disable-auto"]).lands_changes());
+        let grant = &config.grants[0];
+        let route = |args: &[&str], probe: Result<&str, &str>| {
+            route_pr_merge(&strs(args), grant, |number| {
+                assert_eq!(number, "7");
+                probe
+                    .map(|json| json.as_bytes().to_vec())
+                    .map_err(str::to_string)
+            })
+        };
+        let own = r#"{"isCrossRepository":false}"#;
+        let fork = r#"{"isCrossRepository":true}"#;
+
+        assert!(route(&["pr", "merge", "007", "--squash"], Ok(own)).is_ok());
+        assert!(route(&["pr", "merge", "7", "--squash"], Ok(fork)).is_err());
+        assert!(route(&["pr", "merge", "7", "--auto", "--merge"], Ok(fork)).is_err());
+        assert!(route(&["pr", "merge", "7", "--squash"], Err("unreachable")).is_err());
+        assert!(route(&["pr", "merge", "7", "--squash"], Ok("{}")).is_err());
+        assert!(
+            route(
+                &["pr", "merge", "7", "--disable-auto"],
+                Err("not consulted")
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -3044,6 +3076,8 @@ mod tests {
             &["--squash"][..],
             &["", "--squash"],
             &["feature-branch", "--squash"],
+            &["0", "--squash"],
+            &["9223372036854775808", "--squash"],
             &["1", "2", "--squash"],
             &["1"],
             &["1", "--auto"],
@@ -3073,17 +3107,6 @@ mod tests {
             assert!(reject_reason(&args).is_some(), "gh {}", args.join(" "));
             assert!(plan_pr_merge(&args, &test_config().grants[0]).is_err());
         }
-    }
-
-    #[test]
-    fn test_merge_refuses_fork_pull_requests() {
-        assert!(refuse_fork_head("1", br#"{"isCrossRepository":false}"#).is_ok());
-        assert!(
-            refuse_fork_head("1", br#"{"isCrossRepository":true}"#)
-                .unwrap_err()
-                .contains("fork")
-        );
-        assert!(refuse_fork_head("1", b"{}").is_err());
     }
 
     #[test]
