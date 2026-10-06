@@ -24,6 +24,10 @@
 
 - The `wrap` commands run and drive interactive terminal programs (TUIs, REPLs, other agents) in named tmux sessions. Load the `wrap` skill before using them.
 
+## Container Images
+
+- Build OCI images with `buildah build`, which takes `docker build` arguments; there is no Docker, Podman, or other container runtime in the sandbox. Load the `container-images` skill before building an image.
+
 ## Virtual Machines
 
 - The `vm` command creates and drives real virtual machines through the host's Incus when the sandbox was launched with `--vm`. Load the `vm` skill before using it.
