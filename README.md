@@ -20,6 +20,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 - **Managed configuration** — ships default `AGENTS.md` instructions while preserving your customizations
 - **Per-project memory** — auto-memory is isolated per repository, not shared across all containers
 - **MCP servers** — pre-configured Playwright with headless Chromium
+- **Image builds** — build OCI images from a Containerfile or Dockerfile with Buildah, without a daemon or extra privileges
 - **Agent-controlled GUI** — a headless Xvfb virtual display with Openbox, window management, screenshots, input, and accessibility-tree tools for Claude and Codex
 - **Live display** — view and control the sandbox's virtual X display from the T3 admin portal through the existing admin port, no extra ports
 - **Wrapped sessions** — run the command in a tmux session, inject keystrokes and read the screen from outside with `wrap-type` / `wrap-key` / `wrap-read`
@@ -723,6 +724,7 @@ The container includes:
 - Rust (via rustup) + cargo-audit
 - Playwright MCP with Chromium and ffmpeg
 - Headless Xvfb virtual display with Openbox, AT-SPI/`gui-tree`, xdotool, wmctrl, and scrot
+- [Buildah](https://buildah.io) for building OCI images
 - Zola
 - Starship prompt
 - Git, curl, jq, tree, build-essential, patchutils, unzip

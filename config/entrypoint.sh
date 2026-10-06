@@ -195,6 +195,22 @@ SSHEOF
     /usr/sbin/sshd
 fi
 
+# Choose Buildah's storage driver. Overlay is far smaller and faster than vfs
+# but needs a real filesystem under /var/lib/containers, which the image's
+# volume normally provides; vfs works anywhere. Non-fatal: image builds are
+# optional.
+if command -v buildah >/dev/null 2>&1 && [ ! -e /etc/containers/storage.conf ]; then
+    if buildah --storage-driver overlay info >/dev/null 2>&1; then
+        storage_driver=overlay
+    else
+        storage_driver=vfs
+        rm -rf /var/lib/containers/storage /run/containers/storage
+    fi
+    printf '[storage]\ndriver = "%s"\nrunroot = "%s"\ngraphroot = "%s"\n' \
+        "$storage_driver" /run/containers/storage /var/lib/containers/storage \
+        > /etc/containers/storage.conf 2>/dev/null || true
+fi
+
 # Start the virtual X display (Xvfb + openbox) and inherit its environment
 # (DISPLAY, DBUS_SESSION_BUS_ADDRESS). Non-fatal: GUI support is optional.
 if /usr/local/bin/start-display; then

@@ -33,6 +33,7 @@ RUN apt-get update && apt-get upgrade -y && \
         rustup \
         shellcheck \
         bubblewrap \
+        buildah \
         alsa-utils \
         libasound2-plugins \
         tmux \
@@ -100,6 +101,13 @@ RUN npm install -g opencode-ai
 
 # Set PATH for all shells
 ENV PATH="/root/.local/bin:$PATH"
+
+# Build OCI images with Buildah. Chroot isolation runs RUN steps without a
+# container runtime or extra privileges. The volume puts the image store on a
+# real filesystem, which the overlay storage driver needs; the entrypoint falls
+# back to vfs when that is not the case.
+ENV BUILDAH_ISOLATION=chroot
+VOLUME /var/lib/containers
 
 # Configure starship in bashrc
 RUN echo 'eval "$(starship init bash)"' >> /root/.bashrc
