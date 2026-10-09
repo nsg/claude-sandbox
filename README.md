@@ -87,6 +87,8 @@ T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-push t3code
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch t3code
 # Enable independent read and write approvals together
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch --t3-managed-push t3code
+# Pin both host ports instead of selecting the first free ports
+T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 claude-sandbox t3code
 
 # Run opencode TUI
 claude-sandbox opencode
@@ -184,10 +186,17 @@ The admin portal is disabled by default. Set `T3CODE_PAIR_ADMIN_PIN` to a
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
 ```
 
-The host-side portal uses a distinct port, defaulting to 3774. Open the exact
-URL printed at startup and enter the PIN in its sign-in page. It creates
-five-minute, single-use pairing links on demand and automatically uses the
-running server's instance database. Open a generated link in the current
+T3 Code uses the first free host port from 3773 by default. Set `T3CODE_PORT`
+to use one exact host port instead. The host-side portal uses a distinct port,
+selecting the first free port from 3774 by default; set
+`T3CODE_PAIR_ADMIN_PORT` to pin it. The admin port setting is ignored when no
+PIN is set. A configured port is never substituted with another port, and
+startup fails if it is already taken. The admin port must also differ from the
+T3 Code port and every port published with `-p` / `--port`.
+
+Open the exact URL printed at startup and enter the PIN in its sign-in page. It
+creates five-minute, single-use pairing links on demand and automatically uses
+the running server's instance database. Open a generated link in the current
 browser, or copy it from the read-only field to another client such as the
 mobile app. Creating or copying the link does not consume it. For another
 device, open the admin portal through a hostname or IP address that device can

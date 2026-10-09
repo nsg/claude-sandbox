@@ -277,7 +277,7 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run the t3code web GUI in the container (auto-discovers a free host port)
+    /// Run the t3code web GUI in the container (uses T3CODE_PORT or finds a free port)
     T3code {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -327,6 +327,96 @@ enum Commands {
 
 const T3CODE_PORT: u16 = 3773;
 const T3CODE_PAIR_ADMIN_PORT: u16 = 3774;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PortDecision {
+    Auto,
+    Exact(u16),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct T3PortDecisions {
+    t3: PortDecision,
+    admin: Option<PortDecision>,
+}
+
+fn parse_port_variable(name: &str, raw: Option<&str>) -> Result<PortDecision, String> {
+    let Some(raw) = raw.filter(|value| !value.is_empty()) else {
+        return Ok(PortDecision::Auto);
+    };
+    let port = raw
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| format!("{name} must be a port number between 1 and 65535"))?;
+    Ok(PortDecision::Exact(port))
+}
+
+fn decide_t3_ports(
+    t3_raw: Option<&str>,
+    admin_raw: Option<&str>,
+    pair_admin_enabled: bool,
+    published_ports: &[u16],
+) -> Result<T3PortDecisions, String> {
+    let t3 = parse_port_variable("T3CODE_PORT", t3_raw)?;
+    let admin = if pair_admin_enabled {
+        Some(parse_port_variable("T3CODE_PAIR_ADMIN_PORT", admin_raw)?)
+    } else {
+        None
+    };
+
+    if let Some(PortDecision::Exact(admin_port)) = admin {
+        if t3 == PortDecision::Exact(admin_port) {
+            return Err(format!(
+                "T3CODE_PAIR_ADMIN_PORT={admin_port} conflicts with T3CODE_PORT"
+            ));
+        }
+        if published_ports.contains(&admin_port) {
+            return Err(format!(
+                "T3CODE_PAIR_ADMIN_PORT={admin_port} conflicts with published port {admin_port}"
+            ));
+        }
+    }
+    Ok(T3PortDecisions { t3, admin })
+}
+
+// Podman publishes on every address, so a pinned port has to be free on all.
+fn fixed_port_is_free(name: &str, port: u16) -> Result<u16, String> {
+    TcpListener::bind(("0.0.0.0", port))
+        .map(|_| port)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::AddrInUse => format!("{name}={port} is already in use"),
+            _ => format!("{name}={port} cannot be used: {error}"),
+        })
+}
+
+fn resolve_t3_ports(
+    decisions: T3PortDecisions,
+    published_ports: &[u16],
+) -> Result<(u16, Option<u16>), String> {
+    let explicit_admin = match decisions.admin {
+        Some(PortDecision::Exact(port)) => Some(port),
+        _ => None,
+    };
+    let t3 = match decisions.t3 {
+        PortDecision::Auto => {
+            find_free_port_avoiding(T3CODE_PORT, &explicit_admin.into_iter().collect::<Vec<_>>())
+        }
+        PortDecision::Exact(port) => fixed_port_is_free("T3CODE_PORT", port)?,
+    };
+    let admin = match decisions.admin {
+        None => None,
+        Some(PortDecision::Auto) => {
+            let mut excluded = published_ports.to_vec();
+            excluded.push(t3);
+            Some(find_free_port_avoiding(T3CODE_PAIR_ADMIN_PORT, &excluded))
+        }
+        Some(PortDecision::Exact(port)) => {
+            Some(fixed_port_is_free("T3CODE_PAIR_ADMIN_PORT", port)?)
+        }
+    };
+    Ok((t3, admin))
+}
 
 /// Derive a stable, filesystem-safe identifier from a project path.
 /// Returns `"name-abcd1234"` where `name` is the directory basename
@@ -464,10 +554,6 @@ fn print_wrap_sessions() {
     run_in_container(&container_name, &["wrap", "--list"]);
 }
 
-fn find_free_port(preferred: u16) -> u16 {
-    find_free_port_avoiding(preferred, &[])
-}
-
 fn find_free_port_avoiding(preferred: u16, excluded: &[u16]) -> u16 {
     for port in preferred..=preferred.saturating_add(100) {
         if !excluded.contains(&port) && TcpListener::bind(("127.0.0.1", port)).is_ok() {
@@ -544,6 +630,55 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
 
 fn is_valid_pair_admin_pin(pin: &str) -> bool {
     (4..=12).contains(&pin.len()) && pin.chars().all(|character| character.is_ascii_digit())
+}
+
+fn validate_t3_settings(pin: Option<&str>, managed_access: bool) -> Result<(), String> {
+    if let Some(pin) = pin
+        && !is_valid_pair_admin_pin(pin)
+    {
+        return Err("T3CODE_PAIR_ADMIN_PIN must contain 4 to 12 digits".to_string());
+    }
+    if managed_access && pin.is_none() {
+        return Err(
+            "managed Git access requires T3CODE_PAIR_ADMIN_PIN so repositories can be approved"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn nonempty_env(name: &str) -> Result<Option<String>, String> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| format!("{name} is not valid UTF-8"))
+        })
+        .transpose()
+}
+
+struct T3Settings {
+    pair_admin_pin: Option<String>,
+    ports: T3PortDecisions,
+}
+
+fn t3_settings_from_env(
+    managed_access: bool,
+    published_ports: &[u16],
+) -> Result<T3Settings, String> {
+    let pair_admin_pin = nonempty_env("T3CODE_PAIR_ADMIN_PIN")?;
+    validate_t3_settings(pair_admin_pin.as_deref(), managed_access)?;
+    let ports = decide_t3_ports(
+        nonempty_env("T3CODE_PORT")?.as_deref(),
+        nonempty_env("T3CODE_PAIR_ADMIN_PORT")?.as_deref(),
+        pair_admin_pin.is_some(),
+        published_ports,
+    )?;
+    Ok(T3Settings {
+        pair_admin_pin,
+        ports,
+    })
 }
 
 fn default_tool() -> &'static str {
@@ -1658,27 +1793,20 @@ fn main() {
             );
         }
         Some(Commands::T3code { args }) => {
-            let port = find_free_port(T3CODE_PORT);
-            let pair_admin_pin = env::var("T3CODE_PAIR_ADMIN_PIN")
-                .ok()
-                .filter(|pin| !pin.is_empty());
-            if let Some(pin) = pair_admin_pin.as_deref()
-                && !is_valid_pair_admin_pin(pin)
-            {
-                eprintln!("T3CODE_PAIR_ADMIN_PIN must contain 4 to 12 digits");
-                std::process::exit(2);
-            }
-            if (cli.t3_managed_push || cli.t3_managed_fetch) && pair_admin_pin.is_none() {
-                eprintln!(
-                    "Error: managed Git access requires T3CODE_PAIR_ADMIN_PIN so repositories can be approved"
-                );
-                std::process::exit(2);
-            }
-            let pair_admin_port = pair_admin_pin.as_ref().map(|_| {
-                let mut excluded_ports = cli.ports.clone();
-                excluded_ports.push(port);
-                find_free_port_avoiding(T3CODE_PAIR_ADMIN_PORT, &excluded_ports)
-            });
+            let T3Settings {
+                pair_admin_pin,
+                ports: port_decisions,
+            } = t3_settings_from_env(cli.t3_managed_push || cli.t3_managed_fetch, &cli.ports)
+                .unwrap_or_else(|error| {
+                    eprintln!("Error: {error}");
+                    std::process::exit(2);
+                });
+            let t3_port_was_auto = port_decisions.t3 == PortDecision::Auto;
+            let (port, pair_admin_port) = resolve_t3_ports(port_decisions, &cli.ports)
+                .unwrap_or_else(|error| {
+                    eprintln!("Error: {error}");
+                    std::process::exit(1);
+                });
             let cwd = env::current_dir().expect("Could not get current directory");
             let usage_state_dir = pair_admin_port.map(|_| {
                 prepare_usage_state_dir(&usage_state_dir(), &cwd).unwrap_or_else(|error| {
@@ -1736,7 +1864,7 @@ fn main() {
             if !ports.contains(&port) {
                 ports.push(port);
             }
-            if port != T3CODE_PORT {
+            if t3_port_was_auto && port != T3CODE_PORT {
                 eprintln!(
                     "Port {} is in use, using port {} instead",
                     T3CODE_PORT, port
@@ -1890,6 +2018,56 @@ mod tests {
         assert!(!is_valid_pair_admin_pin("123"));
         assert!(!is_valid_pair_admin_pin("1234567890123"));
         assert!(!is_valid_pair_admin_pin("12a4"));
+    }
+
+    #[test]
+    fn t3_port_decisions_cover_auto_exact_and_invalid_values() {
+        assert_eq!(
+            decide_t3_ports(None, None, true, &[]).unwrap(),
+            T3PortDecisions {
+                t3: PortDecision::Auto,
+                admin: Some(PortDecision::Auto),
+            }
+        );
+        assert_eq!(
+            decide_t3_ports(Some("3800"), Some("3801"), true, &[]).unwrap(),
+            T3PortDecisions {
+                t3: PortDecision::Exact(3800),
+                admin: Some(PortDecision::Exact(3801)),
+            }
+        );
+        assert_eq!(
+            decide_t3_ports(Some("0"), None, false, &[]).unwrap_err(),
+            "T3CODE_PORT must be a port number between 1 and 65535"
+        );
+        assert_eq!(
+            decide_t3_ports(None, Some("nope"), true, &[]).unwrap_err(),
+            "T3CODE_PAIR_ADMIN_PORT must be a port number between 1 and 65535"
+        );
+    }
+
+    #[test]
+    fn explicit_admin_port_must_not_collide() {
+        assert!(
+            decide_t3_ports(Some("3800"), Some("3800"), true, &[])
+                .unwrap_err()
+                .contains("conflicts with T3CODE_PORT")
+        );
+        assert!(
+            decide_t3_ports(None, Some("3801"), true, &[3801])
+                .unwrap_err()
+                .contains("conflicts with published port 3801")
+        );
+    }
+
+    #[test]
+    fn auto_t3_port_avoids_an_explicit_admin_port() {
+        let first_available = find_free_port_avoiding(T3CODE_PORT, &[]);
+        let admin = first_available.to_string();
+        let decisions = decide_t3_ports(None, Some(&admin), true, &[]).unwrap();
+        let (t3, resolved_admin) = resolve_t3_ports(decisions, &[]).unwrap();
+        assert_ne!(t3, first_available);
+        assert_eq!(resolved_admin, Some(first_available));
     }
 
     #[test]
