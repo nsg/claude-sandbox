@@ -89,6 +89,9 @@ T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch t3code
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch --t3-managed-push t3code
 # Pin both host ports instead of selecting the first free ports
 T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 claude-sandbox t3code
+# Install the tested invocation as a systemd user service
+T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
+  claude-sandbox --install-service --t3-managed-fetch --t3-managed-push t3code
 
 # Run opencode TUI
 claude-sandbox opencode
@@ -202,7 +205,9 @@ mobile app. Creating or copying the link does not consume it. For another
 device, open the admin portal through a hostname or IP address that device can
 reach before generating the link; a link created through `localhost` only
 works on the host. The PIN stays on the host, is neither generated nor stored
-by claude-sandbox, and must be provided again on every launch.
+by claude-sandbox during normal launches, and must be provided again each time.
+With `--install-service`, it is stored in the mode-0600 unit file along with
+the other recorded environment variables.
 
 After unlocking the portal, expand **Restart sandbox** and confirm the action
 to stop the exact named T3 container. The launcher runs attached to that
@@ -294,6 +299,79 @@ expose it to the internet; use it over an encrypted trusted path such as a VPN
 or SSH tunnel. `GET /api/usage` is intentionally unauthenticated, so anyone who
 can reach the admin port can observe usage percentages, reset schedules, and
 the associated provider limit or model labels.
+
+### Running as a systemd service
+
+First run the complete command by hand from the project directory and check
+that it behaves as intended. Then recall that command, insert
+`--install-service` immediately after `claude-sandbox`, and run it again:
+
+```bash
+T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
+  claude-sandbox --install-service --t3-managed-fetch --t3-managed-push t3code
+```
+
+This writes `~/.config/systemd/user/<name>.service` (or the corresponding
+location under an absolute `XDG_CONFIG_HOME`), reloads the systemd user
+manager, and does not start or enable the service. By default the name is
+`claude-sandbox-<command>-<directory>`; choose one explicitly with
+`--install-service=NAME` (letters, digits, `_` and `-`). The summary printed
+afterwards shows the recorded command, directory and variable names.
+
+Use the unit name printed after installation:
+
+```bash
+systemctl --user start claude-sandbox-t3code-projects
+systemctl --user enable claude-sandbox-t3code-projects
+loginctl enable-linger
+journalctl --user -u claude-sandbox-t3code-projects -f
+```
+
+`enable` starts it at future logins. `loginctl enable-linger` additionally
+lets the user manager and enabled service start at boot without an interactive
+login.
+
+The generated unit records the launcher's arguments, the current working
+directory, and these environment variables when they are set and non-empty:
+
+- `PATH`
+- `T3CODE_PAIR_ADMIN_PIN`
+- `T3CODE_PORT`
+- `T3CODE_PAIR_ADMIN_PORT`
+- `CLIPBOARD_SCREENSHOTS_DIR`
+- `XDG_CACHE_HOME`
+- `XDG_CONFIG_HOME`
+- `XDG_DATA_HOME`
+- `XDG_STATE_HOME`
+- `SSH_AUTH_SOCK`, only when the socket is in `XDG_RUNTIME_DIR`; a forwarded
+  agent's socket is gone by the time the service starts
+- `GH_CONFIG_DIR`
+- `GH_HOST`
+- `GH_TOKEN`
+- `GITHUB_TOKEN`
+
+The unit file is mode 0600 because it can contain the pairing PIN or a token,
+and it is never written inside the project directory, where the agent could
+read or change it. Add other variables with `systemctl --user edit <name>`;
+that creates a systemd drop-in which survives re-installing the generated
+unit. Re-running the install command from the same directory regenerates the
+unit. A name that belongs to another working directory, or to a unit that
+claude-sandbox did not generate, is refused; choose a distinct explicit name.
+
+A T3 Code unit uses `Restart=always`, so the admin portal's **Restart sandbox**
+button and a crashed server both bring it back. Units for other commands use
+`Restart=on-failure`, which lets a `run` command finish.
+
+Services have no terminal. T3 Code and non-interactive `run` commands work
+normally, but the default Claude, Codex, and opencode TUIs and `shell` need
+`--wrap` when installed as a service.
+
+The service updates the launcher and skills only when `--auto-update` is part
+of the installed command. Without that flag a service start never prompts, and
+while an update is pending it is skipped along with the container image pull.
+
+With `--vm`, stopping the service ends the VM proxy before it can delete its
+virtual machines; they are removed the next time the service starts.
 
 ### Wrapped sessions
 

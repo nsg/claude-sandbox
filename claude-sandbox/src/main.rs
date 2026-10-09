@@ -7,6 +7,7 @@ mod managed_push;
 mod novnc_assets;
 mod proxy_log;
 mod proxy_socket;
+mod service;
 mod ssh_proxy;
 mod t3_admin;
 mod usage_api;
@@ -104,6 +105,16 @@ struct Cli {
     /// Automatically update without prompting
     #[arg(long)]
     auto_update: bool,
+
+    /// Install this invocation as a systemd user service instead of running it
+    #[arg(
+        long,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "",
+        value_name = "NAME"
+    )]
+    install_service: Option<String>,
 
     /// Suppress informational output, only show errors
     #[arg(short, long)]
@@ -422,15 +433,13 @@ fn resolve_t3_ports(
 /// Returns `"name-abcd1234"` where `name` is the directory basename
 /// (sanitised) and the suffix is a short hash of the full path to
 /// disambiguate projects with the same name in different locations.
-fn project_instance_name(path: &Path) -> String {
+fn sanitised_project_basename(path: &Path) -> String {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("default");
 
-    // Keep only ASCII alphanumeric, dash and underscore.
-    let sanitised: String = name
-        .chars()
+    name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -438,7 +447,11 @@ fn project_instance_name(path: &Path) -> String {
                 '_'
             }
         })
-        .collect();
+        .collect()
+}
+
+fn project_instance_name(path: &Path) -> String {
+    let sanitised = sanitised_project_basename(path);
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
@@ -1638,9 +1651,85 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
     true
 }
 
+fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
+    let command = match cli.command.as_ref() {
+        None => default_tool(),
+        Some(Commands::Shell) => "shell",
+        Some(Commands::Run { .. }) => "run",
+        Some(Commands::Codex { .. }) => "codex",
+        Some(Commands::Opencode { .. }) => "opencode",
+        Some(Commands::T3code { .. }) => "t3code",
+        _ => {
+            return Err((
+                2,
+                "--install-service only applies to commands that start a sandbox".to_string(),
+            ));
+        }
+    };
+
+    if command == "t3code" {
+        let settings =
+            t3_settings_from_env(cli.t3_managed_push || cli.t3_managed_fetch, &cli.ports)
+                .map_err(|error| (2, error))?;
+        let mut unpinned = Vec::new();
+        if settings.ports.t3 == PortDecision::Auto {
+            unpinned.push("T3CODE_PORT");
+        }
+        if settings.ports.admin == Some(PortDecision::Auto) {
+            unpinned.push("T3CODE_PAIR_ADMIN_PORT");
+        }
+        if !unpinned.is_empty() {
+            let unpinned = unpinned.join(" and ");
+            eprintln!(
+                "Note: {unpinned} not set; the service picks the first free port on every start. Set {unpinned} for a stable address."
+            );
+        }
+    }
+
+    if !cli.wrap && !matches!(command, "t3code" | "run") {
+        eprintln!(
+            "Note: {command} needs a terminal and a service has none; install it with --wrap to run it in a tmux session."
+        );
+    }
+
+    let cwd = env::current_dir()
+        .map_err(|error| (1, format!("could not get current directory: {error}")))?;
+    let raw_arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    let (arguments, explicit_name) =
+        service::filter_install_argument(raw_arguments).map_err(|error| (1, error))?;
+    service::derive_unit_name(explicit_name.as_deref(), command, &cwd)
+        .map_err(|error| (2, error))?;
+
+    let invoked = invoked_program();
+    let current_exe = env::current_exe()
+        .map_err(|error| (1, format!("could not resolve current executable: {error}")))?;
+    let program =
+        service::resolve_program_path(&invoked, &cwd, env::var_os("PATH").as_deref(), &current_exe);
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| (1, "HOME environment variable not set".to_string()))?;
+    let config_dir = service::service_config_dir(env::var_os("XDG_CONFIG_HOME").as_deref(), &home);
+    let environment =
+        service::recorded_environment(|name| env::var_os(name)).map_err(|error| (1, error))?;
+
+    let outcome = service::install(service::InstallOptions {
+        explicit_name,
+        command: command.to_string(),
+        cwd,
+        program,
+        arguments,
+        environment,
+        config_dir,
+    })
+    .map_err(|error| (1, error))?;
+    service::print_summary(&outcome);
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
-    if run_internal_command(cli.command.as_ref()) {
+    if cli.install_service.is_none() && run_internal_command(cli.command.as_ref()) {
         return;
     }
     if (cli.t3_managed_push || cli.t3_managed_fetch)
@@ -1650,6 +1739,13 @@ fn main() {
             "Error: --t3-managed-push and --t3-managed-fetch can only be used with the t3code command"
         );
         std::process::exit(2);
+    }
+    if cli.install_service.is_some() {
+        if let Err((code, error)) = install_service(&cli) {
+            eprintln!("Error: {error}");
+            std::process::exit(code);
+        }
+        return;
     }
     let client = Client::new();
 
