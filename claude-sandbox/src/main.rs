@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::{self, DirBuilder, File, Permissions};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -1265,6 +1265,15 @@ fn admin_pasta_network(container_env: &[String]) -> Option<String> {
     })
 }
 
+// The wrapped tmux session needs a pty even when nothing is attached to it.
+fn podman_terminal_flags(stdin_is_terminal: bool, wrap: bool) -> &'static [&'static str] {
+    match (stdin_is_terminal, wrap) {
+        (true, _) => &["-i", "-t"],
+        (false, true) => &["-t"],
+        (false, false) => &["-i"],
+    }
+}
+
 fn update_container_image(quiet: bool) {
     let previous = podman_image_ids(&[IMAGE]);
 
@@ -1402,7 +1411,13 @@ fn run_container(
             cmd.env_remove(entry);
         }
     }
-    cmd.args(["run", "--rm", "-it", "--init"]);
+    cmd.args(["run", "--rm"])
+        .args(podman_terminal_flags(std::io::stdin().is_terminal(), wrap))
+        .arg("--init");
+    if wrap && !std::io::stdout().is_terminal() {
+        // Keep tmux screen redraws out of the journal or log file.
+        cmd.stdout(Stdio::null());
+    }
     let default_container_name = wrap_container_name(&cwd);
     let container_name = explicit_container_name.unwrap_or(&default_container_name);
     if wrap || explicit_container_name.is_some() {
@@ -2068,6 +2083,13 @@ mod tests {
         let (t3, resolved_admin) = resolve_t3_ports(decisions, &[]).unwrap();
         assert_ne!(t3, first_available);
         assert_eq!(resolved_admin, Some(first_available));
+    }
+
+    #[test]
+    fn podman_tty_flags_depend_on_terminal_or_wrap() {
+        assert_eq!(podman_terminal_flags(false, false), &["-i"]);
+        assert_eq!(podman_terminal_flags(true, false), &["-i", "-t"]);
+        assert_eq!(podman_terminal_flags(false, true), &["-t"]);
     }
 
     #[test]
