@@ -1,0 +1,7 @@
+{
+  "uuid": "plan-usage@claude-sandbox",
+  "name": "Claude Sandbox Plan Usage",
+  "description": "Shows plan-limit usage for Anthropic, OpenAI and Ollama from the claude-sandbox usage endpoint.",
+  "shell-version": ["46"],
+  "url": "https://github.com/nsg/claude-sandbox"
+}

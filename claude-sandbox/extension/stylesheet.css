@@ -1,0 +1,26 @@
+.plan-usage-panel { spacing: 0.35em; }
+.plan-usage-panel .plan-usage-warn { color: #f5c211; }
+.plan-usage-panel .plan-usage-crit { color: #ff7b63; }
+
+.plan-usage-title { font-weight: bold; font-size: 1.1em; }
+.plan-usage-small { font-size: 0.9em; }
+.plan-usage-provider { spacing: 0.35em; }
+.plan-usage-provider-name { font-weight: bold; }
+.plan-usage-row { spacing: 0.9em; }
+.plan-usage-bucket { width: 9.5em; }
+.plan-usage-percent { width: 3em; text-align: right; font-weight: bold; }
+.plan-usage-reset { width: 5.5em; text-align: right; }
+.plan-usage-message { width: 26em; }
+
+.plan-usage-bar { width: 150px; height: 6px; border-radius: 3px; background-color: rgba(128, 128, 128, 0.35); }
+.plan-usage-fill { height: 6px; border-radius: 3px; background-color: #dedede; }
+.plan-usage-fill.plan-usage-warn { background-color: #f5c211; }
+.plan-usage-fill.plan-usage-crit { background-color: #ff7b63; }
+.plan-usage-percent.plan-usage-warn { color: #f5c211; }
+.plan-usage-percent.plan-usage-crit { color: #ff7b63; }
+
+.plan-usage-light .plan-usage-fill { background-color: #3d3d3d; }
+.plan-usage-light .plan-usage-fill.plan-usage-warn { background-color: #c88800; }
+.plan-usage-light .plan-usage-fill.plan-usage-crit { background-color: #c01c28; }
+.plan-usage-light .plan-usage-percent.plan-usage-warn { color: #9a6700; }
+.plan-usage-light .plan-usage-percent.plan-usage-crit { color: #c01c28; }

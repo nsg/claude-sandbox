@@ -23,6 +23,7 @@ The binary handles container image pulls, self-updates, and skill updates automa
 - **Image builds** — build OCI images from a Containerfile or Dockerfile with Buildah, without a daemon or extra privileges
 - **Agent-controlled GUI** — a headless Xvfb virtual display with Openbox, window management, screenshots, input, and accessibility-tree tools for Claude and Codex
 - **Live display** — view and control the sandbox's virtual X display from the T3 admin portal through the existing admin port, no extra ports
+- **GNOME usage indicator** — optional top-bar extension showing plan-limit usage for every provider
 - **Wrapped sessions** — run the command in a tmux session, inject keystrokes and read the screen from outside with `wrap-type` / `wrap-key` / `wrap-read`
 - **Auto-updates** — binary, skills, and container image updates are checked on every launch
 - **Port exposure** — forward ports from the container with `-p`
@@ -71,6 +72,9 @@ claude-sandbox shell
 
 # Install skills
 claude-sandbox install skills
+
+# Install the GNOME top-bar usage indicator (see "GNOME usage indicator")
+claude-sandbox install extension
 
 # Run OpenAI Codex CLI instead of Claude
 claude-sandbox codex
@@ -299,6 +303,45 @@ expose it to the internet; use it over an encrypted trusted path such as a VPN
 or SSH tunnel. `GET /api/usage` is intentionally unauthenticated, so anyone who
 can reach the admin port can observe usage percentages, reset schedules, and
 the associated provider limit or model labels.
+
+### GNOME usage indicator
+
+Show the plan-limit usage from `/api/usage` in the GNOME top bar:
+
+```bash
+claude-sandbox install extension
+```
+
+The command copies a GNOME Shell extension to
+`${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/plan-usage@claude-sandbox`
+and enables it. Log out and back in to load it; GNOME Shell discovers new
+extensions only at login. The extension targets GNOME Shell 46, as shipped
+with Ubuntu 24.04 LTS.
+
+An installed extension follows the binary: every launch rewrites its files when
+they differ from the ones in the running `claude-sandbox`, keeping the
+configured endpoint. The new version loads at the next login.
+
+The top bar shows the most-used limit of each provider, for example
+`A 60 · O 82 · L 0` for Anthropic, OpenAI, and Ollama. A value turns amber at
+70% and red at 90%. Stale values are dimmed and a dash means no data. Click the
+indicator for every limit with its reset time and a link to the `/usage`
+dashboard.
+
+The extension polls the admin server every 60 seconds, so it has data only
+while a `claude-sandbox t3code` instance with the admin portal enabled is
+running. By default it reads from `127.0.0.1`. Pass `--host` to read from
+another machine instead:
+
+```bash
+claude-sandbox install extension --host build-box:3774
+```
+
+Without a port, in `--host` or altogether, the command uses
+`T3CODE_PAIR_ADMIN_PORT`, or 3774 when unset. Write an IPv6 address in
+brackets, as in `[fd00::1]:3774`. Re-run the command to change the endpoint.
+The request is plain unauthenticated HTTP, so reach a remote host over a
+trusted path such as a VPN.
 
 ### Running as a systemd service
 

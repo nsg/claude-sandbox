@@ -1,4 +1,5 @@
 mod clipboard_proxy;
+mod extension;
 mod gh_proxy;
 mod git_proxy;
 mod logging;
@@ -174,8 +175,11 @@ enum Commands {
     Shell,
     /// Install components
     Install {
-        /// Component to install (e.g., "skills")
+        /// Component to install: "skills" or "extension" (GNOME usage indicator)
         target: String,
+        /// Host the extension reads usage from, as HOST or HOST:PORT (default: this machine)
+        #[arg(long, value_name = "HOST[:PORT]")]
+        host: Option<String>,
     },
     /// Start the gh CLI proxy (internal, spawned automatically)
     GhProxy {
@@ -1727,6 +1731,45 @@ fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
     Ok(())
 }
 
+fn extension_data_dir() -> PathBuf {
+    extension::data_dir(env::var_os("XDG_DATA_HOME").as_deref(), &home_dir())
+}
+
+fn install_extension(host: Option<&str>) -> Result<(), String> {
+    let (host, port) = match host {
+        Some(host) => extension::parse_host(host)?,
+        None => ("127.0.0.1".to_string(), None),
+    };
+    let port = match port {
+        Some(port) => port,
+        None => {
+            let variable = "T3CODE_PAIR_ADMIN_PORT";
+            match parse_port_variable(variable, nonempty_env(variable)?.as_deref())? {
+                PortDecision::Exact(port) => port,
+                PortDecision::Auto => {
+                    eprintln!(
+                        "Note: no port given and {variable} not set; using the default admin port {T3CODE_PAIR_ADMIN_PORT}."
+                    );
+                    T3CODE_PAIR_ADMIN_PORT
+                }
+            }
+        }
+    };
+    let outcome = extension::install(&extension_data_dir(), &host, port)?;
+    extension::print_summary(&outcome);
+    Ok(())
+}
+
+fn refresh_extension(quiet: bool) {
+    match extension::refresh(&extension_data_dir()) {
+        Ok(true) if !quiet => {
+            println!("Updated the GNOME usage indicator; log out and back in to load it.");
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("Could not update the GNOME usage indicator: {error}"),
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     if cli.install_service.is_none() && run_internal_command(cli.command.as_ref()) {
@@ -1747,10 +1790,24 @@ fn main() {
         }
         return;
     }
+    if let Some(Commands::Install { target, host }) = &cli.command {
+        if target == "extension" {
+            if let Err(error) = install_extension(host.as_deref()) {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        if host.is_some() {
+            eprintln!("Error: --host only applies to: claude-sandbox install extension");
+            std::process::exit(2);
+        }
+    }
     let client = Client::new();
 
     let update_status = check_available_updates(&client);
     let should_pull = perform_updates(&client, &update_status, cli.auto_update, cli.quiet);
+    refresh_extension(cli.quiet);
 
     let ssh_config = if cli.ssh {
         let mut saved = load_sshd_config();
@@ -1815,12 +1872,12 @@ fn main() {
                 cli.vm,
             );
         }
-        Some(Commands::Install { target }) => {
+        Some(Commands::Install { target, .. }) => {
             if target == "skills" {
                 install_skills(&client, cli.quiet);
             } else {
                 eprintln!("Unknown install target: {}", target);
-                eprintln!("Usage: claude-sandbox install skills");
+                eprintln!("Usage: claude-sandbox install <skills|extension>");
                 std::process::exit(1);
             }
         }
