@@ -748,6 +748,16 @@ const EXT_COMMANDS: &[ExtCommandDef] = &[
                         --state, -s  Filter by state: open (default), closed, all\n",
         handler: handle_milestone_list,
     },
+    ExtCommandDef {
+        group: "ext",
+        subcommand: "pr-review-threads",
+        description: "List pull request review threads",
+        help_text: "gh ext pr-review-threads <pr-number> [--unresolved] [--repo <repository>]\n\n\
+                        List review threads and inline comments for a pull request as JSON.\n\
+                        --unresolved       Show only unresolved threads\n\
+                        --repo, -R         Select host/owner/name or owner/name\n",
+        handler: handle_pr_review_threads_for_grant,
+    },
 ];
 
 const ACCOUNT_PROBE_HELP: &str = "gh api user --jq .login (read-only account-name probe)\n";
@@ -1482,6 +1492,301 @@ fn handle_milestone_list(
             stderr: format!("gh-proxy: failed to execute gh api: {}", e),
         },
     }
+}
+
+const PR_REVIEW_THREADS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{path line isResolved isOutdated comments(first:100){nodes{author{login} body createdAt url}pageInfo{hasNextPage}}}pageInfo{hasNextPage}}}}}";
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReviewThreadsRequest {
+    number: String,
+    unresolved: bool,
+    repository: Option<RepositoryId>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadsGraphQlResponse {
+    data: ReviewThreadsData,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadsData {
+    repository: ReviewThreadsRepository,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadsRepository {
+    pull_request: ReviewThreadsPullRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadsPullRequest {
+    review_threads: ReviewThreadsConnection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadsConnection {
+    nodes: Vec<ReviewThreadNode>,
+    page_info: ReviewThreadsPageInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadNode {
+    path: String,
+    line: Option<i32>,
+    is_resolved: bool,
+    is_outdated: bool,
+    comments: ReviewCommentsConnection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentsConnection {
+    nodes: Vec<ReviewCommentNode>,
+    page_info: ReviewThreadsPageInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadsPageInfo {
+    has_next_page: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentNode {
+    author: Option<ReviewCommentAuthor>,
+    body: String,
+    created_at: String,
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct ReviewCommentAuthor {
+    login: String,
+}
+
+#[derive(Serialize)]
+struct ReviewThreadsOutput {
+    threads: Vec<ReviewThreadOutput>,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct ReviewThreadOutput {
+    path: String,
+    line: Option<i32>,
+    is_resolved: bool,
+    is_outdated: bool,
+    comments: Vec<ReviewCommentOutput>,
+}
+
+#[derive(Serialize)]
+struct ReviewCommentOutput {
+    author: Option<String>,
+    body: String,
+    created_at: String,
+    url: String,
+}
+
+fn parse_pr_review_threads(args: &[String]) -> Result<ReviewThreadsRequest, String> {
+    let mut number = None;
+    let mut unresolved = false;
+    let mut repository = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        match arg.as_str() {
+            "--unresolved" if !unresolved => unresolved = true,
+            "--unresolved" => return Err("--unresolved may only be specified once".to_string()),
+            "--repo" | "-R" => {
+                if repository.is_some() {
+                    return Err("--repo may only be specified once".to_string());
+                }
+                index += 1;
+                let selector = args
+                    .get(index)
+                    .ok_or_else(|| format!("missing value for {arg}"))?;
+                repository = Some(
+                    strict_repository_from_selector(selector)
+                        .ok_or_else(|| format!("invalid repository selector: {selector}"))?,
+                );
+            }
+            _ if arg.starts_with("--repo=") => {
+                if repository.is_some() {
+                    return Err("--repo may only be specified once".to_string());
+                }
+                let selector = arg.strip_prefix("--repo=").unwrap();
+                repository = Some(
+                    strict_repository_from_selector(selector)
+                        .ok_or_else(|| format!("invalid repository selector: {selector}"))?,
+                );
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown flag: {arg}")),
+            _ if number.is_none() => number = Some(arg.clone()),
+            _ => return Err("unexpected positional argument".to_string()),
+        }
+        index += 1;
+    }
+
+    let number = number.ok_or_else(|| {
+        "usage: gh ext pr-review-threads <pr-number> [--unresolved] [--repo <repository>]"
+            .to_string()
+    })?;
+    if !number.bytes().all(|byte| byte.is_ascii_digit())
+        || number.parse::<i32>().ok().is_none_or(|parsed| parsed < 1)
+    {
+        return Err(format!("invalid pull request number: {number}"));
+    }
+
+    Ok(ReviewThreadsRequest {
+        number,
+        unresolved,
+        repository,
+    })
+}
+
+fn validate_review_threads_repository(
+    repository: &RepositoryId,
+    config: &ProxyConfig,
+) -> Result<(), String> {
+    if repository.host.eq_ignore_ascii_case("github.com")
+        || config
+            .grants
+            .iter()
+            .any(|grant| grant.repository.host.eq_ignore_ascii_case(&repository.host))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "GitHub host is not allowed for this launch: {}",
+            repository.host
+        ))
+    }
+}
+
+fn pr_review_threads_api_args(
+    request: &ReviewThreadsRequest,
+    repository: &RepositoryId,
+) -> Vec<String> {
+    vec![
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={PR_REVIEW_THREADS_QUERY}"),
+        "-f".to_string(),
+        format!("owner={}", repository.owner),
+        "-f".to_string(),
+        format!("name={}", repository.name),
+        "-F".to_string(),
+        format!("number={}", request.number),
+    ]
+}
+
+fn map_pr_review_threads_response(response: &[u8], unresolved: bool) -> Result<String, String> {
+    let response: ReviewThreadsGraphQlResponse = serde_json::from_slice(response)
+        .map_err(|error| format!("could not parse GitHub review threads: {error}"))?;
+    let connection = response.data.repository.pull_request.review_threads;
+    let truncated = connection.page_info.has_next_page
+        || connection
+            .nodes
+            .iter()
+            .any(|thread| thread.comments.page_info.has_next_page);
+    let threads = connection
+        .nodes
+        .into_iter()
+        .filter(|thread| !unresolved || !thread.is_resolved)
+        .map(|thread| ReviewThreadOutput {
+            path: thread.path,
+            line: thread.line,
+            is_resolved: thread.is_resolved,
+            is_outdated: thread.is_outdated,
+            comments: thread
+                .comments
+                .nodes
+                .into_iter()
+                .map(|comment| ReviewCommentOutput {
+                    author: comment.author.map(|author| author.login),
+                    body: comment.body,
+                    created_at: comment.created_at,
+                    url: comment.url,
+                })
+                .collect(),
+        })
+        .collect();
+    let mut output = serde_json::to_string(&ReviewThreadsOutput { threads, truncated })
+        .map_err(|error| format!("could not encode GitHub review threads: {error}"))?;
+    output.push('\n');
+    Ok(output)
+}
+
+fn execute_pr_review_threads(
+    request: ReviewThreadsRequest,
+    repository: RepositoryId,
+    config: &ProxyConfig,
+) -> Response {
+    if let Err(reason) = validate_review_threads_repository(&repository, config) {
+        return denied_response(reason);
+    }
+    let args = pr_review_threads_api_args(&request, &repository);
+    match safe_gh_api_command(config, &repository).args(args).output() {
+        Ok(output) if output.status.success() => {
+            match map_pr_review_threads_response(&output.stdout, request.unresolved) {
+                Ok(stdout) => Response {
+                    exit_code: 0,
+                    stdout,
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                },
+                Err(reason) => denied_response(reason),
+            }
+        }
+        Ok(output) => Response {
+            exit_code: output.status.code().unwrap_or(1),
+            stdout: String::new(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
+        Err(error) => denied_response(format!("failed to execute gh api: {error}")),
+    }
+}
+
+fn handle_pr_review_threads_for_grant(
+    args: &[String],
+    grant: &RepositoryGrant,
+    config: &ProxyConfig,
+) -> Response {
+    match parse_pr_review_threads(args) {
+        Ok(request) => {
+            let repository = request
+                .repository
+                .clone()
+                .unwrap_or_else(|| grant.repository.clone());
+            execute_pr_review_threads(request, repository, config)
+        }
+        Err(reason) => denied_response(reason),
+    }
+}
+
+fn handle_pr_review_threads_request(
+    args: &[String],
+    cwd: Option<&str>,
+    config: &ProxyConfig,
+) -> Response {
+    let request = match parse_pr_review_threads(args) {
+        Ok(request) => request,
+        Err(reason) => return denied_response(reason),
+    };
+    let repository = match request.repository.clone() {
+        Some(repository) => repository,
+        None => match resolve_grant(config, cwd) {
+            Ok(grant) => grant.repository.clone(),
+            Err(reason) => return denied_response(reason),
+        },
+    };
+    execute_pr_review_threads(request, repository, config)
 }
 
 // ── Help text generation (derived from COMMANDS) ──────────────────────
@@ -3361,19 +3666,25 @@ fn handle_request_with_executors(
         };
     }
 
-    if req.args.len() >= 2 && find_ext_command(&req.args[0], &req.args[1]).is_some() {
-        let grant = match resolve_grant(config, req.cwd.as_deref()) {
-            Ok(grant) => grant,
-            Err(reason) => {
-                log_line(
-                    log,
-                    &format!("DENIED  gh {} ({})", cmd_str, loggable_text(&reason)),
-                );
-                return denied_response(reason);
-            }
+    if req.args.len() >= 2
+        && let Some(extension) = find_ext_command(&req.args[0], &req.args[1])
+    {
+        let response = if extension.subcommand == "pr-review-threads" {
+            handle_pr_review_threads_request(&req.args[2..], req.cwd.as_deref(), config)
+        } else {
+            let grant = match resolve_grant(config, req.cwd.as_deref()) {
+                Ok(grant) => grant,
+                Err(reason) => {
+                    log_line(
+                        log,
+                        &format!("DENIED  gh {} ({})", cmd_str, loggable_text(&reason)),
+                    );
+                    return denied_response(reason);
+                }
+            };
+            maybe_ext_command(&req.args, grant, config)
+                .expect("extension was resolved immediately before dispatch")
         };
-        let response = maybe_ext_command(&req.args, grant, config)
-            .expect("extension was resolved immediately before dispatch");
         let tag = if response.exit_code == 0 {
             "EXT"
         } else {
@@ -5932,6 +6243,139 @@ mod tests {
         let h = maybe_help(&strs(&["ext", "-h"])).unwrap();
         assert!(h.contains("milestone-create"));
         assert!(h.contains("milestone-list"));
+    }
+
+    #[test]
+    fn pr_review_threads_help_is_listed() {
+        let command = maybe_help(&strs(&["ext", "pr-review-threads", "--help"])).unwrap();
+        assert!(command.contains("<pr-number>"));
+        assert!(command.contains("--unresolved"));
+        assert!(command.contains("--repo, -R"));
+        let group = maybe_help(&strs(&["ext", "-h"])).unwrap();
+        assert!(group.contains("pr-review-threads"));
+    }
+
+    #[test]
+    fn pr_review_threads_validates_arguments_and_repository_selectors() {
+        for args in [
+            &[][..],
+            &["0"],
+            &["2147483648"],
+            &["12x"],
+            &["١٢"],
+            &["1", "2"],
+            &["1", "--unknown"],
+            &["1", "--unresolved", "--unresolved"],
+            &["1", "--repo"],
+            &["1", "--repo", "owner/repo/extra/part"],
+            &["1", "-Rgithub.com/owner/repo"],
+        ] {
+            assert!(
+                parse_pr_review_threads(&strs(args)).is_err(),
+                "accepted: {}",
+                args.join(" ")
+            );
+        }
+
+        let request = parse_pr_review_threads(&strs(&[
+            "17",
+            "--unresolved",
+            "--repo=github.com/Owner/Repo",
+        ]))
+        .unwrap();
+        assert_eq!(request.number, "17");
+        assert!(request.unresolved);
+        assert_eq!(
+            request.repository.unwrap().selector(),
+            "github.com/Owner/Repo"
+        );
+
+        let config = test_config();
+        let disallowed = RepositoryId {
+            host: "gitlab.com".to_string(),
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+        };
+        assert!(validate_review_threads_repository(&disallowed, &config).is_err());
+        let github = RepositoryId {
+            host: "GITHUB.COM".to_string(),
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+        };
+        assert!(validate_review_threads_repository(&github, &config).is_ok());
+    }
+
+    #[test]
+    fn pr_review_threads_builds_one_fixed_graphql_call() {
+        let request =
+            parse_pr_review_threads(&strs(&["42", "-R", "github.example.com/team/project"]))
+                .unwrap();
+        let repository = request.repository.clone().unwrap();
+        assert_eq!(
+            pr_review_threads_api_args(&request, &repository),
+            vec![
+                "graphql".to_string(),
+                "-f".to_string(),
+                format!("query={PR_REVIEW_THREADS_QUERY}"),
+                "-f".to_string(),
+                "owner=team".to_string(),
+                "-f".to_string(),
+                "name=project".to_string(),
+                "-F".to_string(),
+                "number=42".to_string(),
+            ]
+        );
+        assert!(PR_REVIEW_THREADS_QUERY.starts_with("query("));
+        assert!(!PR_REVIEW_THREADS_QUERY.contains("mutation"));
+    }
+
+    #[test]
+    fn pr_review_threads_maps_filters_and_marks_truncated_output() {
+        let response = br#"{
+            "data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [
+                    {
+                        "path": "src/lib.rs", "line": 12,
+                        "isResolved": false, "isOutdated": false,
+                        "comments": {"nodes": [{
+                            "author": {"login": "alice"}, "body": "Please fix",
+                            "createdAt": "2026-10-10T10:00:00Z",
+                            "url": "https://github.com/o/r/pull/1#discussion_r1"
+                        }], "pageInfo": {"hasNextPage": false}}
+                    },
+                    {
+                        "path": "src/old.rs", "line": null,
+                        "isResolved": true, "isOutdated": true,
+                        "comments": {"nodes": [{
+                            "author": null, "body": "Done",
+                            "createdAt": "2026-10-10T11:00:00Z",
+                            "url": "https://github.com/o/r/pull/1#discussion_r2"
+                        }], "pageInfo": {"hasNextPage": true}}
+                    }
+                ],
+                "pageInfo": {"hasNextPage": false}
+            }}}}
+        }"#;
+
+        let all: serde_json::Value =
+            serde_json::from_str(&map_pr_review_threads_response(response, false).unwrap())
+                .unwrap();
+        assert_eq!(all["threads"].as_array().unwrap().len(), 2);
+        assert_eq!(all["threads"][0]["comments"][0]["author"], "alice");
+        assert_eq!(all["threads"][0]["is_resolved"], false);
+        assert_eq!(all["threads"][1]["line"], serde_json::Value::Null);
+        assert_eq!(
+            all["threads"][1]["comments"][0]["author"],
+            serde_json::Value::Null
+        );
+        assert_eq!(all["truncated"], true);
+
+        let unresolved = map_pr_review_threads_response(response, true).unwrap();
+        assert!(unresolved.ends_with('\n'));
+        let unresolved: serde_json::Value = serde_json::from_str(&unresolved).unwrap();
+        assert_eq!(unresolved["threads"].as_array().unwrap().len(), 1);
+        assert_eq!(unresolved["threads"][0]["path"], "src/lib.rs");
+        assert_eq!(unresolved["truncated"], true);
     }
 
     // ── API milestone hint ────────────────────────────────────────

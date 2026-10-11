@@ -546,6 +546,7 @@ The proxy rebuilds every merge request instead of forwarding it:
 | `gh ext run-logs <run-id>` | Download workflow run logs for the current snapshotted repository as a zip file |
 | `gh ext milestone-create <title>` | Create a milestone in the current snapshotted repository (supports `--description`, `--due-on`) |
 | `gh ext milestone-list` | List milestones in the current snapshotted repository (supports `--state open\|closed\|all`) |
+| `gh ext pr-review-threads <pr-number>` | List review threads and inline comments as JSON (supports `--unresolved`, `--repo`) |
 
 Repository-mutating extensions use the same current-working-directory selection and launch snapshot as other write commands.
 
