@@ -89,6 +89,8 @@ T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-push t3code
 # Approve private SSH fetch sources from the same portal
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch t3code
+# Approve exact cross-repository GitHub CLI writes once
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-gh t3code
 # Enable independent read and write approvals together
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch --t3-managed-push t3code
 # Pin both host ports instead of selecting the first free ports
@@ -276,11 +278,12 @@ refreshers. Because those files are user-owned rather than managed by this
 repository, remove any old refresh trigger separately after upgrading; a
 status line may remain as a display-only consumer.
 
-For a long-running T3 service, enable managed fetches, pushes, or both:
+For a long-running T3 service, enable managed fetches, pushes, GitHub actions,
+or any combination:
 
 ```bash
 T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox \
-  --t3-managed-fetch --t3-managed-push t3code
+  --t3-managed-fetch --t3-managed-push --t3-managed-gh t3code
 ```
 
 The first authenticated SSH fetch from an unapproved source and the first push
@@ -292,10 +295,24 @@ a workspace-relative repository and its `origin`, and an origin change suspends
 it. Approvals are stored outside the mounted workspace under
 `~/.claude-sandbox/projects/`, where the container cannot modify them.
 
-Managed fetch and push approvals are independent of the GitHub CLI proxy. `gh`
-writes do not consult the portal or create approval candidates; their targets
-come only from the repositories snapshotted beneath the workspace when the
-sandbox starts.
+Managed fetch and push approvals remain independent of the GitHub CLI proxy.
+With `--t3-managed-gh`, the proxy offers one-time portal approval for an exact
+foreign-repository `issue create`, `issue comment`, `issue close`, `issue edit`,
+`issue reopen`, `pr create`, `pr comment`, `pr edit`, `pr ready`, `pr close`, or
+`pr reopen` command. It inspects repository, item, and pull-request head
+identities, displays the canonical action, and consumes approval before
+executing it. Other `gh` writes remain limited to repositories snapshotted
+beneath the workspace.
+For a pending action, the portal can instead always allow that command kind or
+all eleven supported issue and pull-request actions in its repository. This
+gives up content review: anything the agent can read can be posted to that
+repository under your account until you revoke the grant in the portal.
+Approved text is published exactly as shown and may disclose information or
+trigger target-repository automation. Repository and item identity are checked
+immediately before execution, but the mutation itself cannot pin that identity.
+For `pr create`, approval binds the head commit seen during retry inspection,
+but the pull request follows the head branch; commits pushed to it later,
+including between approval and creation, become part of it.
 
 The portal uses plain HTTP. Anyone able to observe the traffic can recover both
 the PIN and generated pairing token, and a short PIN can be guessed. Never
@@ -500,11 +517,13 @@ It is an exact command that returns only the authenticated login; all other
 
 | Group | Commands |
 |-------|----------|
-| `pr` | `comment`, `merge` (only with `--allow-merge`) |
-| `issue` | `create`, `comment`, `close`, `edit` |
+| `pr` | `create`, `comment`, `edit`, `ready`, `close`, `reopen`, `merge` (only with `--allow-merge`) |
+| `issue` | `create`, `comment`, `close`, `edit`, `reopen` |
 | `run` | `rerun` |
 
-`gh pr create` is intentionally unavailable because GitHub CLI may run host-side Git operations against the caller's worktree while preparing a pull request.
+`gh pr create` requires an explicit `--head` for an already-pushed branch. The
+proxy resolves the default base when omitted and creates the pull request with
+one GitHub REST call, so GitHub CLI never reads the host worktree.
 
 **Merging pull requests** is off by default. Launch with `--allow-merge` to make `gh pr merge` available for that launch only:
 
@@ -826,6 +845,7 @@ claude-sandbox install skills
 | `/vm` | Create, boot, and drive virtual machines through the Incus bridge |
 | `/container-images` | Build, inspect, export, and push OCI images with Buildah |
 | `/wrap` | Run and drive interactive terminal programs in a tmux session |
+| `/stathost` | Publish rich HTML pages to a [StatHost](https://github.com/nsg/stathost) bucket and return a clickable link |
 | `/claude` | Delegate work to Anthropic models through the Claude Code CLI |
 | `/codex` | Delegate work to OpenAI models through the Codex CLI |
 | `/opencode` | Delegate non-code work to open-weight models through opencode |

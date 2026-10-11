@@ -4,6 +4,7 @@ mod gh_proxy;
 mod git_proxy;
 mod logging;
 mod managed_fetch;
+mod managed_gh;
 mod managed_push;
 mod novnc_assets;
 mod proxy_log;
@@ -149,6 +150,10 @@ struct Cli {
     #[arg(long = "t3-managed-fetch")]
     t3_managed_fetch: bool,
 
+    /// Let the T3 admin portal approve one-time cross-repository GitHub actions
+    #[arg(long = "t3-managed-gh")]
+    t3_managed_gh: bool,
+
     /// Enable SSH server in the container
     #[arg(long)]
     ssh: bool,
@@ -195,6 +200,9 @@ enum Commands {
         /// Permit `gh pr merge` in launch-approved repositories
         #[arg(long)]
         allow_merge: bool,
+        /// Host-only managed GitHub action state directory
+        #[arg(long)]
+        managed_gh_state_dir: Option<PathBuf>,
     },
     /// Start the git push proxy (internal, spawned automatically)
     GitProxy {
@@ -231,11 +239,15 @@ enum Commands {
         #[arg(long)]
         fetch_state_dir: PathBuf,
         #[arg(long)]
+        gh_state_dir: PathBuf,
+        #[arg(long)]
         usage_state_dir: PathBuf,
         #[arg(long)]
         managed_push: bool,
         #[arg(long)]
         managed_fetch: bool,
+        #[arg(long)]
+        managed_gh: bool,
     },
     /// Start the clipboard image proxy (internal, spawned automatically)
     ClipboardProxy {
@@ -597,9 +609,11 @@ struct T3AdminConfig<'a> {
     workspace_root: &'a Path,
     state_dir: &'a Path,
     fetch_state_dir: &'a Path,
+    gh_state_dir: &'a Path,
     usage_state_dir: &'a Path,
     managed_push: bool,
     managed_fetch: bool,
+    managed_gh: bool,
 }
 
 fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
@@ -621,6 +635,8 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
         .arg(config.state_dir)
         .arg("--fetch-state-dir")
         .arg(config.fetch_state_dir)
+        .arg("--gh-state-dir")
+        .arg(config.gh_state_dir)
         .arg("--usage-state-dir")
         .arg(config.usage_state_dir)
         .stdin(std::process::Stdio::null())
@@ -631,6 +647,9 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
     }
     if config.managed_fetch {
         command.arg("--managed-fetch");
+    }
+    if config.managed_gh {
+        command.arg("--managed-gh");
     }
     if let Err(error) = command.spawn() {
         eprintln!("Warning: failed to start T3 admin portal: {error}");
@@ -1069,6 +1088,7 @@ fn ensure_gh_proxy(
     runtime_dir: &Path,
     workspace_root: &Path,
     allow_merge: bool,
+    managed_gh_state: Option<&Path>,
 ) -> Result<(), String> {
     let socket_path = runtime_dir.join(GH_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -1082,6 +1102,9 @@ fn ensure_gh_proxy(
         .arg(workspace_root);
     if allow_merge {
         command.arg("--allow-merge");
+    }
+    if let Some(state) = managed_gh_state {
+        command.arg("--managed-gh-state-dir").arg(state);
     }
     start_proxy("gh-proxy", &socket_path, command)
 }
@@ -1339,6 +1362,7 @@ fn run_container(
     allow_merge: bool,
     managed_push_state: Option<&Path>,
     managed_fetch_state: Option<&Path>,
+    managed_gh_state: Option<&Path>,
     explicit_container_name: Option<&str>,
     vm_enabled: bool,
 ) {
@@ -1354,7 +1378,12 @@ fn run_container(
         });
     };
 
-    require_proxy(ensure_gh_proxy(&proxy_runtime_dir, &cwd, allow_merge));
+    require_proxy(ensure_gh_proxy(
+        &proxy_runtime_dir,
+        &cwd,
+        allow_merge,
+        managed_gh_state,
+    ));
     require_proxy(ensure_clipboard_proxy(&proxy_runtime_dir));
 
     if vm_enabled {
@@ -1550,8 +1579,15 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             log,
             workspace_root,
             allow_merge,
+            managed_gh_state_dir,
         }) => {
-            gh_proxy::run(socket, log, workspace_root, *allow_merge);
+            gh_proxy::run(
+                socket,
+                log,
+                workspace_root,
+                *allow_merge,
+                managed_gh_state_dir.as_deref(),
+            );
         }
         Some(Commands::GitProxy {
             socket,
@@ -1591,9 +1627,11 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             workspace_root,
             state_dir,
             fetch_state_dir,
+            gh_state_dir,
             usage_state_dir,
             managed_push,
             managed_fetch,
+            managed_gh,
         }) => {
             t3_admin::run(t3_admin::RunOptions {
                 portal_port: *port,
@@ -1603,9 +1641,11 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 workspace_root,
                 state_dir,
                 fetch_state_dir,
+                gh_state_dir,
                 usage_state_dir,
                 managed_push: *managed_push,
                 managed_fetch: *managed_fetch,
+                managed_gh: *managed_gh,
             });
         }
         Some(Commands::ClipboardProxy { socket, log }) => {
@@ -1672,9 +1712,11 @@ fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
     };
 
     if command == "t3code" {
-        let settings =
-            t3_settings_from_env(cli.t3_managed_push || cli.t3_managed_fetch, &cli.ports)
-                .map_err(|error| (2, error))?;
+        let settings = t3_settings_from_env(
+            cli.t3_managed_push || cli.t3_managed_fetch || cli.t3_managed_gh,
+            &cli.ports,
+        )
+        .map_err(|error| (2, error))?;
         let mut unpinned = Vec::new();
         if settings.ports.t3 == PortDecision::Auto {
             unpinned.push("T3CODE_PORT");
@@ -1775,11 +1817,11 @@ fn main() {
     if cli.install_service.is_none() && run_internal_command(cli.command.as_ref()) {
         return;
     }
-    if (cli.t3_managed_push || cli.t3_managed_fetch)
+    if (cli.t3_managed_push || cli.t3_managed_fetch || cli.t3_managed_gh)
         && !matches!(&cli.command, Some(Commands::T3code { .. }))
     {
         eprintln!(
-            "Error: --t3-managed-push and --t3-managed-fetch can only be used with the t3code command"
+            "Error: --t3-managed-push, --t3-managed-fetch, and --t3-managed-gh can only be used with the t3code command"
         );
         std::process::exit(2);
     }
@@ -1869,6 +1911,7 @@ fn main() {
                 None,
                 None,
                 None,
+                None,
                 cli.vm,
             );
         }
@@ -1907,6 +1950,7 @@ fn main() {
                 None,
                 None,
                 None,
+                None,
                 cli.vm,
             );
         }
@@ -1929,6 +1973,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
+                None,
                 None,
                 None,
                 None,
@@ -1957,6 +2002,7 @@ fn main() {
                 None,
                 None,
                 None,
+                None,
                 cli.vm,
             );
         }
@@ -1964,11 +2010,14 @@ fn main() {
             let T3Settings {
                 pair_admin_pin,
                 ports: port_decisions,
-            } = t3_settings_from_env(cli.t3_managed_push || cli.t3_managed_fetch, &cli.ports)
-                .unwrap_or_else(|error| {
-                    eprintln!("Error: {error}");
-                    std::process::exit(2);
-                });
+            } = t3_settings_from_env(
+                cli.t3_managed_push || cli.t3_managed_fetch || cli.t3_managed_gh,
+                &cli.ports,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                std::process::exit(2);
+            });
             let t3_port_was_auto = port_decisions.t3 == PortDecision::Auto;
             let (port, pair_admin_port) = resolve_t3_ports(port_decisions, &cli.ports)
                 .unwrap_or_else(|error| {
@@ -1986,14 +2035,16 @@ fn main() {
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
             let mut push_state_dir = managed_push::state_dir(&home_dir(), &instance_name);
             let mut fetch_state_dir = managed_fetch::state_dir(&home_dir(), &instance_name);
-            let canonical_workspace = if cli.t3_managed_push || cli.t3_managed_fetch {
-                Some(fs::canonicalize(&cwd).unwrap_or_else(|error| {
-                    eprintln!("Error: could not resolve T3 workspace: {error}");
-                    std::process::exit(1);
-                }))
-            } else {
-                None
-            };
+            let mut gh_state_dir = managed_gh::state_dir(&home_dir(), &instance_name);
+            let canonical_workspace =
+                if cli.t3_managed_push || cli.t3_managed_fetch || cli.t3_managed_gh {
+                    Some(fs::canonicalize(&cwd).unwrap_or_else(|error| {
+                        eprintln!("Error: could not resolve T3 workspace: {error}");
+                        std::process::exit(1);
+                    }))
+                } else {
+                    None
+                };
             if cli.t3_managed_push {
                 push_state_dir =
                     managed_push::prepare_state_dir(&push_state_dir).unwrap_or_else(|error| {
@@ -2016,6 +2067,19 @@ fn main() {
                 if fetch_state_dir.starts_with(canonical_workspace.as_ref().unwrap()) {
                     eprintln!(
                         "Error: managed fetch state must be outside the agent-mounted T3 workspace"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            if cli.t3_managed_gh {
+                gh_state_dir =
+                    managed_gh::prepare_state_dir(&gh_state_dir).unwrap_or_else(|error| {
+                        eprintln!("Error: could not prepare managed GitHub action state: {error}");
+                        std::process::exit(1);
+                    });
+                if gh_state_dir.starts_with(canonical_workspace.as_ref().unwrap()) {
+                    eprintln!(
+                        "Error: managed GitHub action state must be outside the agent-mounted T3 workspace"
                     );
                     std::process::exit(1);
                 }
@@ -2054,9 +2118,11 @@ fn main() {
                     workspace_root: &cwd,
                     state_dir: &push_state_dir,
                     fetch_state_dir: &fetch_state_dir,
+                    gh_state_dir: &gh_state_dir,
                     usage_state_dir,
                     managed_push: cli.t3_managed_push,
                     managed_fetch: cli.t3_managed_fetch,
+                    managed_gh: cli.t3_managed_gh,
                 });
             }
 
@@ -2069,6 +2135,7 @@ fn main() {
             }
             let managed_state = cli.t3_managed_push.then_some(push_state_dir.as_path());
             let managed_fetch_state = cli.t3_managed_fetch.then_some(fetch_state_dir.as_path());
+            let managed_gh_state = cli.t3_managed_gh.then_some(gh_state_dir.as_path());
             let named_container = pair_admin_pin.as_ref().map(|_| container_name.as_str());
 
             run_container(
@@ -2086,6 +2153,7 @@ fn main() {
                 cli.allow_merge,
                 managed_state,
                 managed_fetch_state,
+                managed_gh_state,
                 named_container,
                 cli.vm,
             );
@@ -2128,6 +2196,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
+                None,
                 None,
                 None,
                 None,

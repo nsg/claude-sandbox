@@ -565,7 +565,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year + i64::from(month <= 2), month, day)
 }
 
-fn format_epoch(timestamp: i64) -> String {
+pub(crate) fn format_epoch(timestamp: i64) -> String {
     let days = timestamp.div_euclid(86_400);
     let seconds = timestamp.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);

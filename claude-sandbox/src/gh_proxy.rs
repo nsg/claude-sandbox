@@ -5,12 +5,12 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, process, thread};
 
-use crate::{proxy_log, proxy_socket};
+use crate::{managed_gh, proxy_log, proxy_socket};
 
 #[derive(Deserialize)]
 struct Request {
@@ -64,6 +64,8 @@ struct ProxyConfig {
     neutral_dir: PathBuf,
     grants: Vec<RepositoryGrant>,
     allow_merge: bool,
+    managed_gh_state: Option<PathBuf>,
+    managed_gh_lock: Mutex<()>,
 }
 
 struct CommandDef {
@@ -579,6 +581,41 @@ const COMMANDS: &[CommandDef] = &[
         is_write: true,
         allowed_flags: &["--body", "-b", "--edit-last", "--web", "-w"],
     },
+    CommandDef {
+        group: "pr",
+        subcommand: "create",
+        is_write: true,
+        allowed_flags: &[
+            "--title", "-t", "--body", "-b", "--head", "-H", "--base", "-B", "--draft", "-d",
+            "--repo", "-R",
+        ],
+    },
+    CommandDef {
+        group: "pr",
+        subcommand: "edit",
+        is_write: true,
+        allowed_flags: &[
+            "--title", "-t", "--body", "-b", "--base", "-B", "--repo", "-R",
+        ],
+    },
+    CommandDef {
+        group: "pr",
+        subcommand: "ready",
+        is_write: true,
+        allowed_flags: &["--undo", "--repo", "-R"],
+    },
+    CommandDef {
+        group: "pr",
+        subcommand: "close",
+        is_write: true,
+        allowed_flags: &["--comment", "-c", "--repo", "-R"],
+    },
+    CommandDef {
+        group: "pr",
+        subcommand: "reopen",
+        is_write: true,
+        allowed_flags: &["--comment", "-c", "--repo", "-R"],
+    },
     // Opt-in (--allow-merge) and planned by plan_pr_merge: no --admin,
     // --delete-branch, --body-file/-F or --author-email.
     CommandDef {
@@ -663,6 +700,12 @@ const COMMANDS: &[CommandDef] = &[
             "--remove-project",
             "--remove-milestone",
         ],
+    },
+    CommandDef {
+        group: "issue",
+        subcommand: "reopen",
+        is_write: true,
+        allowed_flags: &["--comment", "-c", "--repo", "-R"],
     },
 ];
 
@@ -1566,6 +1609,9 @@ fn help_command(group: &str, subcommand: &str) -> Option<String> {
     if is_pr_merge(group, subcommand) {
         out.push_str(MERGE_HELP);
     }
+    if group == "pr" && subcommand == "create" {
+        out.push_str("\n--head is required because the host does not read the worktree; the branch must already be pushed.\n");
+    }
     Some(out)
 }
 
@@ -1605,6 +1651,9 @@ fn maybe_help(args: &[String]) -> Option<String> {
 }
 
 fn write_flag_takes_value(group: &str, subcommand: &str, flag: &str) -> bool {
+    if matches!(flag, "--repo" | "-R") {
+        return true;
+    }
     match (group, subcommand) {
         ("pr", "comment") | ("issue", "comment") => matches!(flag, "--body" | "-b"),
         ("issue", "create") => matches!(
@@ -1735,6 +1784,1105 @@ fn repository_from_selector(selector: &str) -> Option<RepositoryId> {
         Some((host, path)) if path.contains('/') => repository_from_path(host, path),
         _ => repository_from_path("github.com", selector),
     }
+}
+
+fn strict_repository_from_selector(selector: &str) -> Option<RepositoryId> {
+    let parts: Vec<&str> = selector.split('/').collect();
+    let (host, owner, name) = match parts.as_slice() {
+        [owner, name] => ("github.com", *owner, *name),
+        [host, owner, name] => (*host, *owner, *name),
+        _ => return None,
+    };
+    if !valid_repository_part(host) || !valid_repository_part(owner) || !valid_repository_part(name)
+    {
+        return None;
+    }
+    Some(RepositoryId {
+        host: host.to_string(),
+        owner: owner.to_string(),
+        name: name.to_string(),
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagedTarget {
+    None,
+    Issue,
+    PullRequest,
+}
+
+#[derive(Clone, Copy)]
+struct ManagedFlag {
+    long: &'static str,
+    short: Option<&'static str>,
+    required: bool,
+    bare: bool,
+}
+
+struct ManagedCommand {
+    group: &'static str,
+    subcommand: &'static str,
+    target: ManagedTarget,
+    flags: &'static [ManagedFlag],
+    new: bool,
+}
+
+const TITLE_BODY_REQUIRED: &[ManagedFlag] = &[
+    ManagedFlag {
+        long: "--title",
+        short: Some("-t"),
+        required: true,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--body",
+        short: Some("-b"),
+        required: true,
+        bare: false,
+    },
+];
+const BODY_REQUIRED: &[ManagedFlag] = &[ManagedFlag {
+    long: "--body",
+    short: Some("-b"),
+    required: true,
+    bare: false,
+}];
+const ISSUE_CLOSE_FLAGS: &[ManagedFlag] = &[
+    ManagedFlag {
+        long: "--comment",
+        short: Some("-c"),
+        required: false,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--reason",
+        short: Some("-r"),
+        required: false,
+        bare: false,
+    },
+];
+const EDIT_FLAGS: &[ManagedFlag] = &[
+    ManagedFlag {
+        long: "--title",
+        short: Some("-t"),
+        required: false,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--body",
+        short: Some("-b"),
+        required: false,
+        bare: false,
+    },
+];
+const PR_CREATE_FLAGS: &[ManagedFlag] = &[
+    ManagedFlag {
+        long: "--title",
+        short: Some("-t"),
+        required: true,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--body",
+        short: Some("-b"),
+        required: true,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--head",
+        short: Some("-H"),
+        required: true,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--base",
+        short: Some("-B"),
+        required: false,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--draft",
+        short: Some("-d"),
+        required: false,
+        bare: true,
+    },
+];
+const PR_EDIT_FLAGS: &[ManagedFlag] = &[
+    ManagedFlag {
+        long: "--title",
+        short: Some("-t"),
+        required: false,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--body",
+        short: Some("-b"),
+        required: false,
+        bare: false,
+    },
+    ManagedFlag {
+        long: "--base",
+        short: Some("-B"),
+        required: false,
+        bare: false,
+    },
+];
+const READY_FLAGS: &[ManagedFlag] = &[ManagedFlag {
+    long: "--undo",
+    short: None,
+    required: false,
+    bare: true,
+}];
+const COMMENT_OPTIONAL: &[ManagedFlag] = &[ManagedFlag {
+    long: "--comment",
+    short: Some("-c"),
+    required: false,
+    bare: false,
+}];
+
+const MANAGED_COMMANDS: &[ManagedCommand] = &[
+    ManagedCommand {
+        group: "issue",
+        subcommand: "create",
+        target: ManagedTarget::None,
+        flags: TITLE_BODY_REQUIRED,
+        new: false,
+    },
+    ManagedCommand {
+        group: "issue",
+        subcommand: "comment",
+        target: ManagedTarget::Issue,
+        flags: BODY_REQUIRED,
+        new: false,
+    },
+    ManagedCommand {
+        group: "issue",
+        subcommand: "close",
+        target: ManagedTarget::Issue,
+        flags: ISSUE_CLOSE_FLAGS,
+        new: false,
+    },
+    ManagedCommand {
+        group: "issue",
+        subcommand: "edit",
+        target: ManagedTarget::Issue,
+        flags: EDIT_FLAGS,
+        new: false,
+    },
+    ManagedCommand {
+        group: "pr",
+        subcommand: "comment",
+        target: ManagedTarget::PullRequest,
+        flags: BODY_REQUIRED,
+        new: false,
+    },
+    ManagedCommand {
+        group: "pr",
+        subcommand: "create",
+        target: ManagedTarget::None,
+        flags: PR_CREATE_FLAGS,
+        new: true,
+    },
+    ManagedCommand {
+        group: "pr",
+        subcommand: "edit",
+        target: ManagedTarget::PullRequest,
+        flags: PR_EDIT_FLAGS,
+        new: true,
+    },
+    ManagedCommand {
+        group: "pr",
+        subcommand: "ready",
+        target: ManagedTarget::PullRequest,
+        flags: READY_FLAGS,
+        new: true,
+    },
+    ManagedCommand {
+        group: "pr",
+        subcommand: "close",
+        target: ManagedTarget::PullRequest,
+        flags: COMMENT_OPTIONAL,
+        new: true,
+    },
+    ManagedCommand {
+        group: "pr",
+        subcommand: "reopen",
+        target: ManagedTarget::PullRequest,
+        flags: COMMENT_OPTIONAL,
+        new: true,
+    },
+    ManagedCommand {
+        group: "issue",
+        subcommand: "reopen",
+        target: ManagedTarget::Issue,
+        flags: COMMENT_OPTIONAL,
+        new: true,
+    },
+];
+
+fn managed_command(args: &[String]) -> Option<&'static ManagedCommand> {
+    let (group, subcommand) = (args.first()?, args.get(1)?);
+    MANAGED_COMMANDS
+        .iter()
+        .find(|command| command.group == group && command.subcommand == subcommand)
+}
+
+pub(crate) fn refused_text_code_point(value: &str) -> Option<char> {
+    value.chars().find(|character| {
+        let code = *character as u32;
+        (code <= 0x1f && !matches!(*character, '\n' | '\t'))
+            || (0x7f..=0x9f).contains(&code)
+            || matches!(code, 0x00ad | 0x061c | 0x180e | 0xfeff)
+            || (0x200b..=0x200f).contains(&code)
+            || (0x2028..=0x202f).contains(&code)
+            || (0x2060..=0x206f).contains(&code)
+            || (0xfe00..=0xfe0e).contains(&code)
+            || (0xfff9..=0xfffb).contains(&code)
+            || (0xe0000..=0xe0fff).contains(&code)
+            || (0xe0100..=0xe01ef).contains(&code)
+    })
+}
+
+fn validate_managed_text(flag: &str, value: &str) -> Result<(), String> {
+    if let Some(character) = refused_text_code_point(value) {
+        return Err(format!(
+            "{flag} contains refused code point U+{:04X}",
+            character as u32
+        ));
+    }
+    Ok(())
+}
+
+fn strict_item_url(value: &str, group: &str) -> Result<Option<(RepositoryId, u32)>, String> {
+    if !value.contains("://") {
+        return Ok(None);
+    }
+    let rest = value
+        .strip_prefix("https://")
+        .ok_or_else(|| "only HTTPS GitHub item URLs are allowed".to_string())?;
+    let (host, path) = rest
+        .split_once('/')
+        .ok_or_else(|| "invalid GitHub item URL".to_string())?;
+    let parts: Vec<&str> = path.split('/').collect();
+    let item_kind = if group == "pr" { "pull" } else { "issues" };
+    if parts.len() != 4 || parts[2] != item_kind {
+        return Err(format!("invalid {group} URL"));
+    }
+    let repository = strict_repository_from_selector(&format!("{host}/{}/{}", parts[0], parts[1]))
+        .ok_or_else(|| "invalid GitHub repository in item URL".to_string())?;
+    let number = strict_item_number(parts[3], group)?;
+    Ok(Some((repository, number)))
+}
+
+fn strict_item_number(value: &str, group: &str) -> Result<u32, String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("invalid {group} target: {value}"));
+    }
+    value
+        .parse::<i32>()
+        .ok()
+        .filter(|number| *number > 0)
+        .map(|number| number as u32)
+        .ok_or_else(|| format!("invalid {group} target: {value}"))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ManagedPlan {
+    repository: Option<RepositoryId>,
+    number: Option<u32>,
+    values: std::collections::BTreeMap<&'static str, Option<String>>,
+    args: Vec<String>,
+}
+
+fn valid_ref_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_./+@".contains(&byte))
+        && !value.starts_with(['-', '/', '.'])
+        && !value.ends_with(['/', '.'])
+        && !value.ends_with(".lock")
+        && !value.contains("..")
+        && !value.contains("//")
+        && !value.contains("@{")
+}
+
+fn valid_head(value: &str) -> bool {
+    match value.split_once(':') {
+        Some((owner, branch)) => {
+            valid_repository_part(owner) && !branch.contains(':') && valid_ref_name(branch)
+        }
+        None => valid_ref_name(value),
+    }
+}
+
+fn strict_managed_plan(args: &[String]) -> Result<ManagedPlan, String> {
+    let Some(command) = managed_command(args) else {
+        return Err("command is not eligible for managed GitHub approval".to_string());
+    };
+    let mut repository = None;
+    let mut positionals = Vec::new();
+    let mut values = std::collections::BTreeMap::<&'static str, Option<String>>::new();
+    let mut index = 2;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            return Err("the -- separator is not allowed for managed GitHub actions".to_string());
+        }
+        let (flag, inline) = if let Some((flag, value)) = arg.split_once('=') {
+            if !flag.starts_with("--") {
+                return Err(format!(
+                    "combined or attached shorthand is not allowed: {arg}"
+                ));
+            }
+            (flag, Some(value))
+        } else {
+            (arg, None)
+        };
+        let spec = command
+            .flags
+            .iter()
+            .find(|spec| flag == spec.long || spec.short.is_some_and(|short| flag == short));
+        let (canonical, bare) = if matches!(flag, "--repo" | "-R") {
+            ("--repo", false)
+        } else if let Some(spec) = spec {
+            (spec.long, spec.bare)
+        } else if arg.starts_with('-') {
+            return Err(format!(
+                "flag not allowed for gh {} {}: {flag}",
+                command.group, command.subcommand
+            ));
+        } else {
+            positionals.push(arg.to_string());
+            index += 1;
+            continue;
+        };
+        if values.contains_key(canonical) || (canonical == "--repo" && repository.is_some()) {
+            return Err(format!("{canonical} may be specified at most once"));
+        }
+        if bare {
+            if inline.is_some() {
+                return Err(format!("{canonical} does not take a value"));
+            }
+            values.insert(canonical, None);
+            index += 1;
+            continue;
+        }
+        let value = match inline {
+            Some(value) => value,
+            None => {
+                index += 1;
+                args.get(index)
+                    .ok_or_else(|| format!("missing value for {flag}"))?
+            }
+        };
+        validate_managed_text(canonical, value)?;
+        if canonical == "--repo" {
+            repository = Some(
+                strict_repository_from_selector(value)
+                    .ok_or_else(|| format!("invalid repository selector: {value}"))?,
+            );
+        } else {
+            values.insert(canonical, Some(value.to_string()));
+        }
+        index += 1;
+    }
+
+    let number = if command.target == ManagedTarget::None {
+        if !positionals.is_empty() {
+            return Err(format!(
+                "gh {} {} does not take a positional target",
+                command.group, command.subcommand
+            ));
+        }
+        None
+    } else {
+        if positionals.len() != 1 {
+            return Err(format!(
+                "gh {} {} takes exactly one target",
+                command.group, command.subcommand
+            ));
+        }
+        let target = &positionals[0];
+        if let Some((url_repository, number)) = strict_item_url(target, command.group)? {
+            if let Some(selector) = &repository
+                && !selector.matches(&url_repository)
+            {
+                return Err(
+                    "repository selector and item URL name different repositories".to_string(),
+                );
+            }
+            repository = Some(url_repository);
+            Some(number)
+        } else {
+            Some(strict_item_number(target, command.group)?)
+        }
+    };
+    if let Some(repository) = &mut repository {
+        repository.host.make_ascii_lowercase();
+        repository.owner.make_ascii_lowercase();
+        repository.name.make_ascii_lowercase();
+    }
+
+    for spec in command.flags {
+        let value = values.get(spec.long);
+        if spec.required && value.is_none() {
+            return Err(format!("{} is required and must not be empty", spec.long));
+        }
+        if value.and_then(Option::as_ref).is_some_and(String::is_empty) {
+            return Err(format!("{} must not be empty", spec.long));
+        }
+    }
+    if command.group == "issue"
+        && command.subcommand == "close"
+        && let Some(Some(reason)) = values.get("--reason")
+        && !matches!(reason.as_str(), "completed" | "not planned")
+    {
+        return Err("--reason must be exactly 'completed' or 'not planned'".to_string());
+    }
+    if command.subcommand == "edit" && values.is_empty() {
+        return Err(format!(
+            "gh {} edit requires at least one editable flag",
+            command.group
+        ));
+    }
+    if let Some(Some(head)) = values.get("--head")
+        && !valid_head(head)
+    {
+        return Err("--head is not a valid conservative ref name".to_string());
+    }
+    if let Some(Some(base)) = values.get("--base")
+        && !valid_ref_name(base)
+    {
+        return Err("--base is not a valid conservative ref name".to_string());
+    }
+
+    let mut canonical = vec![command.group.to_string(), command.subcommand.to_string()];
+    if let Some(number) = number {
+        canonical.push(number.to_string());
+    }
+    for spec in command.flags {
+        if let Some(value) = values.get(spec.long) {
+            canonical.push(match value {
+                Some(value) => format!("{}={value}", spec.long),
+                None => spec.long.to_string(),
+            });
+        }
+    }
+    Ok(ManagedPlan {
+        repository,
+        number,
+        values,
+        args: canonical,
+    })
+}
+
+fn finalize_managed_plan(
+    mut plan: ManagedPlan,
+    repository: &RepositoryId,
+    default_base: Option<&str>,
+) -> Result<ManagedPlan, String> {
+    if plan.args.first().is_some_and(|value| value == "pr")
+        && plan.args.get(1).is_some_and(|value| value == "create")
+        && !plan.values.contains_key("--base")
+    {
+        let base = default_base
+            .ok_or_else(|| "repository inspection did not return a default branch".to_string())?;
+        if !valid_ref_name(base) {
+            return Err(
+                "repository default branch is not a valid conservative ref name".to_string(),
+            );
+        }
+        plan.values.insert("--base", Some(base.to_string()));
+        plan.args = canonical_managed_args(&plan)?;
+    }
+    validate_managed_plan_size(&plan, repository)?;
+    Ok(plan)
+}
+
+fn validate_managed_plan_size(plan: &ManagedPlan, repository: &RepositoryId) -> Result<(), String> {
+    let total = plan.args.iter().map(String::len).sum::<usize>()
+        + format!("--repo={}", repository.selector()).len();
+    if total > 16 * 1024 {
+        return Err("canonical GitHub action exceeds 16 KiB".to_string());
+    }
+    Ok(())
+}
+
+fn canonical_managed_args(plan: &ManagedPlan) -> Result<Vec<String>, String> {
+    let command = managed_command(&plan.args)
+        .ok_or_else(|| "command is not eligible for managed GitHub approval".to_string())?;
+    let mut args = vec![command.group.to_string(), command.subcommand.to_string()];
+    if let Some(number) = plan.number {
+        args.push(number.to_string());
+    }
+    for spec in command.flags {
+        if let Some(value) = plan.values.get(spec.long) {
+            args.push(match value {
+                Some(value) => format!("{}={value}", spec.long),
+                None => spec.long.to_string(),
+            });
+        }
+    }
+    Ok(args)
+}
+
+#[cfg(test)]
+fn strict_foreign_plan(
+    args: &[String],
+    allowed_hosts: &BTreeSet<String>,
+) -> Result<ManagedPlan, String> {
+    let plan = strict_managed_plan(args)?;
+    let repository = plan.repository.clone().ok_or_else(|| {
+        "managed GitHub actions must explicitly name a repository with --repo, -R, or an item URL".to_string()
+    })?;
+    if !allowed_hosts.contains(&repository.host) {
+        return Err(format!(
+            "GitHub host is not launch-approved: {}",
+            repository.host
+        ));
+    }
+    finalize_managed_plan(plan, &repository, None)
+}
+
+#[derive(Clone, Debug)]
+struct ForeignInspection {
+    repository_id: u64,
+    full_name: String,
+    visibility: String,
+    default_branch: Option<String>,
+    item_node_id: Option<String>,
+    item_title: Option<String>,
+    item_state: Option<String>,
+    item_is_pull_request: Option<bool>,
+    item_repository_url: Option<String>,
+    head_sha: Option<String>,
+    commits: Option<u64>,
+    changed_files: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryInspection {
+    id: u64,
+    full_name: String,
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    private: Option<bool>,
+    #[serde(default)]
+    default_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ItemInspection {
+    node_id: String,
+    title: String,
+    state: String,
+    repository_url: String,
+    #[serde(default, deserialize_with = "present_json_field")]
+    pull_request: bool,
+}
+
+#[derive(Deserialize)]
+struct CompareInspection {
+    total_commits: u64,
+    changed_files: u64,
+    head_sha: Option<String>,
+}
+
+enum InspectionQuery {
+    Repository,
+    Item(u32),
+    Compare { base: String, head: String },
+}
+
+fn present_json_field<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(true)
+}
+
+fn inspect_managed_action(
+    repository: &RepositoryId,
+    plan: &ManagedPlan,
+    inspect_compare: bool,
+    mut inspect: impl FnMut(InspectionQuery) -> Result<Vec<u8>, String>,
+) -> Result<ForeignInspection, String> {
+    let details: RepositoryInspection =
+        serde_json::from_slice(&inspect(InspectionQuery::Repository)?)
+            .map_err(|error| format!("could not inspect {}: {error}", repository.selector()))?;
+    let visibility = match (details.visibility, details.private) {
+        (Some(visibility), _) => visibility,
+        (None, Some(private)) => if private { "private" } else { "public" }.to_string(),
+        (None, None) => {
+            return Err(format!(
+                "could not inspect {}: response omitted visibility and private",
+                repository.selector()
+            ));
+        }
+    };
+    let item = plan
+        .number
+        .map(|number| {
+            serde_json::from_slice::<ItemInspection>(&inspect(InspectionQuery::Item(number))?)
+                .map_err(|error| {
+                    format!(
+                        "could not inspect {} item #{number}: {error}",
+                        repository.selector()
+                    )
+                })
+        })
+        .transpose()?;
+    let compare = if inspect_compare
+        && plan.args.first().is_some_and(|value| value == "pr")
+        && plan.args.get(1).is_some_and(|value| value == "create")
+    {
+        let base = plan
+            .values
+            .get("--base")
+            .and_then(Option::as_deref)
+            .or(details.default_branch.as_deref())
+            .ok_or_else(|| "repository inspection did not return a default branch".to_string())?;
+        let head = plan
+            .values
+            .get("--head")
+            .and_then(Option::as_deref)
+            .ok_or_else(|| "--head is required".to_string())?;
+        if !valid_ref_name(base) {
+            return Err(
+                "repository default branch is not a valid conservative ref name".to_string(),
+            );
+        }
+        if base.contains("...") || head.contains("...") {
+            return Err("--base and --head must not contain ...".to_string());
+        }
+        let comparison: CompareInspection =
+            serde_json::from_slice(&inspect(InspectionQuery::Compare {
+                base: base.to_string(),
+                head: head.to_string(),
+            })?)
+            .map_err(|error| {
+                format!(
+                    "could not inspect {} comparison: {error}",
+                    repository.selector()
+                )
+            })?;
+        if comparison.total_commits == 0 {
+            return Err("pull request head has no commits ahead of base".to_string());
+        }
+        if comparison.total_commits > 250 {
+            return Err("pull request has more than 250 commits; open it on GitHub".to_string());
+        }
+        if comparison.head_sha.as_deref().is_none_or(str::is_empty) {
+            return Err("pull request comparison omitted the head commit SHA".to_string());
+        }
+        Some(comparison)
+    } else {
+        None
+    };
+    Ok(ForeignInspection {
+        repository_id: details.id,
+        full_name: details.full_name,
+        visibility,
+        default_branch: details.default_branch,
+        item_node_id: item.as_ref().map(|item| item.node_id.clone()),
+        item_title: item.as_ref().map(|item| item.title.clone()),
+        item_state: item.as_ref().map(|item| item.state.clone()),
+        item_is_pull_request: item.as_ref().map(|item| item.pull_request),
+        item_repository_url: item.map(|item| item.repository_url),
+        head_sha: compare.as_ref().and_then(|value| value.head_sha.clone()),
+        commits: compare.as_ref().map(|value| value.total_commits),
+        changed_files: compare.map(|value| value.changed_files),
+    })
+}
+
+fn inspect_foreign_action(
+    config: &ProxyConfig,
+    repository: &RepositoryId,
+    plan: &ManagedPlan,
+    inspect_compare: bool,
+) -> Result<ForeignInspection, String> {
+    inspect_managed_action(repository, plan, inspect_compare, |query| {
+        let mut command = safe_gh_api_command(config, repository);
+        match query {
+            InspectionQuery::Repository => {
+                command.arg(repository.api_path(""));
+            }
+            InspectionQuery::Item(number) => {
+                command.arg(repository.api_path(&format!("/issues/{number}")));
+            }
+            InspectionQuery::Compare { base, head } => {
+                command.arg(repository.api_path(&format!("/compare/{base}...{head}")))
+                    .args(["--jq", "{total_commits, changed_files: (.files | length), head_sha: .commits[-1].sha}"]);
+            }
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("failed to execute gh: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "could not inspect {}: {}",
+                repository.selector(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(output.stdout)
+    })
+}
+
+fn managed_request_context(config: &ProxyConfig, cwd: Option<&str>) -> Result<String, String> {
+    let cwd = cwd.ok_or_else(|| "request did not include a working directory".to_string())?;
+    let resolved = resolve_container_path(config, cwd)?;
+    let relative = resolved
+        .strip_prefix(&config.workspace_root)
+        .map_err(|_| "working directory escapes the mounted workspace".to_string())?;
+    Ok(if relative.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        relative
+            .to_str()
+            .ok_or_else(|| "working directory is not valid UTF-8".to_string())?
+            .to_string()
+    })
+}
+
+fn resolve_named_grant<'a>(
+    config: &'a ProxyConfig,
+    repository: &RepositoryId,
+) -> Result<Option<&'a RepositoryGrant>, String> {
+    let Some(grant) = config
+        .grants
+        .iter()
+        .find(|grant| grant.repository.matches(repository))
+    else {
+        return Ok(None);
+    };
+    let metadata = fs::metadata(&grant.root)
+        .map_err(|error| format!("approved repository is unavailable: {error}"))?;
+    if metadata.dev() != grant.device || metadata.ino() != grant.inode {
+        return Err("approved repository directory changed after launch".to_string());
+    }
+    Ok(Some(grant))
+}
+
+struct RepositorySelection {
+    repository: Option<RepositoryId>,
+    selector_range: Option<(usize, usize)>,
+}
+
+fn legacy_repository_selection(args: &[String]) -> Result<RepositorySelection, String> {
+    let mut selected = None;
+    let mut selector_range = None;
+    let mut index = 2;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = arg.strip_prefix("--repo=") {
+            if selected.is_some() {
+                return Err("--repo may be specified at most once".to_string());
+            }
+            selected = Some(
+                strict_repository_from_selector(value)
+                    .ok_or_else(|| format!("invalid repository selector: {value}"))?,
+            );
+            selector_range = Some((index, 1));
+        } else if matches!(arg.as_str(), "--repo" | "-R") {
+            if selected.is_some() {
+                return Err("--repo may be specified at most once".to_string());
+            }
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| format!("missing value for {arg}"))?;
+            selected = Some(
+                strict_repository_from_selector(value)
+                    .ok_or_else(|| format!("invalid repository selector: {value}"))?,
+            );
+            selector_range = Some((index, 2));
+            index += 1;
+        } else if arg.starts_with('-')
+            && !arg.contains('=')
+            && write_flag_takes_value(&args[0], &args[1], extract_flag(arg))
+        {
+            index += 1;
+        }
+        index += 1;
+    }
+    for positional in write_positionals(args).unwrap_or_default() {
+        if let Some(repository) = repository_from_item_url(positional, &args[0])? {
+            if let Some(selected) = &selected
+                && !selected.matches(&repository)
+            {
+                return Err(
+                    "repository selector and item URL name different repositories".to_string(),
+                );
+            }
+            selected = Some(repository);
+        }
+    }
+    Ok(RepositorySelection {
+        repository: selected,
+        selector_range,
+    })
+}
+
+fn strip_repo_selector(args: &[String], selection: &RepositorySelection) -> Vec<String> {
+    let Some((start, length)) = selection.selector_range else {
+        return args.to_vec();
+    };
+    args.iter()
+        .enumerate()
+        .filter(|(index, _)| *index < start || *index >= start + length)
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
+#[derive(Debug)]
+struct ManagedExecution {
+    args: Vec<String>,
+    repository: RepositoryId,
+    pr_create: bool,
+}
+
+#[derive(Debug)]
+enum ManagedRoute {
+    NotManaged,
+    LaunchGrant(ManagedExecution),
+    Granted(ManagedExecution),
+    Approved(ManagedExecution),
+    Pending(String),
+}
+
+fn prefix_inspection_error(
+    repository: &RepositoryId,
+    result: Result<ForeignInspection, String>,
+) -> Result<ForeignInspection, String> {
+    result.map_err(|reason| {
+        if reason.starts_with("could not inspect ") {
+            reason
+        } else {
+            format!("could not inspect {}: {reason}", repository.selector())
+        }
+    })
+}
+
+#[cfg(test)]
+impl ManagedRoute {
+    fn unwrap(self) -> ManagedExecution {
+        match self {
+            Self::LaunchGrant(execution) | Self::Granted(execution) | Self::Approved(execution) => {
+                execution
+            }
+            Self::NotManaged | Self::Pending(_) => panic!("managed route did not execute"),
+        }
+    }
+
+    fn is_none(&self) -> bool {
+        matches!(self, Self::NotManaged)
+    }
+
+    fn is_approved(&self) -> bool {
+        matches!(self, Self::Approved(_))
+    }
+
+    fn is_granted(&self) -> bool {
+        matches!(self, Self::Granted(_))
+    }
+}
+
+fn route_managed_write(
+    args: &[String],
+    cwd: Option<&str>,
+    config: &ProxyConfig,
+    mut inspect: impl FnMut(&RepositoryId, &ManagedPlan, bool) -> Result<ForeignInspection, String>,
+) -> Result<ManagedRoute, String> {
+    let Some(command) = managed_command(args) else {
+        return Ok(ManagedRoute::NotManaged);
+    };
+    if !command.new && config.managed_gh_state.is_none() {
+        return Ok(ManagedRoute::NotManaged);
+    }
+
+    if !command.new {
+        let selection = legacy_repository_selection(args)?;
+        let Some(named_repository) = selection.repository.as_ref() else {
+            return Ok(ManagedRoute::NotManaged);
+        };
+        if let Some(grant) = resolve_named_grant(config, named_repository)? {
+            let stripped = strip_repo_selector(args, &selection);
+            if let Some(reason) = reject_reason(&stripped) {
+                return Err(reason);
+            }
+            validate_write_targets(&stripped, grant)?;
+            let mut routed = stripped;
+            append_repo_selector(&mut routed, &grant.repository);
+            return Ok(ManagedRoute::LaunchGrant(ManagedExecution {
+                args: routed,
+                repository: grant.repository.clone(),
+                pr_create: false,
+            }));
+        }
+    }
+
+    let mut plan = strict_managed_plan(args)?;
+    let repository = if let Some(repository) = plan.repository.clone() {
+        repository
+    } else if command.new {
+        resolve_grant(config, cwd)?.repository.clone()
+    } else {
+        return Ok(ManagedRoute::NotManaged);
+    };
+
+    let hosts: BTreeSet<String> = std::iter::once("github.com".to_string())
+        .chain(
+            config
+                .grants
+                .iter()
+                .map(|grant| grant.repository.host.to_ascii_lowercase()),
+        )
+        .collect();
+    if !hosts.contains(&repository.host.to_ascii_lowercase()) {
+        return Err(format!(
+            "GitHub host is not launch-approved: {}",
+            repository.host
+        ));
+    }
+
+    if let Some(grant) = resolve_named_grant(config, &repository)? {
+        let inspection = if command.group == "pr"
+            && command.subcommand == "create"
+            && !plan.values.contains_key("--base")
+        {
+            Some(prefix_inspection_error(
+                &grant.repository,
+                inspect(&grant.repository, &plan, false),
+            )?)
+        } else {
+            None
+        };
+        plan = finalize_managed_plan(
+            plan,
+            &grant.repository,
+            inspection
+                .as_ref()
+                .and_then(|value| value.default_branch.as_deref()),
+        )?;
+        let mut routed = plan.args;
+        let pr_create = command.group == "pr" && command.subcommand == "create";
+        if !pr_create {
+            append_repo_selector(&mut routed, &grant.repository);
+        }
+        return Ok(ManagedRoute::LaunchGrant(ManagedExecution {
+            args: routed,
+            repository: grant.repository.clone(),
+            pr_create,
+        }));
+    }
+
+    let Some(state) = config.managed_gh_state.as_deref() else {
+        return Err(
+            "repository is not launch-approved and managed GitHub approvals are disabled"
+                .to_string(),
+        );
+    };
+    managed_request_context(config, cwd)?;
+    validate_managed_plan_size(&plan, &repository)?;
+    let inspection = prefix_inspection_error(&repository, inspect(&repository, &plan, true))?;
+    plan = finalize_managed_plan(plan, &repository, inspection.default_branch.as_deref())?;
+    if let Some(url) = inspection.item_repository_url.as_deref() {
+        let expected = format!("/repos/{}/{}", repository.owner, repository.name);
+        if !url
+            .to_ascii_lowercase()
+            .ends_with(&expected.to_ascii_lowercase())
+        {
+            return Err("item belongs to a different repository".to_string());
+        }
+    }
+    let expected_full_name = format!("{}/{}", repository.owner, repository.name);
+    if !inspection
+        .full_name
+        .eq_ignore_ascii_case(&expected_full_name)
+    {
+        return Err(format!(
+            "repository was renamed; its current full name is {}",
+            inspection.full_name
+        ));
+    }
+    let kind = if command.target == ManagedTarget::PullRequest {
+        managed_gh::ItemKind::PullRequest
+    } else {
+        managed_gh::ItemKind::Issue
+    };
+    if let Some(is_pull_request) = inspection.item_is_pull_request {
+        match (kind, is_pull_request) {
+            (managed_gh::ItemKind::Issue, true) if command.subcommand == "comment" => {
+                return Err("target is a pull request; use gh pr comment instead".to_string());
+            }
+            (managed_gh::ItemKind::Issue, true) => {
+                return Err("target is a pull request, not an issue".to_string());
+            }
+            (managed_gh::ItemKind::PullRequest, false) => {
+                return Err("target is an issue, not a pull request".to_string());
+            }
+            _ => {}
+        }
+    }
+    let action = managed_gh::Action {
+        repository: managed_gh::Repository {
+            host: repository.host.clone(),
+            owner: repository.owner.clone(),
+            name: repository.name.clone(),
+        },
+        repository_id: inspection.repository_id,
+        item: plan.number.map(|number| managed_gh::Item {
+            number,
+            kind,
+            node_id: inspection.item_node_id.clone().unwrap_or_default(),
+        }),
+        head_sha: inspection.head_sha,
+        args: plan.args.clone(),
+    };
+    let context = managed_gh::Context {
+        repository_visibility: inspection.visibility,
+        item_title: inspection.item_title,
+        item_state: inspection.item_state,
+        commits: inspection.commits,
+        changed_files: inspection.changed_files,
+        requested_from: managed_request_context(config, cwd)?,
+        requested_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    let _guard = config.managed_gh_lock.lock().unwrap();
+    if managed_gh::is_granted(state, &action, &context.repository_visibility)? {
+        let pr_create = command.group == "pr" && command.subcommand == "create";
+        let mut execution = action.args.clone();
+        if !pr_create {
+            execution.push(format!("--repo={}", action.repository.selector()));
+        }
+        return Ok(ManagedRoute::Granted(ManagedExecution {
+            args: execution,
+            repository,
+            pr_create,
+        }));
+    }
+    if managed_gh::consume(state, &action)? {
+        let pr_create = command.group == "pr" && command.subcommand == "create";
+        let mut execution = action.args.clone();
+        if !pr_create {
+            execution.push(format!("--repo={}", action.repository.selector()));
+        }
+        return Ok(ManagedRoute::Approved(ManagedExecution {
+            args: execution,
+            repository,
+            pr_create,
+        }));
+    }
+    let handle = managed_gh::record_candidate(state, &action, &context)?;
+    Ok(ManagedRoute::Pending(handle))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2013,11 +3161,156 @@ fn denied_response(reason: String) -> Response {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct PullRequestBody {
+    title: String,
+    body: String,
+    head: String,
+    base: String,
+    draft: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PullRequestRestCall {
+    host: String,
+    path: String,
+    body: PullRequestBody,
+}
+
+fn pr_create_rest_call(
+    repository: &RepositoryId,
+    args: &[String],
+) -> Result<PullRequestRestCall, String> {
+    if args.first().map(String::as_str) != Some("pr")
+        || args.get(1).map(String::as_str) != Some("create")
+    {
+        return Err("invalid canonical pr create action".to_string());
+    }
+    let mut title = None;
+    let mut body = None;
+    let mut head = None;
+    let mut base = None;
+    let mut draft = false;
+    for arg in &args[2..] {
+        if let Some(value) = arg.strip_prefix("--title=") {
+            title = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("--body=") {
+            body = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("--head=") {
+            head = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("--base=") {
+            base = Some(value.to_string());
+        } else if arg == "--draft" {
+            draft = true;
+        } else {
+            return Err(format!("invalid canonical pr create argument: {arg}"));
+        }
+    }
+    Ok(PullRequestRestCall {
+        host: repository.host.clone(),
+        path: repository.api_path("/pulls"),
+        body: PullRequestBody {
+            title: title.ok_or("canonical pr create action omitted --title")?,
+            body: body.ok_or("canonical pr create action omitted --body")?,
+            head: head.ok_or("canonical pr create action omitted --head")?,
+            base: base.ok_or("canonical pr create action omitted --base")?,
+            draft,
+        },
+    })
+}
+
+fn execute_pr_create(config: &ProxyConfig, execution: &ManagedExecution) -> Response {
+    let call = match pr_create_rest_call(&execution.repository, &execution.args) {
+        Ok(call) => call,
+        Err(reason) => return denied_response(reason),
+    };
+    let input = match serde_json::to_vec(&call.body) {
+        Ok(input) => input,
+        Err(error) => return denied_response(format!("could not encode pull request: {error}")),
+    };
+    let mut command = safe_gh_api_command(config, &execution.repository);
+    command
+        .args([&call.path, "-X", "POST", "--input", "-"])
+        .env("GH_PROMPT_DISABLED", "1")
+        .env_remove("GH_FORCE_TTY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return denied_response(format!("failed to execute gh api: {error}")),
+    };
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(&input)
+    {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return denied_response(format!("failed to write gh api input: {error}"));
+    }
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => {
+            #[derive(Deserialize)]
+            struct CreatedPullRequest {
+                html_url: String,
+            }
+            match serde_json::from_slice::<CreatedPullRequest>(&output.stdout) {
+                Ok(created) => Response {
+                    exit_code: 0,
+                    stdout: format!("{}\n", created.html_url),
+                    stderr: String::new(),
+                },
+                Err(error) => {
+                    denied_response(format!("could not parse created pull request: {error}"))
+                }
+            }
+        }
+        Ok(output) => {
+            let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            stderr.push_str(&String::from_utf8_lossy(
+                &output.stdout[..output.stdout.len().min(4 * 1024)],
+            ));
+            Response {
+                exit_code: output.status.code().unwrap_or(1),
+                stdout: String::new(),
+                stderr,
+            }
+        }
+        Err(error) => denied_response(format!("failed to execute gh api: {error}")),
+    }
+}
+
+fn execute_gh_command(config: &ProxyConfig, args: &[String], managed: bool) -> Response {
+    let mut command = safe_gh_command(config);
+    if managed {
+        command
+            .env("GH_PROMPT_DISABLED", "1")
+            .env_remove("GH_FORCE_TTY")
+            .stdin(Stdio::null());
+    }
+    match command.args(args).output() {
+        Ok(output) => Response {
+            exit_code: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
+        Err(error) => Response {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("gh-proxy: failed to execute gh: {error}"),
+        },
+    }
+}
+
 /// Render a request for the log on a single line, so an argument cannot
 /// forge further log entries.
 fn loggable_command(args: &[String]) -> String {
+    loggable_text(&args.join(" "))
+}
+
+fn loggable_text(value: &str) -> String {
     let mut command = String::new();
-    for character in args.join(" ").chars() {
+    for character in value.chars() {
         if character.is_control() || character == '\\' {
             command.extend(character.escape_default());
         } else {
@@ -2028,6 +3321,22 @@ fn loggable_command(args: &[String]) -> String {
 }
 
 fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) -> Response {
+    handle_request_with_executors(
+        req,
+        log,
+        config,
+        |execution| execute_pr_create(config, execution),
+        |args, approved| execute_gh_command(config, args, approved),
+    )
+}
+
+fn handle_request_with_executors(
+    req: Request,
+    log: &Arc<Mutex<File>>,
+    config: &ProxyConfig,
+    execute_create: impl FnOnce(&ManagedExecution) -> Response,
+    execute_gh: impl FnOnce(&[String], bool) -> Response,
+) -> Response {
     let cmd_str = loggable_command(&req.args);
 
     if let Some(help_text) = maybe_help(&req.args) {
@@ -2043,7 +3352,10 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
         let grant = match resolve_grant(config, req.cwd.as_deref()) {
             Ok(grant) => grant,
             Err(reason) => {
-                log_line(log, &format!("DENIED  gh {} ({})", cmd_str, reason));
+                log_line(
+                    log,
+                    &format!("DENIED  gh {} ({})", cmd_str, loggable_text(&reason)),
+                );
                 return denied_response(reason);
             }
         };
@@ -2061,13 +3373,59 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
         return response;
     }
 
-    if let Some(reason) = reject_reason(&req.args) {
-        log_line(log, &format!("DENIED  gh {} ({})", cmd_str, reason));
+    let managed_route = match route_managed_write(
+        &req.args,
+        req.cwd.as_deref(),
+        config,
+        |repository, plan, compare| inspect_foreign_action(config, repository, plan, compare),
+    ) {
+        Ok(route) => route,
+        Err(reason) => {
+            log_line(
+                log,
+                &format!("DENIED  gh {cmd_str} ({})", loggable_text(&reason)),
+            );
+            return denied_response(reason);
+        }
+    };
+
+    if matches!(managed_route, ManagedRoute::NotManaged)
+        && let Some(reason) = reject_reason(&req.args)
+    {
+        log_line(
+            log,
+            &format!("DENIED  gh {} ({})", cmd_str, loggable_text(&reason)),
+        );
         return denied_response(reason);
     }
 
-    let mut execution_args = req.args.clone();
-    if req.args.len() >= 2
+    let (mut execution_args, managed, managed_execution) = match managed_route {
+        ManagedRoute::NotManaged => (req.args.clone(), false, None),
+        ManagedRoute::LaunchGrant(execution) => {
+            log_line(log, &format!("ROUTED  gh {cmd_str}"));
+            (execution.args.clone(), true, Some(execution))
+        }
+        ManagedRoute::Granted(execution) => {
+            log_line(log, &format!("GRANTED gh {cmd_str}"));
+            (execution.args.clone(), true, Some(execution))
+        }
+        ManagedRoute::Approved(execution) => {
+            log_line(log, &format!("APPROVED gh {cmd_str}"));
+            (execution.args.clone(), true, Some(execution))
+        }
+        ManagedRoute::Pending(handle) => {
+            let reason = format!(
+                "pending approval {handle}; open the T3 admin portal, approve it, and retry the same command"
+            );
+            log_line(
+                log,
+                &format!("PENDING gh {cmd_str} ({})", loggable_text(&reason)),
+            );
+            return denied_response(reason);
+        }
+    };
+    if managed_execution.is_none()
+        && req.args.len() >= 2
         && let Some(command) = find_command(&req.args[0], &req.args[1])
     {
         if command.is_write {
@@ -2079,7 +3437,10 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
             let grant = match resolve_grant(config, req.cwd.as_deref()) {
                 Ok(grant) => grant,
                 Err(reason) => {
-                    log_line(log, &format!("DENIED  gh {} ({})", cmd_str, reason));
+                    log_line(
+                        log,
+                        &format!("DENIED  gh {} ({})", cmd_str, loggable_text(&reason)),
+                    );
                     return denied_response(reason);
                 }
             };
@@ -2097,7 +3458,10 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
             execution_args = match routed {
                 Ok(args) => args,
                 Err(reason) => {
-                    log_line(log, &format!("DENIED  gh {} ({})", cmd_str, reason));
+                    log_line(
+                        log,
+                        &format!("DENIED  gh {} ({})", cmd_str, loggable_text(&reason)),
+                    );
                     return denied_response(reason);
                 }
             };
@@ -2115,7 +3479,10 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
                     );
                 }
                 Err(reason) => {
-                    log_line(log, &format!("DENIED  gh {} ({})", cmd_str, reason));
+                    log_line(
+                        log,
+                        &format!("DENIED  gh {} ({})", cmd_str, loggable_text(&reason)),
+                    );
                     return denied_response(reason);
                 }
             }
@@ -2124,28 +3491,33 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
 
     log_line(log, &format!("ALLOWED gh {}", cmd_str));
 
-    match safe_gh_command(config).args(&execution_args).output() {
-        Ok(output) => {
-            let exit_code = output.status.code().unwrap_or(1);
-            log_line(log, &format!("EXIT    gh {} -> {}", cmd_str, exit_code));
-            Response {
-                exit_code,
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            }
-        }
-        Err(e) => {
-            log_line(log, &format!("ERROR   gh {} ({})", cmd_str, e));
-            Response {
-                exit_code: 1,
-                stdout: String::new(),
-                stderr: format!("gh-proxy: failed to execute gh: {}", e),
-            }
-        }
+    if let Some(execution) = managed_execution
+        .as_ref()
+        .filter(|execution| execution.pr_create)
+    {
+        let response = execute_create(execution);
+        log_line(
+            log,
+            &format!("EXIT    gh {} -> {}", cmd_str, response.exit_code),
+        );
+        return response;
     }
+
+    let response = execute_gh(&execution_args, managed);
+    log_line(
+        log,
+        &format!("EXIT    gh {} -> {}", cmd_str, response.exit_code),
+    );
+    response
 }
 
-pub fn run(socket_path: &str, log_path: &Path, workspace_root: &Path, allow_merge: bool) {
+pub fn run(
+    socket_path: &str,
+    log_path: &Path,
+    workspace_root: &Path,
+    allow_merge: bool,
+    managed_gh_state: Option<&Path>,
+) {
     let path = Path::new(socket_path);
     let log_file = proxy_log::open(log_path).unwrap_or_else(|e| {
         eprintln!("gh-proxy: failed to open log {}: {}", log_path.display(), e);
@@ -2175,6 +3547,8 @@ pub fn run(socket_path: &str, log_path: &Path, workspace_root: &Path, allow_merg
         neutral_dir,
         grants,
         allow_merge,
+        managed_gh_state: managed_gh_state.map(Path::to_path_buf),
+        managed_gh_lock: Mutex::new(()),
     });
 
     let bound = proxy_socket::bind(path).unwrap_or_else(|e| {
@@ -2521,15 +3895,12 @@ mod tests {
         assert!(reject_reason(&strs(&["secret", "set"])).is_some());
         assert!(reject_reason(&strs(&["ssh-key", "list"])).is_some());
         assert!(reject_reason(&strs(&["gpg-key", "list"])).is_some());
-        assert!(reject_reason(&strs(&["pr", "close", "123"])).is_some());
-        assert!(reject_reason(&strs(&["pr", "edit", "123"])).is_some());
         assert!(reject_reason(&strs(&["issue", "delete", "42"])).is_some());
         assert!(reject_reason(&strs(&["repo", "create"])).is_some());
         assert!(reject_reason(&strs(&["repo", "delete"])).is_some());
         assert!(reject_reason(&strs(&["release", "create"])).is_some());
         assert!(reject_reason(&strs(&["release", "delete"])).is_some());
         assert!(reject_reason(&strs(&["run", "cancel"])).is_some());
-        assert!(reject_reason(&strs(&["pr", "create", "--title", "new PR"])).is_some());
     }
 
     #[test]
@@ -2586,9 +3957,6 @@ mod tests {
                 "github.com/owner/project",
                 "--rebase",
             ]),
-            strs(&["pr", "ready", "123", "--repo", "github.com/owner/project"]),
-            strs(&["pr", "close", "123", "--repo", "github.com/owner/project"]),
-            strs(&["pr", "reopen", "123", "--repo", "github.com/owner/project"]),
         ];
 
         for args in commands {
@@ -2663,7 +4031,7 @@ mod tests {
         let h = maybe_help(&strs(&["pr", "-h"])).unwrap();
         assert!(h.contains("list"));
         assert!(h.contains("view"));
-        assert!(!h.contains("create"));
+        assert!(h.contains("create"));
         assert!(h.contains("comment"));
 
         // Via `gh help pr`
@@ -2691,6 +4059,13 @@ mod tests {
         assert!(merge.contains("-s, --squash"));
         assert!(merge.contains("--allow-merge"));
         assert!(!merge.contains("no -R/--repo"));
+
+        let create = maybe_help(&strs(&["pr", "create", "--help"])).unwrap();
+        assert!(create.contains("--head"));
+        assert!(create.contains("-H"));
+        assert!(create.contains("branch must already be pushed"));
+        let reopen = maybe_help(&strs(&["issue", "reopen", "--help"])).unwrap();
+        assert!(reopen.contains("--comment"));
 
         // Via `gh help pr list`
         let h3 = maybe_help(&strs(&["help", "pr", "list"])).unwrap();
@@ -2723,6 +4098,8 @@ mod tests {
             workspace_root: root.clone(),
             neutral_dir: root.clone(),
             allow_merge: false,
+            managed_gh_state: None,
+            managed_gh_lock: Mutex::new(()),
             grants: vec![RepositoryGrant {
                 root,
                 handle,
@@ -2766,6 +4143,1230 @@ mod tests {
     fn ext_response(args: &[&str]) -> Option<Response> {
         let config = test_config();
         maybe_ext_command(&strs(args), &config.grants[0], &config)
+    }
+
+    fn managed_config(label: &str) -> (ProxyConfig, PathBuf) {
+        let state_root = temporary_workspace(label);
+        let state = managed_gh::prepare_state_dir(&state_root).unwrap();
+        let mut config = test_config();
+        config.managed_gh_state = Some(state);
+        (config, state_root)
+    }
+
+    fn foreign_inspection(is_pull_request: bool) -> ForeignInspection {
+        ForeignInspection {
+            repository_id: 42,
+            full_name: "other/project".to_string(),
+            visibility: "public".to_string(),
+            default_branch: Some("main".to_string()),
+            item_node_id: Some("ITEM_7".to_string()),
+            item_title: Some("Title".to_string()),
+            item_state: Some("open".to_string()),
+            item_is_pull_request: Some(is_pull_request),
+            item_repository_url: Some("https://api.github.com/repos/other/project".to_string()),
+            head_sha: None,
+            commits: None,
+            changed_files: None,
+        }
+    }
+
+    fn successful_response(stdout: String) -> Response {
+        Response {
+            exit_code: 0,
+            stdout,
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn managed_launch_route_is_not_routed_twice_when_arguments_match() {
+        let (config, root) = managed_config("single-route");
+        let response = handle_request_with_executors(
+            Request {
+                args: strs(&[
+                    "issue",
+                    "comment",
+                    "7",
+                    "--body=x",
+                    "--repo",
+                    "github.com/example/project",
+                ]),
+                cwd: None,
+            },
+            &Arc::new(Mutex::new(File::create("/dev/null").unwrap())),
+            &config,
+            |_| panic!("not pr create"),
+            |args, _| successful_response(args.join("\n")),
+        );
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.stdout.matches("--repo").count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selector_shaped_flag_value_is_not_routing_metadata() {
+        let (config, root) = managed_config("selector-value");
+        let args = strs(&[
+            "issue",
+            "edit",
+            "7",
+            "--title",
+            "--repo=example/project",
+            "--body=y",
+        ]);
+        assert!(matches!(
+            route_managed_write(&args, Some("/workspace"), &config, |_, _, _| panic!(
+                "must not inspect"
+            ))
+            .unwrap(),
+            ManagedRoute::NotManaged
+        ));
+        assert_eq!(
+            strip_repo_selector(&args, &legacy_repository_selection(&args).unwrap()),
+            args
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_launch_url_with_fragment_uses_legacy_validation() {
+        let (config, root) = managed_config("legacy-url");
+        let args = strs(&[
+            "issue",
+            "comment",
+            "https://github.com/example/project/issues/7#issuecomment-1",
+            "--body=x",
+        ]);
+        let routed =
+            route_managed_write(&args, None, &config, |_, _, _| panic!("must not inspect"))
+                .unwrap();
+        assert!(!routed.is_approved());
+        let routed = routed.unwrap();
+        assert!(
+            routed
+                .args
+                .iter()
+                .any(|arg| arg.contains("#issuecomment-1"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn denial_reason_is_single_line_in_log() {
+        let (config, root) = managed_config("log-reason");
+        let log_path = root.join("proxy.log");
+        let log = Arc::new(Mutex::new(File::create(&log_path).unwrap()));
+        let response = handle_request(
+            Request {
+                args: strs(&[
+                    "issue",
+                    "comment",
+                    "7",
+                    "--body=x",
+                    "--repo=other/evil\nAPPROVED forged",
+                ]),
+                cwd: Some("/workspace".to_string()),
+            },
+            &log,
+            &config,
+        );
+        assert_ne!(response.exit_code, 0);
+        drop(log);
+        let contents = fs::read_to_string(log_path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        assert!(contents.contains("\\nAPPROVED forged"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repository_inspection_requires_visibility_or_private() {
+        let plan = strict_managed_plan(&strs(&[
+            "issue",
+            "create",
+            "--title=x",
+            "--body=y",
+            "--repo=other/project",
+        ]))
+        .unwrap();
+        let repository = plan.repository.clone().unwrap();
+        let error = inspect_managed_action(&repository, &plan, false, |_| {
+            Ok(br#"{"id":42,"full_name":"other/project"}"#.to_vec())
+        })
+        .unwrap_err();
+        assert!(error.contains("omitted visibility and private"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_managed_context_is_rejected_before_inspection() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::symlink;
+        let root = temporary_workspace("non-utf8-context");
+        fs::create_dir_all(&root).unwrap();
+        let non_utf8 = root.join(std::ffi::OsString::from_vec(vec![b'b', 0xff]));
+        fs::create_dir(&non_utf8).unwrap();
+        symlink(&non_utf8, root.join("link")).unwrap();
+        let mut config = test_config();
+        config.workspace_root = fs::canonicalize(&root).unwrap();
+        config.managed_gh_state = Some(managed_gh::prepare_state_dir(&root.join("state")).unwrap());
+        let args = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+        let error = route_managed_write(&args, Some("/workspace/link"), &config, |_, _, _| {
+            panic!("inspection must not run for a bad cwd")
+        })
+        .unwrap_err();
+        assert!(error.contains("not valid UTF-8"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspection_failure_names_the_repository() {
+        let (config, root) = managed_config("inspection-prefix");
+        let args = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+        let error = route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+            Err("gh stderr".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "could not inspect github.com/other/project: gh stderr"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_off_preserves_foreign_repo_refusal() {
+        let response = handle_request(
+            Request {
+                args: strs(&[
+                    "issue",
+                    "comment",
+                    "7",
+                    "--body",
+                    "hello",
+                    "--repo",
+                    "other/project",
+                ]),
+                cwd: Some("/workspace".to_string()),
+            },
+            &Arc::new(Mutex::new(File::create("/dev/null").unwrap())),
+            &test_config(),
+        );
+        assert_eq!(
+            response.stderr,
+            "gh-proxy: flag not allowed for gh issue comment: --repo"
+        );
+    }
+
+    #[test]
+    fn managed_gh_approval_is_canonical_and_one_time() {
+        let (config, root) = managed_config("canonical");
+        let args = strs(&[
+            "issue",
+            "comment",
+            "007",
+            "-b",
+            "hello",
+            "-R",
+            "Other/Project",
+        ]);
+        let pending = route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap();
+        assert!(matches!(pending, ManagedRoute::Pending(_)));
+        let state = config.managed_gh_state.as_deref().unwrap();
+        let candidates = managed_gh::list_candidates(state).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].1.action.args,
+            strs(&["issue", "comment", "7", "--body=hello"])
+        );
+        managed_gh::approve(state, &candidates[0].0).unwrap();
+        let routed = route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap();
+        assert!(routed.is_approved());
+        let routed = routed.unwrap();
+        assert_eq!(
+            routed.args,
+            strs(&[
+                "issue",
+                "comment",
+                "7",
+                "--body=hello",
+                "--repo=github.com/other/project",
+            ])
+        );
+        assert!(matches!(
+            route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+                Ok(foreign_inspection(false))
+            })
+            .unwrap(),
+            ManagedRoute::Pending(_)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_grant_executes_without_consuming_approval_and_is_command_scoped() {
+        let (config, root) = managed_config("persistent-grant");
+        let approved_args = strs(&[
+            "issue",
+            "comment",
+            "7",
+            "--body=approved",
+            "--repo=other/project",
+        ]);
+        route_managed_write(&approved_args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap();
+        let state = config.managed_gh_state.as_deref().unwrap();
+        let approval_handle = managed_gh::list_candidates(state).unwrap().remove(0).0;
+        managed_gh::approve(state, &approval_handle).unwrap();
+
+        let grant_args = strs(&[
+            "issue",
+            "comment",
+            "7",
+            "--body=grant",
+            "--repo=other/project",
+        ]);
+        route_managed_write(&grant_args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap();
+        let grant_candidate = managed_gh::list_candidates(state).unwrap().remove(0).0;
+        managed_gh::grant_candidate(
+            state,
+            &grant_candidate,
+            managed_gh::RequestedGrantScope::Command,
+        )
+        .unwrap();
+
+        let route = route_managed_write(&approved_args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap();
+        assert!(route.is_granted());
+        assert_eq!(managed_gh::list_approvals(state).unwrap().len(), 1);
+
+        let edit = strs(&[
+            "issue",
+            "edit",
+            "7",
+            "--title=changed",
+            "--repo=other/project",
+        ]);
+        assert!(matches!(
+            route_managed_write(&edit, Some("/workspace"), &config, |_, _, _| {
+                Ok(foreign_inspection(false))
+            })
+            .unwrap(),
+            ManagedRoute::Pending(_)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_grant_identity_mismatches_fall_back_to_pending() {
+        let (config, root) = managed_config("grant-identity-mismatch");
+        let args = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+        route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap();
+        let state = config.managed_gh_state.as_deref().unwrap();
+        let handle = managed_gh::list_candidates(state).unwrap().remove(0).0;
+        managed_gh::grant_candidate(state, &handle, managed_gh::RequestedGrantScope::Command)
+            .unwrap();
+
+        assert!(matches!(
+            route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+                let mut inspection = foreign_inspection(false);
+                inspection.repository_id = 43;
+                Ok(inspection)
+            })
+            .unwrap(),
+            ManagedRoute::Pending(_)
+        ));
+        assert!(matches!(
+            route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+                let mut inspection = foreign_inspection(false);
+                inspection.visibility = "private".to_string();
+                Ok(inspection)
+            })
+            .unwrap(),
+            ManagedRoute::Pending(_)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_grant_does_not_bypass_strict_parsing() {
+        let (config, root) = managed_config("grant-strict-parser");
+        let args = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+        route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap();
+        let state = config.managed_gh_state.as_deref().unwrap();
+        let handle = managed_gh::list_candidates(state).unwrap().remove(0).0;
+        managed_gh::grant_candidate(state, &handle, managed_gh::RequestedGrantScope::Command)
+            .unwrap();
+
+        let refused_flag = strs(&[
+            "issue",
+            "comment",
+            "7",
+            "--body=x",
+            "--web",
+            "--repo=other/project",
+        ]);
+        assert!(
+            route_managed_write(&refused_flag, Some("/workspace"), &config, |_, _, _| {
+                panic!("refused flags must not reach inspection")
+            })
+            .is_err()
+        );
+        let invisible = strs(&[
+            "issue",
+            "comment",
+            "7",
+            "--body=x\u{200b}y",
+            "--repo=other/project",
+        ]);
+        assert!(
+            route_managed_write(&invisible, Some("/workspace"), &config, |_, _, _| {
+                panic!("invisible text must not reach inspection")
+            })
+            .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pr_merge_is_refused_for_a_persistently_granted_repository() {
+        let (mut config, root) = managed_config("grant-no-merge");
+        let grant_args = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+        route_managed_write(&grant_args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap();
+        let state = config.managed_gh_state.as_deref().unwrap();
+        let handle = managed_gh::list_candidates(state).unwrap().remove(0).0;
+        managed_gh::grant_candidate(state, &handle, managed_gh::RequestedGrantScope::Repository)
+            .unwrap();
+        config.allow_merge = true;
+        let response = handle_request(
+            Request {
+                args: strs(&["pr", "merge", "7", "--squash", "--repo=other/project"]),
+                cwd: Some("/workspace".to_string()),
+            },
+            &Arc::new(Mutex::new(File::create("/dev/null").unwrap())),
+            &config,
+        );
+        assert_ne!(response.exit_code, 0);
+        assert!(response.stderr.contains("outside the current repository"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_changed_argument_does_not_match_approval() {
+        let (config, root) = managed_config("changed");
+        let original = strs(&[
+            "pr",
+            "comment",
+            "7",
+            "--body=original",
+            "--repo=other/project",
+        ]);
+        route_managed_write(&original, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(true))
+        })
+        .unwrap();
+        let state = config.managed_gh_state.as_deref().unwrap();
+        let handle = managed_gh::list_candidates(state).unwrap().remove(0).0;
+        managed_gh::approve(state, &handle).unwrap();
+        let changed = strs(&[
+            "pr",
+            "comment",
+            "7",
+            "--body=changed",
+            "--repo=other/project",
+        ]);
+        assert!(matches!(
+            route_managed_write(&changed, Some("/workspace"), &config, |_, _, _| {
+                Ok(foreign_inspection(true))
+            })
+            .unwrap(),
+            ManagedRoute::Pending(_)
+        ));
+        assert!(
+            route_managed_write(&original, Some("/workspace"), &config, |_, _, _| {
+                Ok(foreign_inspection(true))
+            })
+            .unwrap()
+            .is_approved()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_strict_parser_refuses_unsafe_constructs() {
+        let hosts = BTreeSet::from(["github.com".to_string()]);
+        for args in [
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "-tx",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--unknown=x",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title",
+                "--body=y",
+                "--repo=other/project",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--web",
+            ],
+            vec![
+                "issue",
+                "comment",
+                "7",
+                "--body=x",
+                "--repo=other/project",
+                "--edit-last",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--template=x",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--body-file=x",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--project=x",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--label=x",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--assignee=x",
+            ],
+            vec![
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--milestone=x",
+            ],
+            vec![
+                "issue",
+                "close",
+                "7",
+                "--repo=other/project",
+                "--duplicate-of=8",
+            ],
+        ] {
+            assert!(
+                strict_foreign_plan(&strs(&args), &hosts).is_err(),
+                "{}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn managed_gh_strict_parser_refuses_every_excluded_flag() {
+        let hosts = BTreeSet::from(["github.com".to_string()]);
+        for flag in [
+            "--web",
+            "-w",
+            "--edit-last",
+            "--template=x",
+            "-T",
+            "--body-file=x",
+            "-F",
+            "--project=x",
+            "-p",
+            "--label=x",
+            "-l",
+            "--assignee=x",
+            "-a",
+            "--milestone=x",
+            "-m",
+            "--duplicate-of=8",
+        ] {
+            let mut args = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+            args.push(flag.to_string());
+            assert!(strict_foreign_plan(&args, &hosts).is_err(), "{flag}");
+        }
+    }
+
+    #[test]
+    fn managed_gh_strict_parser_enforces_targets_and_values() {
+        let hosts = BTreeSet::from(["github.com".to_string()]);
+        for args in [
+            &["issue", "comment", "#5", "--body=x", "--repo=other/project"][..],
+            &[
+                "issue",
+                "comment",
+                "branch",
+                "--body=x",
+                "--repo=other/project",
+            ],
+            &["issue", "comment", "0", "--body=x", "--repo=other/project"],
+            &[
+                "issue",
+                "comment",
+                "2147483648",
+                "--body=x",
+                "--repo=other/project",
+            ],
+            &[
+                "issue",
+                "comment",
+                "7",
+                "8",
+                "--body=x",
+                "--repo=other/project",
+            ],
+            &["issue", "comment", "7", "--body=", "--repo=other/project"],
+            &[
+                "issue",
+                "close",
+                "7",
+                "--reason=wontfix",
+                "--repo=other/project",
+            ],
+            &["issue", "edit", "7", "--repo=other/project"],
+            &[
+                "issue",
+                "create",
+                "extra",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+            ],
+            &[
+                "issue",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--repo=other/project",
+                "--repo=other/project",
+            ],
+            &[
+                "issue",
+                "comment",
+                "https://github.com/third/project/issues/7",
+                "--body=x",
+                "--repo=other/project",
+            ],
+            &[
+                "issue",
+                "comment",
+                "http://github.com/other/project/issues/7",
+                "--body=x",
+            ],
+            &[
+                "issue",
+                "comment",
+                "https://evil.example/other/project/issues/7",
+                "--body=x",
+            ],
+        ] {
+            assert!(
+                strict_foreign_plan(&strs(args), &hosts).is_err(),
+                "{}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn new_managed_commands_use_one_strict_command_table() {
+        for args in [
+            &[
+                "pr",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--head=topic",
+                "--base=main",
+                "--draft",
+            ][..],
+            &["pr", "edit", "7", "--title=x"],
+            &["pr", "ready", "7", "--undo"],
+            &["pr", "close", "7", "--comment=x"],
+            &["pr", "reopen", "7"],
+            &["issue", "reopen", "7", "-c", "x"],
+        ] {
+            assert!(
+                strict_managed_plan(&strs(args)).is_ok(),
+                "{}",
+                args.join(" ")
+            );
+        }
+        for args in [
+            &[
+                "pr",
+                "create",
+                "--title=x",
+                "--body=y",
+                "--head=topic",
+                "--draft=yes",
+            ][..],
+            &["pr", "edit", "7"],
+            &["pr", "ready", "branch"],
+            &["pr", "close", "7", "--delete-branch"],
+            &["pr", "reopen", "7", "--body=x"],
+            &["issue", "reopen", "7", "--web"],
+        ] {
+            assert!(
+                strict_managed_plan(&strs(args)).is_err(),
+                "{}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn conservative_ref_names_are_table_driven() {
+        for accepted in ["main", "feature/x", "a-b_c.d+e@f", "x.locked"] {
+            assert!(valid_ref_name(accepted), "{accepted}");
+        }
+        for refused in [
+            "", "-x", "/x", ".x", "x/", "x.", "x.lock", "x..y", "x//y", "x@{y", "x:y", "x y",
+        ] {
+            assert!(!valid_ref_name(refused), "{refused}");
+        }
+        assert!(valid_head("owner:feature/x"));
+        assert!(!valid_head("bad/owner:feature"));
+        assert!(!valid_head("owner:bad:branch"));
+        assert!(!valid_ref_name(&"x".repeat(256)));
+    }
+
+    fn pull_request_create_inspection(sha: &str) -> ForeignInspection {
+        ForeignInspection {
+            repository_id: 42,
+            full_name: "other/project".to_string(),
+            visibility: "private".to_string(),
+            default_branch: Some("main".to_string()),
+            item_node_id: None,
+            item_title: None,
+            item_state: None,
+            item_is_pull_request: None,
+            item_repository_url: None,
+            head_sha: Some(sha.to_string()),
+            commits: Some(2),
+            changed_files: Some(3),
+        }
+    }
+
+    #[test]
+    fn pr_create_action_changes_when_head_sha_changes() {
+        let (config, root) = managed_config("head-sha");
+        let args = strs(&[
+            "pr",
+            "create",
+            "--title=x",
+            "--body=y",
+            "--head=topic",
+            "--base=main",
+            "--repo=other/project",
+        ]);
+        assert!(matches!(
+            route_managed_write(&args, Some("/workspace"), &config, |_, _, compare| {
+                assert!(compare);
+                Ok(pull_request_create_inspection("aaa"))
+            })
+            .unwrap(),
+            ManagedRoute::Pending(_)
+        ));
+        let state = config.managed_gh_state.as_deref().unwrap();
+        let handle = managed_gh::list_candidates(state).unwrap().remove(0).0;
+        managed_gh::approve(state, &handle).unwrap();
+        assert!(matches!(
+            route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+                Ok(pull_request_create_inspection("bbb"))
+            })
+            .unwrap(),
+            ManagedRoute::Pending(_)
+        ));
+        assert!(matches!(
+            route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+                Ok(pull_request_create_inspection("aaa"))
+            })
+            .unwrap(),
+            ManagedRoute::Approved(_)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pr_create_rest_translation_is_exact() {
+        let repository = RepositoryId {
+            host: "github.example".to_string(),
+            owner: "o".to_string(),
+            name: "n".to_string(),
+        };
+        let call = pr_create_rest_call(
+            &repository,
+            &strs(&[
+                "pr",
+                "create",
+                "--title=Title",
+                "--body=Body",
+                "--head=alice:topic",
+                "--base=main",
+                "--draft",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(call.host, "github.example");
+        assert_eq!(call.path, "/repos/o/n/pulls");
+        assert_eq!(
+            call.body,
+            PullRequestBody {
+                title: "Title".to_string(),
+                body: "Body".to_string(),
+                head: "alice:topic".to_string(),
+                base: "main".to_string(),
+                draft: true,
+            }
+        );
+    }
+
+    #[test]
+    fn omitted_pr_base_uses_inspected_default_on_both_paths() {
+        let config = test_config();
+        let args = strs(&[
+            "pr",
+            "create",
+            "--title=x",
+            "--body=y",
+            "--head=topic",
+            "--repo=example/project",
+        ]);
+        let routed = route_managed_write(&args, None, &config, |_, _, compare| {
+            assert!(!compare);
+            let mut inspection = pull_request_create_inspection("");
+            inspection.full_name = "example/project".to_string();
+            inspection.head_sha = None;
+            inspection.commits = None;
+            inspection.changed_files = None;
+            Ok(inspection)
+        })
+        .unwrap()
+        .unwrap();
+        assert!(routed.pr_create);
+        assert!(routed.args.contains(&"--base=main".to_string()));
+
+        let (managed, root) = managed_config("foreign-default-base");
+        let foreign = strs(&[
+            "pr",
+            "create",
+            "--title=x",
+            "--body=y",
+            "--head=topic",
+            "--repo=other/project",
+        ]);
+        assert!(matches!(
+            route_managed_write(&foreign, Some("/workspace"), &managed, |_, _, _| {
+                Ok(pull_request_create_inspection("abc"))
+            })
+            .unwrap(),
+            ManagedRoute::Pending(_)
+        ));
+        let candidate = managed_gh::list_candidates(managed.managed_gh_state.as_deref().unwrap())
+            .unwrap()
+            .remove(0)
+            .1;
+        assert!(candidate.action.args.contains(&"--base=main".to_string()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_command_launch_routing_works_with_managed_gh_off() {
+        let config = test_config();
+        let args = strs(&["pr", "edit", "7", "--title=x", "--repo=example/project"]);
+        let routed =
+            route_managed_write(&args, None, &config, |_, _, _| panic!("must not inspect"))
+                .unwrap();
+        assert!(!routed.is_approved());
+        let routed = routed.unwrap();
+        assert_eq!(
+            routed.args,
+            strs(&[
+                "pr",
+                "edit",
+                "7",
+                "--title=x",
+                "--repo",
+                "github.com/example/project"
+            ])
+        );
+    }
+
+    #[test]
+    fn new_foreign_command_is_refused_with_managed_gh_off() {
+        let error = route_managed_write(
+            &strs(&["pr", "reopen", "7", "--repo=other/project"]),
+            Some("/workspace"),
+            &test_config(),
+            |_, _, _| panic!("must not inspect"),
+        )
+        .unwrap_err();
+        assert!(error.contains("managed GitHub approvals are disabled"));
+    }
+
+    #[test]
+    fn item_kind_and_repository_ownership_are_both_checked() {
+        let (config, root) = managed_config("item-owner");
+        let args = strs(&["pr", "reopen", "7", "--repo=other/project"]);
+        let kind_error = route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+            Ok(foreign_inspection(false))
+        })
+        .unwrap_err();
+        assert!(kind_error.contains("target is an issue"));
+        let issue_args = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+        let ownership_error =
+            route_managed_write(&issue_args, Some("/workspace"), &config, |_, _, _| {
+                let mut inspection = foreign_inspection(false);
+                inspection.item_repository_url =
+                    Some("https://api.github.com/repos/elsewhere/project".to_string());
+                Ok(inspection)
+            })
+            .unwrap_err();
+        assert!(ownership_error.contains("different repository"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compare_inspection_uses_default_base_and_records_counts() {
+        let plan = strict_managed_plan(&strs(&[
+            "pr",
+            "create",
+            "--title=x",
+            "--body=y",
+            "--head=topic",
+            "--repo=other/project",
+        ]))
+        .unwrap();
+        let repository = plan.repository.clone().unwrap();
+        let inspection = inspect_managed_action(&repository, &plan, true, |query| match query {
+            InspectionQuery::Repository => Ok(br#"{"id":42,"full_name":"other/project","visibility":"private","default_branch":"trunk"}"#.to_vec()),
+            InspectionQuery::Compare { base, head } => {
+                assert_eq!(base, "trunk"); assert_eq!(head, "topic");
+                Ok(br#"{"total_commits":2,"changed_files":3,"head_sha":"abc"}"#.to_vec())
+            }
+            InspectionQuery::Item(_) => panic!("pr create has no item"),
+        }).unwrap();
+        assert_eq!(inspection.head_sha.as_deref(), Some("abc"));
+        assert_eq!(inspection.commits, Some(2));
+        assert_eq!(inspection.changed_files, Some(3));
+    }
+
+    #[test]
+    fn compare_inspection_rejects_invalid_default_base_before_compare() {
+        let plan = strict_managed_plan(&strs(&[
+            "pr",
+            "create",
+            "--title=x",
+            "--body=y",
+            "--head=topic",
+            "--repo=other/project",
+        ]))
+        .unwrap();
+        let repository = plan.repository.clone().unwrap();
+        let error = inspect_managed_action(&repository, &plan, true, |query| match query {
+            InspectionQuery::Repository => Ok(br#"{"id":42,"full_name":"other/project","visibility":"private","default_branch":"../../pulls"}"#.to_vec()),
+            InspectionQuery::Compare { .. } => panic!("invalid base must not reach comparison"),
+            InspectionQuery::Item(_) => panic!("pr create has no item"),
+        })
+        .unwrap_err();
+        assert!(error.contains("default branch is not a valid conservative ref name"));
+    }
+
+    #[test]
+    fn compare_inspection_rejects_more_than_250_commits() {
+        let plan = strict_managed_plan(&strs(&[
+            "pr",
+            "create",
+            "--title=x",
+            "--body=y",
+            "--head=topic",
+            "--base=main",
+            "--repo=other/project",
+        ]))
+        .unwrap();
+        let repository = plan.repository.clone().unwrap();
+        let error = inspect_managed_action(&repository, &plan, true, |query| match query {
+            InspectionQuery::Repository => {
+                Ok(br#"{"id":42,"full_name":"other/project","visibility":"private"}"#.to_vec())
+            }
+            InspectionQuery::Compare { .. } => {
+                Ok(br#"{"total_commits":251,"changed_files":3,"head_sha":"wrong"}"#.to_vec())
+            }
+            InspectionQuery::Item(_) => panic!("pr create has no item"),
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "pull request has more than 250 commits; open it on GitHub"
+        );
+    }
+
+    #[test]
+    fn foreign_canonical_size_is_checked_before_and_after_inspection() {
+        let (config, root) = managed_config("size-before-inspection");
+        let oversized = vec![
+            "pr".to_string(),
+            "create".to_string(),
+            "--title=x".to_string(),
+            format!("--body={}", "x".repeat(16 * 1024)),
+            "--head=topic".to_string(),
+            "--repo=other/project".to_string(),
+        ];
+        let mut inspected = false;
+        let error = route_managed_write(&oversized, Some("/workspace"), &config, |_, _, _| {
+            inspected = true;
+            Ok(pull_request_create_inspection("abc"))
+        })
+        .unwrap_err();
+        assert!(error.contains("16 KiB"));
+        assert!(!inspected);
+
+        let near_limit = vec![
+            "pr".to_string(),
+            "create".to_string(),
+            "--title=x".to_string(),
+            format!("--body={}", "x".repeat(16_200)),
+            "--head=topic".to_string(),
+            "--repo=other/project".to_string(),
+        ];
+        let error = route_managed_write(&near_limit, Some("/workspace"), &config, |_, _, _| {
+            let mut inspection = pull_request_create_inspection("abc");
+            inspection.default_branch = Some("a".repeat(255));
+            Ok(inspection)
+        })
+        .unwrap_err();
+        assert!(error.contains("16 KiB"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_text_policy_and_size_are_enforced() {
+        for character in [
+            '\0',
+            '\u{001f}',
+            '\u{007f}',
+            '\u{009f}',
+            '\u{00ad}',
+            '\u{061c}',
+            '\u{180e}',
+            '\u{200b}',
+            '\u{200f}',
+            '\u{2028}',
+            '\u{202f}',
+            '\u{2060}',
+            '\u{206f}',
+            '\u{feff}',
+            '\u{fff9}',
+            '\u{fffb}',
+            '\u{fe00}',
+            '\u{fe0e}',
+            '\u{e0000}',
+            '\u{e0fff}',
+            '\u{e0100}',
+            '\u{e01ef}',
+        ] {
+            assert!(validate_managed_text("--body", &format!("a{character}b")).is_err());
+        }
+        assert!(validate_managed_text("--body", "line one\nline\ttwo\u{fe0f}").is_ok());
+
+        let hosts = BTreeSet::from(["github.com".to_string()]);
+        let oversized = "x".repeat(16 * 1024);
+        assert!(
+            strict_foreign_plan(
+                &[
+                    "issue".to_string(),
+                    "create".to_string(),
+                    "--title=x".to_string(),
+                    format!("--body={oversized}"),
+                    "--repo=other/project".to_string(),
+                ],
+                &hosts,
+            )
+            .unwrap_err()
+            .contains("16 KiB")
+        );
+    }
+
+    #[test]
+    fn managed_gh_enforces_item_kind_and_current_repository_name() {
+        let (config, root) = managed_config("inspection");
+        let issue = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+        for args in [
+            issue.clone(),
+            strs(&["issue", "close", "7", "--repo=other/project"]),
+            strs(&["issue", "edit", "7", "--title=x", "--repo=other/project"]),
+        ] {
+            assert!(
+                route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+                    Ok(foreign_inspection(true))
+                })
+                .is_err()
+            );
+        }
+        let pr = strs(&["pr", "comment", "7", "--body=x", "--repo=other/project"]);
+        assert!(
+            route_managed_write(&pr, Some("/workspace"), &config, |_, _, _| {
+                Ok(foreign_inspection(false))
+            })
+            .unwrap_err()
+            .contains("target is an issue")
+        );
+        assert!(
+            route_managed_write(&issue, Some("/workspace"), &config, |_, _, _| {
+                let mut inspection = foreign_inspection(false);
+                inspection.full_name = "other/renamed".to_string();
+                Ok(inspection)
+            })
+            .unwrap_err()
+            .contains("other/renamed")
+        );
+        assert!(
+            managed_gh::list_candidates(config.managed_gh_state.as_deref().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_inspection_failure_records_nothing() {
+        let (config, root) = managed_config("failure");
+        let args = strs(&["issue", "comment", "7", "--body=x", "--repo=other/project"]);
+        assert!(
+            route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+                Err("inspection failed".to_string())
+            })
+            .is_err()
+        );
+        assert!(
+            managed_gh::list_candidates(config.managed_gh_state.as_deref().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_gh_launch_grant_routes_without_approval() {
+        let (config, root) = managed_config("grant");
+        let args = strs(&[
+            "issue",
+            "comment",
+            "7",
+            "--body=x",
+            "--repo=example/project",
+        ]);
+        let route = route_managed_write(&args, Some("/workspace"), &config, |_, _, _| {
+            panic!("launch grants must not be inspected")
+        })
+        .unwrap();
+        assert!(!route.is_approved());
+        let route = route.unwrap();
+        assert_eq!(
+            route.args,
+            strs(&[
+                "issue",
+                "comment",
+                "7",
+                "--body=x",
+                "--repo",
+                "github.com/example/project",
+            ])
+        );
+        assert!(
+            managed_gh::list_candidates(config.managed_gh_state.as_deref().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disallowed_writes_never_enter_managed_gh() {
+        let (config, root) = managed_config("disallowed");
+        for args in [
+            &["pr", "merge", "7", "--squash", "--repo=other/project"][..],
+            &["run", "rerun", "7", "--repo=other/project"],
+            &["ext", "milestone-create", "v1", "--repo=other/project"],
+        ] {
+            assert!(
+                route_managed_write(&strs(args), Some("/workspace"), &config, |_, _, _| {
+                    panic!("disallowed command was inspected")
+                })
+                .unwrap()
+                .is_none()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2857,6 +5458,8 @@ mod tests {
             workspace_root,
             grants,
             allow_merge: false,
+            managed_gh_state: None,
+            managed_gh_lock: Mutex::new(()),
         };
         assert_eq!(
             resolve_grant(&config, Some("/workspace/one"))

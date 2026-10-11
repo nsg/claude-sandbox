@@ -422,7 +422,11 @@ fn temporary_remote_name() -> Result<String, String> {
 }
 
 fn random_hex() -> Result<String, String> {
-    let mut bytes = [0_u8; 16];
+    random_hex_bytes(16)
+}
+
+pub(crate) fn random_hex_bytes(length: usize) -> Result<String, String> {
+    let mut bytes = vec![0_u8; length];
     File::open("/dev/urandom")
         .and_then(|mut random| random.read_exact(&mut bytes))
         .map_err(|error| format!("could not read secure randomness: {error}"))?;
