@@ -682,6 +682,12 @@ const COMMANDS: &[CommandDef] = &[
         allowed_flags: &["--failed", "--job", "-j", "--debug"],
     },
     CommandDef {
+        group: "run",
+        subcommand: "cancel",
+        is_write: true,
+        allowed_flags: &[],
+    },
+    CommandDef {
         group: "issue",
         subcommand: "edit",
         is_write: true,
@@ -1765,6 +1771,13 @@ fn validate_write_targets(args: &[String], grant: &RepositoryGrant) -> Result<()
             .try_for_each(|target| validate_item_target(target, "issue", grant, false)),
         ("run", "rerun")
             if positionals.len() == 1
+                && positionals[0].bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            Ok(())
+        }
+        ("run", "cancel")
+            if positionals.len() == 1
+                && !positionals[0].is_empty()
                 && positionals[0].bytes().all(|byte| byte.is_ascii_digit()) =>
         {
             Ok(())
@@ -3816,6 +3829,7 @@ mod tests {
         assert!(reject_reason(&strs(&["issue", "edit", "42", "--title", "new"])).is_none());
         assert!(reject_reason(&strs(&["run", "rerun", "12345"])).is_none());
         assert!(reject_reason(&strs(&["run", "rerun", "12345", "--failed"])).is_none());
+        assert!(reject_reason(&strs(&["run", "cancel", "12345"])).is_none());
         assert!(
             reject_reason(&strs(&[
                 "issue",
@@ -3848,6 +3862,7 @@ mod tests {
         assert!(reject_reason(&strs(&["issue", "close", "42", "-R", "other/repo"])).is_some());
         assert!(reject_reason(&strs(&["issue", "edit", "42", "--repo", "other/repo"])).is_some());
         assert!(reject_reason(&strs(&["run", "rerun", "1", "-R", "other/repo"])).is_some());
+        assert!(reject_reason(&strs(&["run", "cancel", "1", "-R", "other/repo"])).is_some());
     }
 
     #[test]
@@ -3900,7 +3915,7 @@ mod tests {
         assert!(reject_reason(&strs(&["repo", "delete"])).is_some());
         assert!(reject_reason(&strs(&["release", "create"])).is_some());
         assert!(reject_reason(&strs(&["release", "delete"])).is_some());
-        assert!(reject_reason(&strs(&["run", "cancel"])).is_some());
+        assert!(reject_reason(&strs(&["run", "delete", "1"])).is_some());
     }
 
     #[test]
@@ -5356,6 +5371,8 @@ mod tests {
         for args in [
             &["pr", "merge", "7", "--squash", "--repo=other/project"][..],
             &["run", "rerun", "7", "--repo=other/project"],
+            &["run", "cancel", "7"],
+            &["run", "cancel", "7", "--repo=other/project"],
             &["ext", "milestone-create", "v1", "--repo=other/project"],
         ] {
             assert!(
@@ -5521,6 +5538,58 @@ mod tests {
             .is_err()
         );
         assert!(validate_write_targets(&strs(&["run", "rerun", "not-a-run-id"]), grant).is_err());
+    }
+
+    #[test]
+    fn run_cancel_routes_only_one_numeric_id_to_the_launch_grant() {
+        let config = test_config();
+        let log = Arc::new(Mutex::new(File::create("/dev/null").unwrap()));
+        let response = handle_request_with_executors(
+            Request {
+                args: strs(&["run", "cancel", "12345"]),
+                cwd: Some("/workspace".to_string()),
+            },
+            &log,
+            &config,
+            |_| panic!("run cancel must not use pull request creation"),
+            |args, approved| {
+                assert!(!approved);
+                successful_response(args.join("\n"))
+            },
+        );
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(
+            response.stdout,
+            strs(&[
+                "run",
+                "cancel",
+                "12345",
+                "--repo",
+                "github.com/example/project"
+            ])
+            .join("\n")
+        );
+
+        let grant = &config.grants[0];
+        for args in [
+            &["run", "cancel", "1", "2"][..],
+            &["run", "cancel", "not-a-number"],
+            &["run", "cancel", "1", "--force"],
+            &["run", "cancel", "1", "--repo", "other/project"],
+        ] {
+            let args = strs(args);
+            assert!(
+                reject_reason(&args).is_some() || validate_write_targets(&args, grant).is_err(),
+                "gh {}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn run_cancel_rejects_empty_id() {
+        let config = test_config();
+        assert!(validate_write_targets(&strs(&["run", "cancel", ""]), &config.grants[0]).is_err());
     }
 
     #[test]

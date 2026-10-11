@@ -519,7 +519,7 @@ It is an exact command that returns only the authenticated login; all other
 |-------|----------|
 | `pr` | `create`, `comment`, `edit`, `ready`, `close`, `reopen`, `merge` (only with `--allow-merge`) |
 | `issue` | `create`, `comment`, `close`, `edit`, `reopen` |
-| `run` | `rerun` |
+| `run` | `rerun`, `cancel` |
 
 `gh pr create` requires an explicit `--head` for an already-pushed branch. The
 proxy resolves the default base when omitted and creates the pull request with
