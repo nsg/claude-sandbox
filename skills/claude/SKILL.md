@@ -60,7 +60,7 @@ Use `--bg` only when detached-session management is specifically useful, primari
 - State inherited dirty-tree state and forbid discarding unrelated changes.
 - Define the exact scope, exclusions, constraints, gates, and final report format.
 - Tell the delegate whether it may edit, commit, push, contact external systems, or start more agents.
-- Use Fable for architecture and arbitration, Opus for design-sensitive implementation or critique, Sonnet for ordinary work and legwork, and Haiku only for simple operations; consult `delegate` for contested routing.
+- Use Fable for architecture and arbitration, Opus at high effort for implementation — above all where the brief leaves decisions open — and for critiquing OpenAI-written code, Sonnet for legwork, and Haiku only for simple operations; consult `delegate` for contested routing.
 - Treat the report as a claim, not proof. Inspect the diff and rerun the relevant checks in the orchestrating harness before accepting or committing changes.
 
 ## Failure modes

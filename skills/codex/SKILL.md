@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Delegate implementation or review work to OpenAI GPT-6 Astra and GPT-5.6 models (Sol/Terra/Luna) via the Codex CLI — invocation pattern, sandbox limits, briefing style, verification split
+description: Delegate implementation or review work to OpenAI GPT-6 models (Astra/Sol/Luna) via the Codex CLI — invocation pattern, sandbox limits, briefing style, verification split
 ---
 
 # Codex Delegation
@@ -9,8 +9,8 @@ Run OpenAI models non-interactively through `codex exec` to offload work from th
 
 ## Before launching: check the OpenAI pool
 
-Every `codex exec` spends the OpenAI weekly quota, and Astra drains it two to
-three times faster than `sol`. Read usage with the `plan-usage` skill before
+Every `codex exec` spends the OpenAI weekly quota, and Astra drains it four to
+five times faster than `sol`. Read usage with the `plan-usage` skill before
 launching (figures under an hour old in the conversation will do) and apply the
 **Live Headroom** rules in `delegate`:
 
@@ -30,14 +30,14 @@ S=<scratchpad>
 codex exec --skip-git-repo-check --sandbox workspace-write \
   -c sandbox_workspace_write.network_access=true \
   -c 'approval_policy="never"' \
-  -m gpt-5.6-sol -c model_reasoning_effort=high \
+  -m gpt-6.1-sol -c model_reasoning_effort=high \
   -o $S/report.md - < $S/brief.md > $S/log.txt 2>&1
 ```
 
 - **Launch from the orchestrator's own background Bash** (`run_in_background: true`), never from inside a subagent — a codex process started by a subagent dies when that subagent's turn ends. The harness completion notification replaces any watcher; do not poll.
 - `-o <file>` writes codex's final message to a file, keeping a long report out of context until deliberately read.
 - Write the brief to a file and pipe it via `- < brief.md`; don't inline large prompts as shell arguments.
-- Reasoning effort: `-c model_reasoning_effort=high|medium|low` (also `xhigh`).
+- Reasoning effort: `-c model_reasoning_effort=high|medium|low`. Always pass it — `gpt-6.1-sol` defaults to `low`. `xhigh` and `max` exist but burn quota fast; reach for one only when the extra thinking is motivated, and never use `ultra`.
 - `-m gpt-6-astra` takes the same flags. `high` is its token-efficient setting; `xhigh` erases that efficiency, so use it only on a problem `high` has already failed on. Its sandbox escalations pass through Codex's automatic approval reviewer, which can reject an action `sol` would have been allowed.
 - Ensure the shell cwd is the target repo before launching; `--sandbox workspace-write` scopes writes to cwd, while the paired network override deliberately allows unrestricted outbound access.
 - For read-only review work, omit `--sandbox` — the default read-only sandbox suffices (this is the consensus-review pattern).

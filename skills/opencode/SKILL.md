@@ -7,19 +7,19 @@ description: Delegate work to open-weight models via the opencode CLI on the Oll
 
 Run open-weight models non-interactively through `opencode run`, billed to the Ollama subscription (separate from both the Anthropic plan and the OpenAI/codex one). Which model to pick is ranked in the `delegate` skill; this skill is the how; behavior below was verified live on opencode 1.18.15.
 
-These models do not write code — send them bulk non-code work (logs, summaries, research, prose) and route anything that ends up committed to codex or an Anthropic model instead.
+These models write simple code only — boilerplate and scaffolding filled in from a narrow brief — and an Anthropic or OpenAI model checks it before anything is committed. Complex or correctness-critical code goes to codex or an Anthropic model; otherwise send them bulk non-code work (logs, summaries, research, prose).
 
 Before launching, read usage with the `plan-usage` skill and apply the **Live Headroom** rules in `delegate`: a pressed Ollama pool is reserved for work its models do distinctly best, and generic work moves to a roomier pool.
 
 ## Invocation
 
 ```bash
-opencode run -m ollama-cloud/<model> "prompt"           # e.g. ollama-cloud/glm-5.2
-opencode run -m ollama-cloud/deepseek-v4-pro --variant high "prompt"
+opencode run -m ollama-cloud/<model> "prompt"           # e.g. ollama-cloud/glm-5.3-flash
+opencode run -m ollama-cloud/deepseek-v4.1-flash --variant high "prompt"
 ```
 
 - `-m provider/model` selects the model; `opencode models` lists every installed provider/model pair.
-- `--variant high|medium|low` sets provider-specific reasoning effort. CAUTION: unknown variant strings are silently accepted (verified: `--variant bogus` runs without error) — a typo means you silently get the default, so double-check the spelling.
+- `--variant` sets provider-specific reasoning effort; the accepted values differ per model (`low`, `high` and `max` on the three routed ones). CAUTION: unknown variant strings are silently accepted (verified: `--variant bogus` runs without error) — a typo means you silently get the default, so double-check the spelling.
 - Long prompts — three working options, in order of preference (all verified on 1.18.15):
   1. Inline the file: `opencode run -m … "$(cat brief.md)"` — simplest, no attachment semantics to get wrong.
   2. Mention it in the message as `@path` (relative to cwd): `opencode run -m … "Follow the brief in @brief.md"` — the agent reads it with its Read tool.
@@ -55,7 +55,7 @@ Ping before committing a real task to a model you haven't used recently, and rep
 
 ## Briefing and verification
 
-Open-weight models are weaker instruction-followers than GPT-5.6-Sol: keep tasks smaller and more mechanical than a codex brief, state hard constraints early and repeat the critical one at the end, and always verify the result yourself (diff checks, gates) — same verification split as the `codex` skill. Project-level `AGENTS.md` in the working directory is honored as standing instructions.
+Open-weight models are weaker instruction-followers than GPT-6.1-Sol: keep tasks smaller and more mechanical than a codex brief, state hard constraints early and repeat the critical one at the end, and always verify the result yourself (diff checks, gates) — same verification split as the `codex` skill. Project-level `AGENTS.md` in the working directory is honored as standing instructions.
 
 ## Capability calibration — high recall, low precision
 

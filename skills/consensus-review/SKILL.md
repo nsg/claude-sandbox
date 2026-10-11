@@ -1,6 +1,6 @@
 ---
 name: consensus-review
-description: Cross-vendor code critique. Anthropic models (Opus critic by default, Fable for judging and the hardest targets, Sonnet legwork) and OpenAI Codex (GPT-5.6-Sol) each independently review the codebase, then debate each other's findings over several rounds to reach a consensus on real issues and good design. Use when the user asks for a consensus review, cross-model critique, or "get a second opinion from Codex".
+description: Cross-vendor code critique. Anthropic models (Opus critic by default, Fable for judging and the hardest targets, Sonnet legwork) and OpenAI Codex (GPT-6.1-Sol) each independently review the codebase, then debate each other's findings over several rounds to reach a consensus on real issues and good design. Use when the user asks for a consensus review, cross-model critique, or "get a second opinion from Codex".
 ---
 
 # Consensus Review
@@ -10,7 +10,7 @@ Two independent model families review the same codebase, then argue until they a
 ## Roles
 
 - **Anthropic side**: use a native Anthropic subagent when the orchestrator provides one; otherwise run Claude Code using the `claude` skill. **Opus is the default critic** — it is a strong reviewer at a fraction of Fable's cost, and most review targets don't need more. Escalate the critic to Fable only when the target genuinely demands the extra depth: subtle concurrency/cancellation semantics, security-sensitive logic, architecture-level judgment calls, or a prior Opus pass that missed things. Sonnet may do cheap mechanical legwork (inventories, grep sweeps, metrics) feeding the critic.
-- **OpenAI side**: use a native GPT-5.6-Sol worker at `high` reasoning when the orchestrator provides one; otherwise run it through the Codex CLI using the `codex` skill.
+- **OpenAI side**: use a native GPT-6.1-Sol worker at `high` reasoning when the orchestrator provides one; otherwise run it through the Codex CLI using the `codex` skill.
 
 ## Invoking external critics
 
@@ -22,7 +22,7 @@ Keep model and effort choices per invocation; never write delegation defaults in
    STATE=/workspace/.claude-sandbox/consensus-YYYY-MM-DD
    REPO=/workspace
    cd "$REPO" && timeout 45m codex exec --skip-git-repo-check \
-     -m gpt-5.6-sol -c model_reasoning_effort=high \
+     -m gpt-6.1-sol -c model_reasoning_effort=high \
      -o "$STATE/codex-out.md" - < "$STATE/codex-prompt.txt"
    ```
    For Anthropic:
@@ -49,7 +49,7 @@ Proven failure (2026-08-03, camon): a Codex re-review hung with no timeout, the 
 Notes:
 - Codex's default sandbox and Claude's `plan` permission mode are read-only — correct for review; don't loosen them.
 - Effort stays at `high`. `xhigh`/`max` burn tokens for very little extra smarts.
-- Use `gpt-5.6-sol` for OpenAI and Opus for the default Anthropic critic; reserve Fable for the hardest reviews and final arbitration.
+- Use `gpt-6.1-sol` for OpenAI and Opus for the default Anthropic critic; reserve Fable for the hardest reviews and final arbitration.
 
 ## Protocol
 
