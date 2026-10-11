@@ -496,9 +496,10 @@ Each launch gets a private set of host proxy sockets, mounted read-only at `/run
 
 At launch, the host discovers GitHub repositories beneath the mounted workspace and snapshots each repository's pinned path and `origin` identity. Discovery reads only a bounded, pinned local Git config with includes disabled; Git directories outside the workspace are rejected. The container forwards its current working directory with every request, but the host executes `gh` from a neutral directory and supplies the snapshotted repository explicitly. Hooks and later worktree configuration changes therefore cannot influence the host-side command.
 
-The account-scoped identity probe `gh api user --jq .login` is also available.
-It is an exact command that returns only the authenticated login; all other
-`gh api` forms remain blocked.
+Two exact `gh api` requests are also available; all other `gh api` forms remain blocked:
+
+- `gh api user --jq .login`, the account-scoped identity probe, returns only the authenticated login
+- `gh api --hostname <host> repos/<owner>/<repo>/stacks?pull_request=<number>` reads the stack a pull request belongs to, which T3 Code needs to sync pull-request status. The proxy accepts no other flags, rebuilds the request as a `GET`, and limits the host to `github.com` or a launch-snapshotted repository's host
 
 **Read commands** work against any repository:
 

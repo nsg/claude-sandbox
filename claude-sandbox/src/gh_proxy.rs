@@ -762,6 +762,12 @@ const EXT_COMMANDS: &[ExtCommandDef] = &[
 
 const ACCOUNT_PROBE_HELP: &str = "gh api user --jq .login (read-only account-name probe)\n";
 
+const API_HELP: &str = "gh api - available requests:\n\n\
+  user --jq .login\n      read-only account-name probe\n\
+  --hostname <host> repos/<owner>/<repo>/stacks?pull_request=<number>\n      \
+  read-only stack lookup for one pull request\n\n\
+All other gh api requests are blocked.\n";
+
 const MERGE_DISABLED: &str = "gh pr merge is disabled for this session; \
                               relaunch with 'claude-sandbox --allow-merge' to enable it";
 
@@ -1651,10 +1657,7 @@ fn parse_pr_review_threads(args: &[String]) -> Result<ReviewThreadsRequest, Stri
     })
 }
 
-fn validate_review_threads_repository(
-    repository: &RepositoryId,
-    config: &ProxyConfig,
-) -> Result<(), String> {
+fn validate_read_api_host(repository: &RepositoryId, config: &ProxyConfig) -> Result<(), String> {
     if repository.host.eq_ignore_ascii_case("github.com")
         || config
             .grants
@@ -1729,7 +1732,7 @@ fn execute_pr_review_threads(
     repository: RepositoryId,
     config: &ProxyConfig,
 ) -> Response {
-    if let Err(reason) = validate_review_threads_repository(&repository, config) {
+    if let Err(reason) = validate_read_api_host(&repository, config) {
         return denied_response(reason);
     }
     let args = pr_review_threads_api_args(&request, &repository);
@@ -1787,6 +1790,70 @@ fn handle_pr_review_threads_request(
         },
     };
     execute_pr_review_threads(request, repository, config)
+}
+
+// ── Stack lookup (gh api …/stacks?pull_request=<n>) ───────────────────
+
+/// The stack a pull request belongs to, the one REST read T3 Code needs to
+/// sync pull-request status. Matched exactly and rebuilt, never forwarded.
+#[derive(Debug, PartialEq, Eq)]
+struct StackLookup {
+    repository: RepositoryId,
+    number: u32,
+}
+
+fn parse_stack_lookup(args: &[String]) -> Option<StackLookup> {
+    let [api, flag, host, endpoint] = args else {
+        return None;
+    };
+    if api != "api" || flag != "--hostname" {
+        return None;
+    }
+    let (repository, number) = endpoint
+        .strip_prefix("repos/")?
+        .split_once("/stacks?pull_request=")?;
+    let (owner, name) = repository.split_once('/')?;
+    if !valid_repository_part(host)
+        || !valid_repository_part(owner)
+        || !valid_repository_part(name)
+        || !number.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let number = number.parse::<u32>().ok().filter(|number| *number >= 1)?;
+
+    Some(StackLookup {
+        repository: RepositoryId {
+            host: host.clone(),
+            owner: owner.to_string(),
+            name: name.to_string(),
+        },
+        number,
+    })
+}
+
+fn stack_lookup_api_args(lookup: &StackLookup) -> Vec<String> {
+    vec![
+        "--method".to_string(),
+        "GET".to_string(),
+        lookup
+            .repository
+            .api_path(&format!("/stacks?pull_request={}", lookup.number)),
+    ]
+}
+
+fn execute_stack_lookup(lookup: &StackLookup, config: &ProxyConfig) -> Response {
+    match safe_gh_api_command(config, &lookup.repository)
+        .args(stack_lookup_api_args(lookup))
+        .output()
+    {
+        Ok(output) => Response {
+            exit_code: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
+        Err(error) => denied_response(format!("failed to execute gh api: {error}")),
+    }
 }
 
 // ── Help text generation (derived from COMMANDS) ──────────────────────
@@ -1849,7 +1916,7 @@ fn help_toplevel() -> String {
 
     let mut out =
         String::from("gh - GitHub CLI (proxy, restricted subset)\n\nAvailable command groups:\n");
-    out.push_str("  api          user --jq .login\n");
+    out.push_str("  api          user --jq .login, stack lookup (see 'gh api -h')\n");
     for group in &groups {
         let mut subs: Vec<&str> = COMMANDS
             .iter()
@@ -1870,7 +1937,7 @@ fn help_toplevel() -> String {
 
 fn help_group(group: &str) -> Option<String> {
     if group == "api" {
-        return Some(ACCOUNT_PROBE_HELP.to_string());
+        return Some(API_HELP.to_string());
     }
 
     let cmds: Vec<&CommandDef> = COMMANDS.iter().filter(|c| c.group == group).collect();
@@ -3697,6 +3764,23 @@ fn handle_request_with_executors(
         return response;
     }
 
+    if let Some(lookup) = parse_stack_lookup(&req.args) {
+        if let Err(reason) = validate_read_api_host(&lookup.repository, config) {
+            log_line(
+                log,
+                &format!("DENIED  gh {} ({})", cmd_str, loggable_text(&reason)),
+            );
+            return denied_response(reason);
+        }
+        log_line(log, &format!("ALLOWED gh {}", cmd_str));
+        let response = execute_stack_lookup(&lookup, config);
+        log_line(
+            log,
+            &format!("EXIT    gh {} -> {}", cmd_str, response.exit_code),
+        );
+        return response;
+    }
+
     let managed_route = match route_managed_write(
         &req.args,
         req.cwd.as_deref(),
@@ -4283,10 +4367,37 @@ mod tests {
                 "github.com/owner/project",
                 "--rebase",
             ]),
+            strs(&[
+                "api",
+                "--hostname",
+                "github.com",
+                "repos/owner/project/stacks/7",
+            ]),
+            strs(&[
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                "PUT",
+                "repos/owner/project/pulls/123/merge-async",
+                "-f",
+                "merge_method=merge",
+            ]),
+            strs(&[
+                "api",
+                "--method",
+                "POST",
+                "--hostname",
+                "github.com",
+                "repos/owner/project/actions/runs/9/approve",
+                "--silent",
+            ]),
+            strs(&["auth", "token", "--hostname", "github.com"]),
         ];
 
         for args in commands {
             assert!(reject_reason(&args).is_some(), "gh {}", args.join(" "));
+            assert!(parse_stack_lookup(&args).is_none(), "gh {}", args.join(" "));
         }
     }
 
@@ -6296,13 +6407,13 @@ mod tests {
             owner: "owner".to_string(),
             name: "repo".to_string(),
         };
-        assert!(validate_review_threads_repository(&disallowed, &config).is_err());
+        assert!(validate_read_api_host(&disallowed, &config).is_err());
         let github = RepositoryId {
             host: "GITHUB.COM".to_string(),
             owner: "owner".to_string(),
             name: "repo".to_string(),
         };
-        assert!(validate_review_threads_repository(&github, &config).is_ok());
+        assert!(validate_read_api_host(&github, &config).is_ok());
     }
 
     #[test]
@@ -6395,6 +6506,97 @@ mod tests {
         assert!(r.is_some());
         let msg = r.unwrap();
         assert!(!msg.contains("milestone"));
+    }
+
+    #[test]
+    fn stack_lookup_allowance_is_exact() {
+        let endpoint = "repos/o/r/stacks?pull_request=1";
+        let lookup = parse_stack_lookup(&strs(&[
+            "api",
+            "--hostname",
+            "github.com",
+            "repos/Owner/my.repo/stacks?pull_request=0411",
+        ]))
+        .unwrap();
+        assert_eq!(lookup.repository.selector(), "github.com/Owner/my.repo");
+        assert_eq!(lookup.number, 411);
+
+        for args in [
+            &["api", endpoint][..],
+            &["api", "--hostname=github.com", endpoint],
+            &["api", endpoint, "--hostname", "github.com"],
+            &["api", "--method", "github.com", endpoint],
+            &["api", "--hostname", "evil.example/x", endpoint],
+            &["api", "--hostname", "github.com", endpoint, "--jq", "."],
+            &["api", "--hostname", "github.com", endpoint, "-XDELETE"],
+        ] {
+            assert!(
+                parse_stack_lookup(&strs(args)).is_none(),
+                "accepted: gh {}",
+                args.join(" ")
+            );
+        }
+
+        for endpoint in [
+            "/repos/o/r/stacks?pull_request=1",
+            "repos/o/r/stacks",
+            "repos/o/r/stacks?pull_request=",
+            "repos/o/r/stacks?pull_request=0",
+            "repos/o/r/stacks?pull_request=-1",
+            "repos/o/r/stacks?pull_request=١",
+            "repos/o/r/stacks?pull_request=4294967296",
+            "repos/o/r/stacks?pull_request=1&page=2",
+            "repos/o/r/stacks?pull_request=1#x",
+            "repos/o/r/x/stacks?pull_request=1",
+            "repos/o/../stacks?pull_request=1",
+            "repos/{owner}/r/stacks?pull_request=1",
+            "repos/o/r?x=/stacks?pull_request=1",
+        ] {
+            assert!(
+                parse_stack_lookup(&strs(&["api", "--hostname", "github.com", endpoint])).is_none(),
+                "accepted: {endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn stack_lookup_builds_one_fixed_get() {
+        let lookup = parse_stack_lookup(&strs(&[
+            "api",
+            "--hostname",
+            "github.com",
+            "repos/team/project/stacks?pull_request=42",
+        ]))
+        .unwrap();
+        assert_eq!(
+            stack_lookup_api_args(&lookup),
+            strs(&[
+                "--method",
+                "GET",
+                "/repos/team/project/stacks?pull_request=42"
+            ])
+        );
+    }
+
+    #[test]
+    fn stack_lookup_is_denied_for_a_host_outside_the_launch() {
+        let response = handle_request_with_executors(
+            Request {
+                args: strs(&[
+                    "api",
+                    "--hostname",
+                    "git.example.com",
+                    "repos/team/project/stacks?pull_request=42",
+                ]),
+                cwd: None,
+            },
+            &Arc::new(Mutex::new(File::create("/dev/null").unwrap())),
+            &test_config(),
+            |_| panic!("not pr create"),
+            |_, _| panic!("must not be forwarded"),
+        );
+        assert_eq!(response.exit_code, 1);
+        assert!(response.stderr.contains("GitHub host is not allowed"));
     }
 
     fn strs(s: &[&str]) -> Vec<String> {
