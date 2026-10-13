@@ -64,6 +64,7 @@ struct ProxyConfig {
     neutral_dir: PathBuf,
     grants: Vec<RepositoryGrant>,
     allow_merge: bool,
+    disclosure: Option<String>,
     managed_gh_state: Option<PathBuf>,
     managed_gh_lock: Mutex<()>,
 }
@@ -2164,6 +2165,97 @@ fn is_pr_merge(group: &str, subcommand: &str) -> bool {
     group == "pr" && subcommand == "merge"
 }
 
+// ── Agent disclosure ──────────────────────────────────────────────────
+
+pub const DEFAULT_DISCLOSURE_TEXT: &str = "<sub>Posted by an AI agent working on my behalf.</sub>";
+const DISCLOSURE_MARKER: &str = "<!-- agent-disclosure -->";
+const DISCLOSURE_TEXT_LIMIT: usize = 1024;
+
+pub fn validate_disclosure_text(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err(
+            "agent disclosure text must not be empty; use --no-agent-disclosure to turn it off"
+                .to_string(),
+        );
+    }
+    if text.len() > DISCLOSURE_TEXT_LIMIT {
+        return Err(format!(
+            "agent disclosure text exceeds {DISCLOSURE_TEXT_LIMIT} bytes"
+        ));
+    }
+    if let Some(character) = refused_text_code_point(text) {
+        return Err(format!(
+            "agent disclosure text contains refused code point U+{:04X}",
+            character as u32
+        ));
+    }
+    Ok(())
+}
+
+/// The flag carrying prose that GitHub publishes under the account's name.
+/// `pr merge --body` is a commit message and stays untouched.
+fn disclosure_flag(group: &str, subcommand: &str) -> Option<(&'static str, &'static str)> {
+    match (group, subcommand) {
+        ("pr" | "issue", "create" | "comment" | "edit") => Some(("--body", "-b")),
+        ("pr" | "issue", "close" | "reopen") => Some(("--comment", "-c")),
+        _ => None,
+    }
+}
+
+/// The original value is kept byte for byte, so the footer cannot turn a
+/// value the validators refuse into one they accept.
+fn disclosed(value: &str, text: &str) -> String {
+    let footer = format!("{DISCLOSURE_MARKER}\n{text}");
+    if value.trim().is_empty() || value.contains(&footer) {
+        return value.to_string();
+    }
+    format!("{value}\n\n{footer}")
+}
+
+/// Append the disclosure to the prose a write command publishes. This runs
+/// before routing, so validation, approval and execution all see the same
+/// text. Values are located the way the write parsers locate them, so a flag
+/// name passed as another flag's value is left alone.
+fn with_disclosure(args: &[String], text: &str) -> Vec<String> {
+    let mut args = args.to_vec();
+    if args.len() < 2 {
+        return args;
+    }
+    let (group, subcommand) = (args[0].clone(), args[1].clone());
+    let Some((long, short)) = disclosure_flag(&group, &subcommand) else {
+        return args;
+    };
+    let managed = managed_command(&args);
+    let mut index = 2;
+    while index < args.len() && args[index] != "--" {
+        let arg = args[index].clone();
+        if !arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        let flag = extract_flag(&arg);
+        let prose = flag == long || flag == short;
+        if flag.len() < arg.len() {
+            if prose {
+                args[index] = format!("{flag}={}", disclosed(&arg[flag.len() + 1..], text));
+            }
+        } else if write_flag_takes_value(&group, &subcommand, flag)
+            || managed.is_some_and(|command| {
+                command.flags.iter().any(|spec| {
+                    !spec.bare && (flag == spec.long || spec.short.is_some_and(|s| flag == s))
+                })
+            })
+        {
+            index += 1;
+            if prose && let Some(value) = args.get(index) {
+                args[index] = disclosed(value, text);
+            }
+        }
+        index += 1;
+    }
+    args
+}
+
 fn repository_from_selector(selector: &str) -> Option<RepositoryId> {
     match selector.split_once('/') {
         Some((host, path)) if path.contains('/') => repository_from_path(host, path),
@@ -3716,22 +3808,25 @@ fn handle_request(req: Request, log: &Arc<Mutex<File>>, config: &ProxyConfig) ->
 }
 
 fn handle_request_with_executors(
-    req: Request,
+    mut req: Request,
     log: &Arc<Mutex<File>>,
     config: &ProxyConfig,
     execute_create: impl FnOnce(&ManagedExecution) -> Response,
     execute_gh: impl FnOnce(&[String], bool) -> Response,
 ) -> Response {
-    let cmd_str = loggable_command(&req.args);
-
     if let Some(help_text) = maybe_help(&req.args) {
-        log_line(log, &format!("HELP    gh {}", cmd_str));
+        log_line(log, &format!("HELP    gh {}", loggable_command(&req.args)));
         return Response {
             exit_code: 0,
             stdout: help_text,
             stderr: String::new(),
         };
     }
+
+    if let Some(text) = &config.disclosure {
+        req.args = with_disclosure(&req.args, text);
+    }
+    let cmd_str = loggable_command(&req.args);
 
     if req.args.len() >= 2
         && let Some(extension) = find_ext_command(&req.args[0], &req.args[1])
@@ -3924,6 +4019,7 @@ pub fn run(
     log_path: &Path,
     workspace_root: &Path,
     allow_merge: bool,
+    disclosure: Option<&str>,
     managed_gh_state: Option<&Path>,
 ) {
     let path = Path::new(socket_path);
@@ -3955,6 +4051,7 @@ pub fn run(
         neutral_dir,
         grants,
         allow_merge,
+        disclosure: disclosure.map(str::to_string),
         managed_gh_state: managed_gh_state.map(Path::to_path_buf),
         managed_gh_lock: Mutex::new(()),
     });
@@ -3969,10 +4066,15 @@ pub fn run(
     log_line(
         &log,
         &format!(
-            "listening on {} with {} launch-approved repositories (merge {})",
+            "listening on {} with {} launch-approved repositories (merge {}, agent disclosure {})",
             socket_path,
             config.grants.len(),
             if config.allow_merge {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            if config.disclosure.is_some() {
                 "enabled"
             } else {
                 "disabled"
@@ -4535,6 +4637,7 @@ mod tests {
             workspace_root: root.clone(),
             neutral_dir: root.clone(),
             allow_merge: false,
+            disclosure: None,
             managed_gh_state: None,
             managed_gh_lock: Mutex::new(()),
             grants: vec![RepositoryGrant {
@@ -5897,6 +6000,7 @@ mod tests {
             workspace_root,
             grants,
             allow_merge: false,
+            disclosure: None,
             managed_gh_state: None,
             managed_gh_lock: Mutex::new(()),
         };
@@ -6597,6 +6701,105 @@ mod tests {
         );
         assert_eq!(response.exit_code, 1);
         assert!(response.stderr.contains("GitHub host is not allowed"));
+    }
+
+    // ── Agent disclosure ─────────────────────────────────────────────
+
+    const FOOTER: &str = "\n\n<!-- agent-disclosure -->\nby an agent";
+
+    #[test]
+    fn disclosure_is_appended_to_published_prose() {
+        for (args, index, expected) in [
+            (strs(&["pr", "comment", "1", "--body", "hi\r"]), 4, "hi\r"),
+            (strs(&["issue", "create", "-t", "bug", "-b", "hi"]), 5, "hi"),
+            (strs(&["pr", "edit", "1", "--body=hi"]), 3, "--body=hi"),
+            (strs(&["pr", "close", "1", "--comment", "hi"]), 4, "hi"),
+            (
+                strs(&["issue", "close", "1", "-r", "completed", "-c", "hi"]),
+                6,
+                "hi",
+            ),
+        ] {
+            let mut disclosed = args.clone();
+            disclosed[index] = format!("{expected}{FOOTER}");
+            assert_eq!(with_disclosure(&args, "by an agent"), disclosed);
+        }
+    }
+
+    #[test]
+    fn disclosure_leaves_other_values_alone() {
+        for args in [
+            strs(&["issue", "edit", "7", "--title", "--body"]),
+            strs(&["pr", "create", "--head", "x", "--title", "-b", "--draft"]),
+            strs(&["pr", "comment", "1", "--body", " "]),
+            strs(&["pr", "merge", "1", "--squash", "--body", "message"]),
+            strs(&["pr", "view", "1", "--body", "x"]),
+        ] {
+            assert_eq!(with_disclosure(&args, "by an agent"), args);
+        }
+    }
+
+    #[test]
+    fn disclosure_is_not_stacked_on_a_body_that_carries_it() {
+        let once = with_disclosure(&strs(&["pr", "edit", "1", "--body", "hi"]), "by an agent");
+        assert_eq!(with_disclosure(&once, "by an agent"), once);
+    }
+
+    #[test]
+    fn disclosure_marker_alone_does_not_suppress_the_footer() {
+        let args = strs(&["pr", "edit", "1", "--body", "x<!-- agent-disclosure -->"]);
+        assert_ne!(with_disclosure(&args, "by an agent"), args);
+    }
+
+    #[test]
+    fn disclosure_does_not_turn_a_help_request_into_a_write() {
+        let mut config = test_config();
+        config.disclosure = Some("by an agent".to_string());
+        let response = handle_request_with_executors(
+            Request {
+                args: strs(&["pr", "edit", "7", "--body", "--help"]),
+                cwd: None,
+            },
+            &Arc::new(Mutex::new(File::create("/dev/null").unwrap())),
+            &config,
+            |_| panic!("help must not create"),
+            |_, _| panic!("help must not execute"),
+        );
+        assert_eq!(response.exit_code, 0);
+        assert!(response.stdout.contains("Allowed flags"));
+    }
+
+    #[test]
+    fn disclosure_reaches_the_executed_command() {
+        let (mut config, root) = managed_config("disclosure");
+        config.disclosure = Some("by an agent".to_string());
+        let response = handle_request_with_executors(
+            Request {
+                args: strs(&[
+                    "issue",
+                    "comment",
+                    "7",
+                    "--body=x",
+                    "--repo",
+                    "github.com/example/project",
+                ]),
+                cwd: None,
+            },
+            &Arc::new(Mutex::new(File::create("/dev/null").unwrap())),
+            &config,
+            |_| panic!("not pr create"),
+            |args, _| successful_response(args.join("\n")),
+        );
+        assert!(response.stdout.contains(&format!("--body=x{FOOTER}")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disclosure_text_must_be_publishable() {
+        assert!(validate_disclosure_text(DEFAULT_DISCLOSURE_TEXT).is_ok());
+        assert!(validate_disclosure_text(" \n").is_err());
+        assert!(validate_disclosure_text("hidden\u{200b}").is_err());
+        assert!(validate_disclosure_text(&"x".repeat(DISCLOSURE_TEXT_LIMIT + 1)).is_err());
     }
 
     fn strs(s: &[&str]) -> Vec<String> {

@@ -138,6 +138,18 @@ struct Cli {
     #[arg(long = "allow-merge")]
     allow_merge: bool,
 
+    /// Do not append the agent disclosure to issues, pull requests and comments written through `gh`
+    #[arg(long = "no-agent-disclosure")]
+    no_agent_disclosure: bool,
+
+    /// Replace the agent disclosure appended to issues, pull requests and comments written through `gh`
+    #[arg(
+        long = "agent-disclosure-text",
+        value_name = "TEXT",
+        conflicts_with = "no_agent_disclosure"
+    )]
+    agent_disclosure_text: Option<String>,
+
     /// Allow the agent to create and drive virtual machines through Incus on the host (see "Virtual Machine Bridge")
     #[arg(long)]
     vm: bool,
@@ -200,6 +212,9 @@ enum Commands {
         /// Permit `gh pr merge` in launch-approved repositories
         #[arg(long)]
         allow_merge: bool,
+        /// Text appended to issues, pull requests and comments (omit to disable)
+        #[arg(long)]
+        agent_disclosure: Option<String>,
         /// Host-only managed GitHub action state directory
         #[arg(long)]
         managed_gh_state_dir: Option<PathBuf>,
@@ -1088,6 +1103,7 @@ fn ensure_gh_proxy(
     runtime_dir: &Path,
     workspace_root: &Path,
     allow_merge: bool,
+    agent_disclosure: Option<&str>,
     managed_gh_state: Option<&Path>,
 ) -> Result<(), String> {
     let socket_path = runtime_dir.join(GH_PROXY_SOCKET_NAME);
@@ -1102,6 +1118,9 @@ fn ensure_gh_proxy(
         .arg(workspace_root);
     if allow_merge {
         command.arg("--allow-merge");
+    }
+    if let Some(text) = agent_disclosure {
+        command.arg(format!("--agent-disclosure={text}"));
     }
     if let Some(state) = managed_gh_state {
         command.arg("--managed-gh-state-dir").arg(state);
@@ -1360,6 +1379,7 @@ fn run_container(
     wrap: bool,
     allow_push: bool,
     allow_merge: bool,
+    agent_disclosure: Option<&str>,
     managed_push_state: Option<&Path>,
     managed_fetch_state: Option<&Path>,
     managed_gh_state: Option<&Path>,
@@ -1382,6 +1402,7 @@ fn run_container(
         &proxy_runtime_dir,
         &cwd,
         allow_merge,
+        agent_disclosure,
         managed_gh_state,
     ));
     require_proxy(ensure_clipboard_proxy(&proxy_runtime_dir));
@@ -1579,6 +1600,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             log,
             workspace_root,
             allow_merge,
+            agent_disclosure,
             managed_gh_state_dir,
         }) => {
             gh_proxy::run(
@@ -1586,6 +1608,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 log,
                 workspace_root,
                 *allow_merge,
+                agent_disclosure.as_deref(),
                 managed_gh_state_dir.as_deref(),
             );
         }
@@ -1825,6 +1848,19 @@ fn main() {
         );
         std::process::exit(2);
     }
+    let agent_disclosure = if cli.no_agent_disclosure {
+        None
+    } else {
+        let text = cli
+            .agent_disclosure_text
+            .as_deref()
+            .unwrap_or(gh_proxy::DEFAULT_DISCLOSURE_TEXT);
+        if let Err(error) = gh_proxy::validate_disclosure_text(text) {
+            eprintln!("Error: {error}");
+            std::process::exit(2);
+        }
+        Some(text.trim().to_string())
+    };
     if cli.install_service.is_some() {
         if let Err((code, error)) = install_service(&cli) {
             eprintln!("Error: {error}");
@@ -1908,6 +1944,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
+                agent_disclosure.as_deref(),
                 None,
                 None,
                 None,
@@ -1947,6 +1984,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
+                agent_disclosure.as_deref(),
                 None,
                 None,
                 None,
@@ -1973,6 +2011,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
+                agent_disclosure.as_deref(),
                 None,
                 None,
                 None,
@@ -1999,6 +2038,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
+                agent_disclosure.as_deref(),
                 None,
                 None,
                 None,
@@ -2151,6 +2191,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push || cli.t3_managed_push,
                 cli.allow_merge,
+                agent_disclosure.as_deref(),
                 managed_state,
                 managed_fetch_state,
                 managed_gh_state,
@@ -2196,6 +2237,7 @@ fn main() {
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
+                agent_disclosure.as_deref(),
                 None,
                 None,
                 None,

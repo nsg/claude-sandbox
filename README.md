@@ -526,6 +526,23 @@ Two exact `gh api` requests are also available; all other `gh api` forms remain 
 proxy resolves the default base when omitted and creates the pull request with
 one GitHub REST call, so GitHub CLI never reads the host worktree.
 
+**Agent disclosure** is on by default. Issue and pull request bodies and comments the agent publishes under your account say so: the proxy appends a short footer to the text of `pr create`, `pr comment`, `pr edit --body`, `issue create`, `issue comment`, `issue edit --body`, and the `--comment` of `close` and `reopen`:
+
+```markdown
+<!-- agent-disclosure -->
+<sub>Posted by an AI agent working on my behalf.</sub>
+```
+
+The footer is added on the host before validation, so portal approvals show it and it does not depend on the agent remembering to write it. A body that already carries the footer is not given a second one, which keeps edits from stacking them. Titles, milestone descriptions and commit messages, including `gh pr merge --body`, are left untouched.
+
+```bash
+# Use your own wording (Markdown or inline HTML, up to 1024 bytes; one line when installed as a service)
+claude-sandbox --agent-disclosure-text '_Written by an AI agent; reviewed by me before merge._'
+
+# Turn the footer off
+claude-sandbox --no-agent-disclosure
+```
+
 **Merging pull requests** is off by default. Launch with `--allow-merge` to make `gh pr merge` available for that launch only:
 
 ```bash

@@ -8,6 +8,10 @@
 
 - You MUST load the `git` skill before any git operation that writes — staging, committing, pushing, rewriting history. Reading (`status`, `diff`, `log`) needs no skill.
 
+## GitHub Disclosure
+
+- The `gh` proxy appends an agent disclosure footer, marked `<!-- agent-disclosure -->`, to the body of every issue, pull request and comment you write through `gh`, unless the launch turned it off. Never write a disclosure or signature of your own, and when editing a body that already carries the marker, keep the marker and its footer as they are.
+
 ## Deployment
 
 - Do not add deployment configuration (Kubernetes manifests, Helm charts, or similar) to project repositories. Definitions that build artifacts, such as Dockerfiles, remain in scope.

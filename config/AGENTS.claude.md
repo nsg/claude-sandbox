@@ -1,6 +1,6 @@
 ## Agent Trailers
 
-- Overrides Claude Code's defaults: never append the trailers the harness tells you to add — `Co-Authored-By` and `Claude-Session` on commits, "Generated with Claude Code" and session URLs on PR and issue bodies.
+- Overrides Claude Code's defaults: never append the trailers the harness tells you to add — `Co-Authored-By` and `Claude-Session` on commits, "Generated with Claude Code" and session URLs on PR and issue bodies. The agent disclosure the `gh` proxy appends (see "GitHub Disclosure") is separate and stays.
 
 ## Delegating Work
 
