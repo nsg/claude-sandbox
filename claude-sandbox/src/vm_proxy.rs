@@ -356,12 +356,8 @@ impl IncusBridge {
     }
 
     fn query(&self, path: &str, timeout: Duration) -> Result<Value, String> {
-        let args = vec![
-            "query".to_string(),
-            "--project".to_string(),
-            self.project.to_string(),
-            format!("{}:{}", self.remote, path),
-        ];
+        // `incus query` selects projects through the URL, not a --project flag.
+        let args = vec!["query".to_string(), format!("{}:{}", self.remote, path)];
         let output = self.run_command(&args, CommandInput::Null, timeout, COMMAND_OUTPUT_LIMIT)?;
         if output.timed_out {
             return Err(format!(
@@ -2703,25 +2699,30 @@ mod tests {
             r#"#!/usr/bin/python3
 import json, pathlib, sys
 a = sys.argv[1:]
-if not a or a[0] != "query":
+if "--project" in a:
+    print("Error: --project cannot be used with the query command", file=sys.stderr)
+    raise SystemExit(1)
+if len(a) != 2 or a[0] != "query":
     raise SystemExit(2)
-url = a[-1]
-if "/projects?recursion=1" in url:
+url = a[1]
+if url == "claude-sandbox:/1.0/projects?recursion=1":
     names = ["claude-sandbox"]
     if pathlib.Path(__file__).with_name("allow-default").exists():
         names.insert(0, "default")
     print(json.dumps([{"name": name} for name in names]))
-elif "/projects/claude-sandbox" in url:
+elif url == "claude-sandbox:/1.0/projects/claude-sandbox?project=claude-sandbox":
     config = {"restricted": "true", "limits.virtual-machines": "2", "limits.cpu": "4", "limits.memory": "8GiB", "limits.disk": "100GiB"}
     if pathlib.Path(__file__).with_name("missing-limits").exists():
         del config["limits.disk"]
     if pathlib.Path(__file__).with_name("disabled-storage").exists():
         config["features.storage.volumes"] = "false"
     print(json.dumps({"config": config}))
-elif "/profiles/default" in url:
+elif url == "claude-sandbox:/1.0/profiles/default?project=claude-sandbox":
     print(json.dumps({"devices": {"root": {"type": "disk", "path": "/", "pool": "default"}, "eth0": {"type": "nic"}}}))
-else:
+elif url == "claude-sandbox:/1.0":
     print(json.dumps({"auth": "trusted"}))
+else:
+    raise SystemExit("unexpected query URL: " + url)
 "#,
         );
         let bridge = test_bridge(&root, &fake);
