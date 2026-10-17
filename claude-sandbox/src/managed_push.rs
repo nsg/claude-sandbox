@@ -262,10 +262,12 @@ pub fn consume_once(state: &Path, approval: &Approval) -> Result<bool, String> {
     }
 }
 
-pub fn resolve_repository(
+/// Map a container working directory to the canonical root of the repository
+/// containing it and that root's workspace-relative path. Reads no config.
+pub fn locate_repository(
     workspace_root: &Path,
     container_cwd: &str,
-) -> Result<(PathBuf, Repository), String> {
+) -> Result<(PathBuf, String), String> {
     let workspace_root = fs::canonicalize(workspace_root)
         .map_err(|e| format!("could not resolve workspace root: {}", e))?;
     let container_path = Path::new(container_cwd);
@@ -315,8 +317,50 @@ pub fn resolve_repository(
     } else {
         relative_path.to_string()
     };
+    Ok((repository_path, relative_path))
+}
+
+/// Refuse repositories whose Git directory or common directory lies outside
+/// `root`: their config (and origin) belongs to some other host repository.
+pub fn ensure_git_dirs_within(repository: &Path, root: &Path) -> Result<(), String> {
+    let root =
+        fs::canonicalize(root).map_err(|e| format!("could not resolve {}: {e}", root.display()))?;
+    let output = git_command(repository)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--absolute-git-dir",
+            "--git-common-dir",
+        ])
+        .output()
+        .map_err(|e| format!("failed to inspect repository layout: {e}"))?;
+    if !output.status.success() {
+        return Err("could not inspect the repository layout".to_string());
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|_| "git returned a non-UTF-8 repository layout".to_string())?;
+    let directories: Vec<_> = stdout.lines().collect();
+    if directories.len() != 2 {
+        return Err("git returned an unexpected repository layout".to_string());
+    }
+    for directory in directories {
+        let resolved = fs::canonicalize(directory)
+            .map_err(|_| "could not resolve the repository's Git directory".to_string())?;
+        if !resolved.starts_with(&root) {
+            return Err("the repository's Git directory is outside the workspace".to_string());
+        }
+    }
+    Ok(())
+}
+
+pub fn resolve_repository(
+    workspace_root: &Path,
+    container_cwd: &str,
+) -> Result<(PathBuf, Repository), String> {
+    let (repository_path, relative_path) = locate_repository(workspace_root, container_cwd)?;
+    ensure_git_dirs_within(&repository_path, workspace_root)?;
     let origin = origin_url_at(&repository_path)
-        .ok_or_else(|| "repository does not have an 'origin' remote".to_string())?;
+        .ok_or_else(|| "repository does not have a single 'origin' URL".to_string())?;
     let branch = git_stdout(
         &repository_path,
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -344,17 +388,53 @@ pub fn resolve_relative_repository(
     resolve_repository(workspace_root, &container_path)
 }
 
+/// The repository's own `remote.origin.url`, exactly as configured: host
+/// system/global config (and its `insteadOf` rewrites) and includes are
+/// ignored, and anything but a single value counts as no origin. This is the
+/// URL git inside the container uses.
 pub fn origin_url_at(repository: &Path) -> Option<String> {
-    git_stdout(repository, &["remote", "get-url", "origin"])
+    let output = git_command(repository)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["config", "--no-includes", "--get-all", "remote.origin.url"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    single_origin(&String::from_utf8(output.stdout).ok()?)
+}
+
+pub fn single_origin(values: &str) -> Option<String> {
+    match values
+        .strip_suffix('\n')
+        .unwrap_or(values)
+        .split('\n')
+        .collect::<Vec<_>>()[..]
+    {
+        [value] if !value.trim().is_empty() => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn git_command(repository: &Path) -> Command {
+    let mut command = Command::new("git");
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+    ] {
+        command.env_remove(key);
+    }
+    command.arg("-C").arg(repository);
+    command
 }
 
 fn git_stdout(repository: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(args)
-        .output()
-        .ok()?;
+    let output = git_command(repository).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }

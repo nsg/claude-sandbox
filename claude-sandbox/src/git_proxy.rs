@@ -176,10 +176,7 @@ fn pin_directory(
     let resolved_path = fs::canonicalize(&command_path)
         .map_err(|error| format!("could not resolve opened {description}: {error}"))?;
     if !resolved_path.starts_with(allowed_root) {
-        return Err(format!(
-            "{description} escapes the approved workspace: {}",
-            resolved_path.display()
-        ));
+        return Err(format!("{description} escapes the approved workspace"));
     }
     let resolved_metadata = fs::metadata(&resolved_path)
         .map_err(|error| format!("could not inspect resolved {description}: {error}"))?;
@@ -853,17 +850,28 @@ fn prepare_push(
     })
 }
 
-fn origin_url_at(repository: &PinnedRepository) -> Option<String> {
+/// The pinned repository's own `remote.origin.url`, from the audited config.
+fn audited_origin(audit: &LocalConfigAudit) -> Option<String> {
+    let values: Vec<_> = audit
+        .snapshot_entries
+        .iter()
+        .filter(|(key, _)| key == "remote.origin.url")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    match values[..] {
+        [value] => managed_push::single_origin(value),
+        _ => None,
+    }
+}
+
+fn current_branch(repository: &PinnedRepository) -> Option<String> {
     let output = repository
         .command()
-        .args(["remote", "get-url", "origin"])
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .output()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
     let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if value.is_empty() { None } else { Some(value) }
+    (output.status.success() && !value.is_empty()).then_some(value)
 }
 
 fn repository_root_at(directory: &Path) -> Option<PathBuf> {
@@ -890,6 +898,7 @@ pub fn launch_origin(directory: &Path) -> Result<String, String> {
     if repository_root_at(directory).as_deref() != Some(canonical.as_path()) {
         return Err("the launch directory is not a git repository root".into());
     }
+    managed_push::ensure_git_dirs_within(directory, directory)?;
     managed_push::origin_url_at(directory)
         .ok_or_else(|| "the launch repository has no 'origin' remote".into())
 }
@@ -903,23 +912,19 @@ fn deny(stderr: String) -> Response {
     }
 }
 
-fn resolve_request_repository(
-    req: &Request,
+/// Decide whether the pinned, audited repository may push, returning the
+/// origin to push to. Origins here come from the repository's own config,
+/// already confined to the workspace, so echoing them reveals nothing new.
+fn authorize_push(
+    repository: &managed_push::Repository,
     policy: &Policy,
     log: &Arc<Mutex<File>>,
-) -> Result<(PathBuf, String), Response> {
-    let cwd = req.cwd.as_deref().ok_or_else(|| {
-        deny("git-proxy: push request did not include a working directory".to_string())
-    })?;
-    let (repository_path, repository) =
-        managed_push::resolve_repository(&policy.workspace_root, cwd)
-            .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
-
+) -> Result<String, Response> {
     if repository.relative_path == "."
         && let Some(origin) = &policy.pre_approved_origin
     {
         if repository.origin == *origin {
-            return Ok((repository_path, origin.clone()));
+            return Ok(origin.clone());
         }
         if policy.portal_state_dir.is_none() {
             log_line(
@@ -955,7 +960,7 @@ fn resolve_request_repository(
     match approval {
         Some(approval) if approval.repository.origin == repository.origin => {
             match managed_push::consume_once(state_dir, &approval) {
-                Ok(true) => Ok((repository_path, repository.origin)),
+                Ok(true) => Ok(repository.origin.clone()),
                 Ok(false) => Err(deny(
                     "git-proxy: the one-time approval was already consumed; approve this repository again"
                         .to_string(),
@@ -965,7 +970,7 @@ fn resolve_request_repository(
         }
         approval => {
             let previous = approval.map(|value| value.repository.origin);
-            let id = managed_push::record_candidate(state_dir, &repository, previous.clone())
+            let id = managed_push::record_candidate(state_dir, repository, previous.clone())
                 .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
             let reason = if let Some(previous) = previous {
                 format!("origin changed from {previous} to {}", repository.origin)
@@ -1002,14 +1007,23 @@ fn handle_request(req: Request, policy: &Policy, log: &Arc<Mutex<File>>) -> Resp
         }
     };
 
-    let (repository_path, expected_origin) = match resolve_request_repository(&req, policy, log) {
-        Ok(repository) => repository,
-        Err(response) => return response,
+    let Some(cwd) = req.cwd.as_deref() else {
+        return deny("git-proxy: push request did not include a working directory".to_string());
     };
+    let (repository_path, relative_path) =
+        match managed_push::locate_repository(&policy.workspace_root, cwd) {
+            Ok(located) => located,
+            Err(error) => return deny(format!("git-proxy: push refused: {error}")),
+        };
     let repository_label = repository_path.display();
+    // Pin and audit before reading any config: until the Git directories are
+    // confined to the workspace, origin could belong to another host repository.
     let repository = match pin_repository(&repository_path, &policy.workspace_root) {
         Ok(repository) => repository,
-        Err(error) => return deny(format!("git-proxy: push refused: {error}")),
+        Err(error) => {
+            log_line(log, &format!("DENIED  git {cmd_str} ({error})"));
+            return deny(format!("git-proxy: push refused: {error}"));
+        }
     };
 
     let audit = match local_config_audit(&repository) {
@@ -1042,24 +1056,21 @@ fn handle_request(req: Request, policy: &Policy, log: &Arc<Mutex<File>>) -> Resp
         }
     }
 
-    match origin_url_at(&repository) {
-        Some(url) if url == expected_origin => {}
-        current => {
-            let now = current.unwrap_or_else(|| "<unset>".to_string());
-            log_line(
-                log,
-                &format!(
-                    "DENIED  git {} (origin changed: {} -> {})",
-                    cmd_str, expected_origin, now
-                ),
-            );
-            return deny(format!(
-                "git-proxy: push refused: remote 'origin' changed since the \
-                 sandbox was launched (was {}, now {})",
-                expected_origin, now
-            ));
-        }
-    }
+    let Some(origin) = audited_origin(&audit) else {
+        return deny(
+            "git-proxy: push refused: the repository does not have a single 'origin' URL"
+                .to_string(),
+        );
+    };
+    let candidate = managed_push::Repository {
+        relative_path,
+        origin,
+        branch: current_branch(&repository),
+    };
+    let expected_origin = match authorize_push(&candidate, policy, log) {
+        Ok(origin) => origin,
+        Err(response) => return response,
+    };
 
     let mut prepared = match prepare_push(&repository, &audit, &expected_origin, &push) {
         Ok(prepared) => prepared,
@@ -2020,6 +2031,92 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
 
         assert_eq!(repository_root_at(&nested), Some(repository.clone()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn foreign_git_directory_is_refused_without_revealing_its_origin() {
+        let root = test_root("foreign-git-dir");
+        let (launch, launch_remote) = initialize_repository(&root);
+        let foreign = root.join("foreign");
+        run_git(&root, &["init", foreign.to_str().unwrap()]);
+        run_git(
+            &foreign,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://user:s3cret@example.com/x.git",
+            ],
+        );
+        assert_eq!(
+            launch_origin(&launch).unwrap(),
+            launch_remote.to_str().unwrap()
+        );
+
+        fs::rename(launch.join(".git"), root.join("launch.git")).unwrap();
+        fs::write(
+            launch.join(".git"),
+            format!("gitdir: {}\n", foreign.join(".git").display()),
+        )
+        .unwrap();
+        let launch_error = launch_origin(&launch).unwrap_err();
+        assert!(!launch_error.contains("s3cret"), "{launch_error}");
+
+        let log = test_log(&root);
+        let state = managed_push::prepare_state_dir(&root.join("state")).unwrap();
+        let policy = launch_policy(&launch, &launch_remote);
+        let portal = Policy {
+            portal_state_dir: Some(state.clone()),
+            ..policy.clone()
+        };
+        for policy in [&policy, &portal] {
+            let denied = handle_request(push_request(false), policy, &log);
+            assert_ne!(denied.exit_code, 0);
+            assert!(!denied.stderr.contains("s3cret"), "{}", denied.stderr);
+            assert!(!denied.stderr.contains("foreign"), "{}", denied.stderr);
+        }
+        assert!(managed_push::list_candidates(&state).unwrap().is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn origin_is_the_raw_repository_value() {
+        let root = test_root("raw-origin");
+        let (repository, _) = initialize_repository(&root);
+        run_git(
+            &repository,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:org/project.git",
+            ],
+        );
+        run_git(
+            &repository,
+            &[
+                "config",
+                "url.git@rewritten.example:.insteadOf",
+                "git@github.com:",
+            ],
+        );
+        assert_eq!(
+            launch_origin(&repository).unwrap(),
+            "git@github.com:org/project.git"
+        );
+        run_git(
+            &repository,
+            &[
+                "config",
+                "--add",
+                "remote.origin.url",
+                "git@github.com:org/other.git",
+            ],
+        );
+        assert!(launch_origin(&repository).is_err());
 
         fs::remove_dir_all(root).unwrap();
     }
