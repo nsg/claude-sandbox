@@ -44,16 +44,13 @@ enum Push {
     Tags,
 }
 
+/// Which repositories may push: the launch repository with its launch-time
+/// origin (`--allow-push`), checked first, then portal approvals.
 #[derive(Clone, Debug)]
-pub enum Mode {
-    Single {
-        repository: PathBuf,
-        origin: String,
-    },
-    Managed {
-        workspace_root: PathBuf,
-        state_dir: PathBuf,
-    },
+pub struct Policy {
+    pub workspace_root: PathBuf,
+    pub pre_approved_origin: Option<String>,
+    pub portal_state_dir: Option<PathBuf>,
 }
 
 struct PinnedDirectory {
@@ -869,11 +866,6 @@ fn origin_url_at(repository: &PinnedRepository) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
-pub fn origin_url() -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    managed_push::origin_url_at(&cwd)
-}
-
 fn repository_root_at(directory: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
@@ -886,10 +878,6 @@ fn repository_root_at(directory: &Path) -> Option<PathBuf> {
     }
     let path = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
     fs::canonicalize(path).ok()
-}
-
-pub fn repository_root() -> Option<PathBuf> {
-    repository_root_at(&std::env::current_dir().ok()?)
 }
 
 /// The `origin` URL of the repository rooted exactly at `directory`.
@@ -917,71 +905,89 @@ fn deny(stderr: String) -> Response {
 
 fn resolve_request_repository(
     req: &Request,
-    mode: &Mode,
+    policy: &Policy,
     log: &Arc<Mutex<File>>,
-) -> Result<(PathBuf, String, PathBuf), Response> {
-    match mode {
-        Mode::Single { repository, origin } => {
-            Ok((repository.clone(), origin.clone(), repository.clone()))
-        }
-        Mode::Managed {
-            workspace_root,
-            state_dir,
-        } => {
-            let cwd = req.cwd.as_deref().ok_or_else(|| {
-                deny(
-                    "git-proxy: managed push request did not include a working directory"
-                        .to_string(),
-                )
-            })?;
-            let (repository_path, repository) =
-                managed_push::resolve_repository(workspace_root, cwd)
-                    .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
-            let approval = managed_push::read_approval(state_dir, &repository.relative_path)
-                .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
+) -> Result<(PathBuf, String), Response> {
+    let cwd = req.cwd.as_deref().ok_or_else(|| {
+        deny("git-proxy: push request did not include a working directory".to_string())
+    })?;
+    let (repository_path, repository) =
+        managed_push::resolve_repository(&policy.workspace_root, cwd)
+            .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
 
-            match approval {
-                Some(approval) if approval.repository.origin == repository.origin => {
-                    match managed_push::consume_once(state_dir, &approval) {
-                        Ok(true) => Ok((
-                            repository_path,
-                            repository.origin,
-                            workspace_root.clone(),
-                        )),
-                        Ok(false) => Err(deny(
-                            "git-proxy: the one-time approval was already consumed; approve this repository again"
-                                .to_string(),
-                        )),
-                        Err(error) => Err(deny(format!("git-proxy: push refused: {error}"))),
-                    }
-                }
-                approval => {
-                    let previous = approval.map(|value| value.repository.origin);
-                    let id = managed_push::record_candidate(state_dir, &repository, previous.clone())
-                        .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
-                    let reason = if let Some(previous) = previous {
-                        format!("origin changed from {previous} to {}", repository.origin)
-                    } else {
-                        "repository is not approved".to_string()
-                    };
-                    log_line(
-                        log,
-                        &format!(
-                            "PENDING {} ({}; candidate {})",
-                            repository.relative_path, reason, id
-                        ),
-                    );
-                    Err(deny(format!(
-                        "git-proxy: push pending approval for '{}' ({})\nOpen the T3 admin portal, approve the repository, and retry.",
-                        repository.relative_path, repository.origin
-                    )))
-                }
+    if repository.relative_path == "."
+        && let Some(origin) = &policy.pre_approved_origin
+    {
+        if repository.origin == *origin {
+            return Ok((repository_path, origin.clone()));
+        }
+        if policy.portal_state_dir.is_none() {
+            log_line(
+                log,
+                &format!(
+                    "DENIED  push (origin changed: {origin} -> {})",
+                    repository.origin
+                ),
+            );
+            return Err(deny(format!(
+                "git-proxy: push refused: remote 'origin' changed since the sandbox was launched (was {origin}, now {})",
+                repository.origin
+            )));
+        }
+    }
+
+    let Some(state_dir) = &policy.portal_state_dir else {
+        log_line(
+            log,
+            &format!(
+                "DENIED  push ({} is not approved)",
+                repository.relative_path
+            ),
+        );
+        return Err(deny(format!(
+            "git-proxy: push refused for '{}': only the launch repository may push in this session",
+            repository.relative_path
+        )));
+    };
+
+    let approval = managed_push::read_approval(state_dir, &repository.relative_path)
+        .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
+    match approval {
+        Some(approval) if approval.repository.origin == repository.origin => {
+            match managed_push::consume_once(state_dir, &approval) {
+                Ok(true) => Ok((repository_path, repository.origin)),
+                Ok(false) => Err(deny(
+                    "git-proxy: the one-time approval was already consumed; approve this repository again"
+                        .to_string(),
+                )),
+                Err(error) => Err(deny(format!("git-proxy: push refused: {error}"))),
             }
+        }
+        approval => {
+            let previous = approval.map(|value| value.repository.origin);
+            let id = managed_push::record_candidate(state_dir, &repository, previous.clone())
+                .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
+            let reason = if let Some(previous) = previous {
+                format!("origin changed from {previous} to {}", repository.origin)
+            } else {
+                "repository is not approved".to_string()
+            };
+            log_line(
+                log,
+                &format!(
+                    "PENDING {} ({}; candidate {})",
+                    repository.relative_path, reason, id
+                ),
+            );
+            Err(deny(format!(
+                "git-proxy: push pending approval for '{}' ({})\nOpen the admin portal, approve the repository, and retry.",
+                repository.relative_path, repository.origin
+            )))
         }
     }
 }
 
-fn handle_request(req: Request, mode: &Mode, log: &Arc<Mutex<File>>) -> Response {
+fn handle_request(req: Request, policy: &Policy, log: &Arc<Mutex<File>>) -> Response {
     let cmd_str = req.args.join(" ");
 
     let push = match parse_push_args(&req.args) {
@@ -996,13 +1002,12 @@ fn handle_request(req: Request, mode: &Mode, log: &Arc<Mutex<File>>) -> Response
         }
     };
 
-    let (repository_path, expected_origin, allowed_root) =
-        match resolve_request_repository(&req, mode, log) {
-            Ok(repository) => repository,
-            Err(response) => return response,
-        };
+    let (repository_path, expected_origin) = match resolve_request_repository(&req, policy, log) {
+        Ok(repository) => repository,
+        Err(response) => return response,
+    };
     let repository_label = repository_path.display();
-    let repository = match pin_repository(&repository_path, &allowed_root) {
+    let repository = match pin_repository(&repository_path, &policy.workspace_root) {
         Ok(repository) => repository,
         Err(error) => return deny(format!("git-proxy: push refused: {error}")),
     };
@@ -1108,7 +1113,7 @@ fn handle_request(req: Request, mode: &Mode, log: &Arc<Mutex<File>>) -> Response
     }
 }
 
-pub fn run(socket_path: &str, log_path: &Path, mode: Mode) {
+pub fn run(socket_path: &str, log_path: &Path, policy: Policy) {
     let path = Path::new(socket_path);
     let log_file = proxy_log::open(log_path).unwrap_or_else(|e| {
         eprintln!(
@@ -1127,7 +1132,7 @@ pub fn run(socket_path: &str, log_path: &Path, mode: Mode) {
     let listener = bound.listener;
     let socket_identity = bound.identity;
 
-    log_line(&log, &format!("listening on {} ({mode:?})", socket_path));
+    log_line(&log, &format!("listening on {} ({policy:?})", socket_path));
 
     // Watchdog: exit when parent process (podman after exec) dies.
     // After exec(), our ppid is podman's PID. When podman exits, ppid
@@ -1153,12 +1158,12 @@ pub fn run(socket_path: &str, log_path: &Path, mode: Mode) {
         }
     });
 
-    let mode = Arc::new(mode);
+    let policy = Arc::new(policy);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let log = Arc::clone(&log);
-                let mode = Arc::clone(&mode);
+                let policy = Arc::clone(&policy);
                 thread::spawn(move || {
                     let reader = BufReader::new(&stream);
                     let mut writer = &stream;
@@ -1170,7 +1175,7 @@ pub fn run(socket_path: &str, log_path: &Path, mode: Mode) {
                             return;
                         }
                         let response = match serde_json::from_str::<Request>(&line) {
-                            Ok(req) => handle_request(req, &mode, &log),
+                            Ok(req) => handle_request(req, &policy, &log),
                             Err(e) => {
                                 log_line(&log, &format!("INVALID ({})", e));
                                 deny(format!("git-proxy: invalid request: {}", e))
@@ -1282,10 +1287,11 @@ mod tests {
         (repository, remote)
     }
 
-    fn single_mode(repository: &Path, remote: &Path) -> Mode {
-        Mode::Single {
-            repository: repository.to_path_buf(),
-            origin: remote.to_str().unwrap().to_string(),
+    fn launch_policy(repository: &Path, remote: &Path) -> Policy {
+        Policy {
+            workspace_root: repository.to_path_buf(),
+            pre_approved_origin: Some(remote.to_str().unwrap().to_string()),
+            portal_state_dir: None,
         }
     }
 
@@ -1296,7 +1302,7 @@ mod tests {
             } else {
                 strs(&["push"])
             },
-            cwd: None,
+            cwd: Some("/workspace".to_string()),
         }
     }
 
@@ -1375,9 +1381,10 @@ mod tests {
         );
 
         let log = test_log(&root);
-        let mode = Mode::Managed {
+        let mode = Policy {
             workspace_root: workspace.clone(),
-            state_dir: state.clone(),
+            pre_approved_origin: None,
+            portal_state_dir: Some(state.clone()),
         };
         let request = || Request {
             args: strs(&["push"]),
@@ -1453,11 +1460,94 @@ mod tests {
     }
 
     #[test]
-    fn single_push_updates_and_repairs_origin_tracking_without_persisting_remote() {
+    fn pre_approval_covers_only_the_launch_repository_and_origin() {
+        let root = test_root("pre-approval");
+        let (launch, launch_remote) = initialize_repository(&root);
+        run_git(&launch, &["config", "push.default", "current"]);
+        let nested = launch.join("nested");
+        let nested_remote = root.join("nested-remote.git");
+        run_git(&root, &["init", "--bare", nested_remote.to_str().unwrap()]);
+        run_git(&root, &["init", nested.to_str().unwrap()]);
+        run_git(
+            &nested,
+            &["remote", "add", "origin", nested_remote.to_str().unwrap()],
+        );
+        fs::create_dir_all(launch.join("src")).unwrap();
+        let log = test_log(&root);
+        let push_from = |cwd: &str| Request {
+            args: strs(&["push"]),
+            cwd: Some(cwd.to_string()),
+        };
+
+        let policy = launch_policy(&launch, &launch_remote);
+        let pushed = handle_request(push_from("/workspace/src"), &policy, &log);
+        assert_eq!(pushed.exit_code, 0, "{}", pushed.stderr);
+
+        let denied = handle_request(push_from("/workspace/nested"), &policy, &log);
+        assert!(
+            denied.stderr.contains("only the launch repository"),
+            "{}",
+            denied.stderr
+        );
+        let outside = handle_request(push_from("/tmp"), &policy, &log);
+        assert_ne!(outside.exit_code, 0);
+
+        let state = managed_push::prepare_state_dir(&root.join("state")).unwrap();
+        let portal = Policy {
+            portal_state_dir: Some(state.clone()),
+            ..policy.clone()
+        };
+        let pending = handle_request(push_from("/workspace/nested"), &portal, &log);
+        assert!(
+            pending.stderr.contains("admin portal"),
+            "{}",
+            pending.stderr
+        );
+        let candidates = managed_push::list_candidates(&state).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].1.repository.relative_path, "nested");
+        let pushed = handle_request(push_from("/workspace"), &portal, &log);
+        assert_eq!(pushed.exit_code, 0, "{}", pushed.stderr);
+        assert_eq!(managed_push::list_candidates(&state).unwrap().len(), 1);
+
+        let moved = root.join("moved.git");
+        run_git(
+            &root,
+            &[
+                "clone",
+                "--bare",
+                launch_remote.to_str().unwrap(),
+                moved.to_str().unwrap(),
+            ],
+        );
+        run_git(
+            &launch,
+            &["remote", "set-url", "origin", moved.to_str().unwrap()],
+        );
+        let changed = handle_request(push_from("/workspace"), &policy, &log);
+        assert!(
+            changed
+                .stderr
+                .contains("changed since the sandbox was launched"),
+            "{}",
+            changed.stderr
+        );
+        let changed = handle_request(push_from("/workspace"), &portal, &log);
+        assert!(
+            changed.stderr.contains("pending approval"),
+            "{}",
+            changed.stderr
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn launch_push_updates_and_repairs_origin_tracking_without_persisting_remote() {
         let root = test_root("single-tracking");
         let (repository, remote) = initialize_repository(&root);
         run_git(&repository, &["config", "push.default", "current"]);
-        let mode = single_mode(&repository, &remote);
+        let mode = launch_policy(&repository, &remote);
         let log = test_log(&root);
 
         let pushed = handle_request(push_request(false), &mode, &log);
@@ -1534,7 +1624,7 @@ mod tests {
                 "+refs/heads/*:refs/remotes/origin/custom/*",
             ],
         );
-        let mode = single_mode(&repository, &remote);
+        let mode = launch_policy(&repository, &remote);
         let pushed = handle_request(push_request(false), &mode, &test_log(&root));
         assert_eq!(pushed.exit_code, 0, "{}", pushed.stderr);
         apply_tracking_updates(&repository, &pushed.tracking_updates);
@@ -1565,7 +1655,7 @@ mod tests {
         );
         let rejected = handle_request(
             push_request(false),
-            &single_mode(&repository, &remote),
+            &launch_policy(&repository, &remote),
             &test_log(&root),
         );
         assert_eq!(rejected.exit_code, 1);
@@ -1656,7 +1746,7 @@ mod tests {
 
         let pushed = handle_request(
             push_request(false),
-            &single_mode(&repository, &remote),
+            &launch_policy(&repository, &remote),
             &test_log(&root),
         );
         assert_ne!(pushed.exit_code, 0);
@@ -1687,7 +1777,7 @@ mod tests {
 
         let pushed = handle_request(
             push_request(false),
-            &single_mode(&repository, &remote),
+            &launch_policy(&repository, &remote),
             &test_log(&root),
         );
         assert_ne!(pushed.exit_code, 0);
@@ -1717,7 +1807,7 @@ mod tests {
 
         let pushed = handle_request(
             push_request(false),
-            &single_mode(&repository, &remote),
+            &launch_policy(&repository, &remote),
             &test_log(&root),
         );
         assert_ne!(pushed.exit_code, 0);
@@ -1755,7 +1845,7 @@ mod tests {
 
         let pushed = handle_request(
             push_request(false),
-            &single_mode(&repository, &remote),
+            &launch_policy(&repository, &remote),
             &test_log(&root),
         );
         assert_eq!(pushed.exit_code, 0, "{}", pushed.stderr);
@@ -1816,7 +1906,7 @@ mod tests {
 
         let pushed = handle_request(
             push_request(false),
-            &single_mode(&repository, &approved_remote),
+            &launch_policy(&repository, &approved_remote),
             &test_log(&root),
         );
         assert_ne!(pushed.exit_code, 0);
@@ -1839,7 +1929,7 @@ mod tests {
         run_git(&repository, &["config", "push.autoSetupRemote", "true"]);
         let pushed = handle_request(
             push_request(false),
-            &single_mode(&repository, &remote),
+            &launch_policy(&repository, &remote),
             &test_log(&root),
         );
         assert_eq!(pushed.exit_code, 0, "{}", pushed.stderr);
@@ -1864,7 +1954,7 @@ mod tests {
         let root = test_root("non-fast-forward");
         let (repository, remote) = initialize_repository(&root);
         run_git(&repository, &["config", "push.default", "current"]);
-        let mode = single_mode(&repository, &remote);
+        let mode = launch_policy(&repository, &remote);
         let log = test_log(&root);
         let initial = handle_request(push_request(false), &mode, &log);
         assert_eq!(initial.exit_code, 0, "{}", initial.stderr);

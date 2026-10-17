@@ -81,7 +81,7 @@ struct Cli {
     #[arg(short, long)]
     quiet: bool,
 
-    /// Allow the agent to run `git push` / `git push --tags`, executed on the host
+    /// Allow `git push` / `git push --tags` for the launch repository (run from its root), executed on the host
     #[arg(long = "allow-push")]
     allow_push: bool,
 
@@ -106,7 +106,7 @@ struct Cli {
     vm: bool,
 
     /// Let the T3 admin portal approve repositories for host-side pushes
-    #[arg(long = "t3-managed-push", conflicts_with = "allow_push")]
+    #[arg(long = "t3-managed-push")]
     t3_managed_push: bool,
 
     /// Let the T3 admin portal approve private repositories for SSH fetches
@@ -161,13 +161,13 @@ enum Commands {
         /// Persistent log path
         #[arg(long)]
         log: PathBuf,
-        /// Origin remote URL snapshotted at launch (single-repository mode)
+        /// Host workspace root
         #[arg(long)]
-        origin_url: Option<String>,
-        /// Host workspace root (managed T3 mode)
+        workspace_root: PathBuf,
+        /// Launch repository origin URL snapshotted at launch (--allow-push)
         #[arg(long)]
-        workspace_root: Option<PathBuf>,
-        /// Host-only managed push state directory
+        pre_approved_origin: Option<String>,
+        /// Host-only portal push approval state directory
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
@@ -1055,24 +1055,11 @@ fn ensure_vm_proxy(runtime_dir: &Path, workspace_root: &Path) -> Result<(), Stri
     start_proxy("vm-proxy", &socket_path, command)
 }
 
-fn ensure_git_proxy_single(runtime_dir: &Path, origin_url: &str) -> Result<(), String> {
-    let socket_path = runtime_dir.join(GIT_PROXY_SOCKET_NAME);
-    let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
-    command
-        .arg("git-proxy")
-        .arg("--socket")
-        .arg(&socket_path)
-        .arg("--log")
-        .arg(proxy_log_path("git-proxy.log")?)
-        .arg("--origin-url")
-        .arg(origin_url);
-    start_proxy("git-proxy", &socket_path, command)
-}
-
-fn ensure_git_proxy_managed(
+fn ensure_git_proxy(
     runtime_dir: &Path,
     workspace_root: &Path,
-    state_dir: &Path,
+    pre_approved_origin: Option<&str>,
+    portal_state_dir: Option<&Path>,
 ) -> Result<(), String> {
     let socket_path = runtime_dir.join(GIT_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -1083,10 +1070,14 @@ fn ensure_git_proxy_managed(
         .arg("--log")
         .arg(proxy_log_path("git-proxy.log")?)
         .arg("--workspace-root")
-        .arg(workspace_root)
-        .arg("--state-dir")
-        .arg(state_dir);
-    start_proxy("managed git-proxy", &socket_path, command)
+        .arg(workspace_root);
+    if let Some(origin) = pre_approved_origin {
+        command.arg("--pre-approved-origin").arg(origin);
+    }
+    if let Some(state_dir) = portal_state_dir {
+        command.arg("--state-dir").arg(state_dir);
+    }
+    start_proxy("git-proxy", &socket_path, command)
 }
 
 fn ensure_ssh_proxy(
@@ -1220,7 +1211,7 @@ fn run_container(
     container_env: &[String],
     quiet: bool,
     wrap: bool,
-    allow_push: bool,
+    pre_approved_origin: Option<&str>,
     allow_merge: bool,
     agent_disclosure: Option<&str>,
     managed_push_state: Option<&Path>,
@@ -1263,23 +1254,13 @@ fn run_container(
         }
     }
 
-    match (managed_push_state, allow_push, git_proxy::origin_url()) {
-        (Some(state_dir), true, _) => {
-            require_proxy(ensure_git_proxy_managed(
-                &proxy_runtime_dir,
-                &cwd,
-                state_dir,
-            ));
-        }
-        (None, true, Some(url)) => {
-            require_proxy(ensure_git_proxy_single(&proxy_runtime_dir, &url));
-        }
-        (None, true, None) => {
-            eprintln!(
-                "Warning: --allow-push ignored, requires a git repository with an 'origin' remote"
-            );
-        }
-        (_, false, _) => {}
+    if pre_approved_origin.is_some() || managed_push_state.is_some() {
+        require_proxy(ensure_git_proxy(
+            &proxy_runtime_dir,
+            &cwd,
+            pre_approved_origin,
+            managed_push_state,
+        ));
     }
 
     let fetch_origin = launch_fetch_origin(&cwd, quiet);
@@ -1431,32 +1412,23 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
         Some(Commands::GitProxy {
             socket,
             log,
-            origin_url,
             workspace_root,
+            pre_approved_origin,
             state_dir,
         }) => {
-            let mode = match (
-                origin_url.as_ref(),
-                workspace_root.as_ref(),
-                state_dir.as_ref(),
-            ) {
-                (Some(origin), None, None) => git_proxy::Mode::Single {
-                    repository: git_proxy::repository_root()
-                        .expect("git-proxy could not resolve the repository root"),
-                    origin: origin.clone(),
-                },
-                (None, Some(workspace_root), Some(state_dir)) => git_proxy::Mode::Managed {
+            if pre_approved_origin.is_none() && state_dir.is_none() {
+                eprintln!("git-proxy requires --pre-approved-origin or --state-dir");
+                std::process::exit(2);
+            }
+            git_proxy::run(
+                socket,
+                log,
+                git_proxy::Policy {
                     workspace_root: workspace_root.clone(),
-                    state_dir: state_dir.clone(),
+                    pre_approved_origin: pre_approved_origin.clone(),
+                    portal_state_dir: state_dir.clone(),
                 },
-                _ => {
-                    eprintln!(
-                        "git-proxy requires either --origin-url or both --workspace-root and --state-dir"
-                    );
-                    std::process::exit(2);
-                }
-            };
-            git_proxy::run(socket, log, mode);
+            );
         }
         Some(Commands::T3Admin {
             port,
@@ -1539,6 +1511,32 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
         _ => return false,
     }
     true
+}
+
+fn starts_sandbox(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        None | Some(Commands::Run { .. } | Commands::T3code { .. })
+    )
+}
+
+/// `--allow-push` pre-approves the launch repository with the origin it has
+/// now; launching anywhere but a repository root with an origin is an error.
+fn push_pre_approval(cli: &Cli) -> Result<Option<String>, String> {
+    if !cli.allow_push || !starts_sandbox(cli.command.as_ref()) {
+        return Ok(None);
+    }
+    let cwd =
+        env::current_dir().map_err(|error| format!("could not get current directory: {error}"))?;
+    allow_push_origin(&cwd).map(Some)
+}
+
+fn allow_push_origin(cwd: &Path) -> Result<String, String> {
+    git_proxy::launch_origin(cwd).map_err(|reason| {
+        format!(
+            "--allow-push needs a git repository root with an 'origin' remote: {reason}. Launch claude-sandbox from the repository root."
+        )
+    })
 }
 
 fn service_command(cli: &Cli) -> Result<&'static str, (i32, String)> {
@@ -1678,6 +1676,10 @@ fn main() {
         );
         std::process::exit(2);
     }
+    let pre_approved_origin = push_pre_approval(&cli).unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        std::process::exit(2);
+    });
     let agent_disclosure = if cli.no_agent_disclosure {
         None
     } else {
@@ -1743,7 +1745,7 @@ fn main() {
                 &[],
                 cli.quiet,
                 cli.wrap,
-                cli.allow_push,
+                pre_approved_origin.as_deref(),
                 cli.allow_merge,
                 agent_disclosure.as_deref(),
                 None,
@@ -1888,7 +1890,7 @@ fn main() {
                 &container_env,
                 cli.quiet,
                 false,
-                cli.allow_push || cli.t3_managed_push,
+                pre_approved_origin.as_deref(),
                 cli.allow_merge,
                 agent_disclosure.as_deref(),
                 managed_state,
@@ -1924,7 +1926,7 @@ fn main() {
                 &[],
                 cli.quiet,
                 cli.wrap,
-                cli.allow_push,
+                pre_approved_origin.as_deref(),
                 cli.allow_merge,
                 agent_disclosure.as_deref(),
                 None,
@@ -2030,6 +2032,42 @@ mod tests {
                 "--install-service only applies to commands that start a sandbox".to_string(),
             ))
         );
+    }
+
+    #[test]
+    fn allow_push_outside_a_repository_root_is_an_error() {
+        let root = test_root("allow-push");
+        fs::create_dir_all(&root).unwrap();
+        let error = allow_push_origin(&root).unwrap_err();
+        assert!(error.contains("--allow-push"), "{error}");
+        assert!(error.contains("from the repository root"), "{error}");
+
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        assert!(
+            allow_push_origin(&root)
+                .unwrap_err()
+                .contains("no 'origin'")
+        );
+        fs::create_dir_all(root.join("sub")).unwrap();
+        git(&["remote", "add", "origin", "git@example.com:org/repo.git"]);
+        assert!(allow_push_origin(&root.join("sub")).is_err());
+        assert_eq!(
+            allow_push_origin(&root).unwrap(),
+            "git@example.com:org/repo.git"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
