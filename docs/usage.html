@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Command-line usage · claude-sandbox</title>
+  <meta name="description" content="Launch an agent, pass prompts and flags, and control updates and output.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="topbar">
+    <a class="brand" href="index.html">claude-sandbox</a>
+    <label class="menu-button" for="menu-toggle">Menu</label>
+    <a class="repo" href="https://github.com/nsg/claude-sandbox">GitHub</a>
+  </div>
+  <div class="layout">
+    <input type="checkbox" id="menu-toggle" class="menu-toggle">
+    <nav class="sidebar" aria-label="Documentation">
+      <a class="brand" href="index.html">claude-sandbox</a>
+      <p class="nav-group">Getting started</p>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="usage.html" aria-current="page">Command-line usage</a></li>
+        <li><a href="environment.html">Container environment</a></li>
+        <li><a href="skills.html">Skills</a></li>
+      </ul>
+      <p class="nav-group">Running agents</p>
+      <ul>
+        <li><a href="t3code.html">T3 Code</a></li>
+        <li><a href="plan-usage.html">Plan usage</a></li>
+        <li><a href="service.html">Systemd service</a></li>
+        <li><a href="wrap.html">Wrapped sessions</a></li>
+        <li><a href="gui.html">Agent-controlled GUI</a></li>
+      </ul>
+      <p class="nav-group">Host bridges</p>
+      <ul>
+        <li><a href="github.html">GitHub CLI proxy</a></li>
+        <li><a href="ssh.html">SSH proxy</a></li>
+        <li><a href="git-push.html">Git push bridge</a></li>
+        <li><a href="vm.html">Virtual machine bridge</a></li>
+        <li><a href="clipboard.html">Clipboard image bridge</a></li>
+      </ul>
+      <p class="nav-group">Development</p>
+      <ul>
+        <li><a href="building.html">Building locally</a></li>
+      </ul>
+      <p class="nav-group">Project</p>
+      <ul>
+        <li><a href="https://github.com/nsg/claude-sandbox">Source on GitHub</a></li>
+        <li><a href="https://github.com/nsg/claude-sandbox/releases/latest">Latest release</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+      <article>
+        <header>
+          <h1>Command-line usage</h1>
+          <p class="lede">Launch an agent, pass prompts and flags, and control updates and output.</p>
+        </header>
+<h2 id="commands"><a class="anchor" href="#commands" aria-hidden="true">#</a>Commands</h2>
+<pre><code class="language-bash"># Run Claude CLI (image is pulled automatically on first run)
+claude-sandbox
+
+# Pass a prompt directly
+claude-sandbox &quot;explain this code&quot;
+
+# Expose ports from the container
+claude-sandbox -p 8080
+claude-sandbox -p 8080 -p 3000 -p 5173
+
+# Allow the agent to git push (executed on the host, see &quot;Git Push Bridge&quot;)
+claude-sandbox --allow-push
+
+# Allow the agent to create ephemeral Incus VMs (see &quot;Virtual Machine Bridge&quot;)
+claude-sandbox --vm
+
+# Allow the agent to merge pull requests (see &quot;GitHub CLI Proxy&quot;)
+claude-sandbox --allow-merge
+
+# Open an interactive shell
+claude-sandbox shell
+
+# Install skills
+claude-sandbox install skills
+
+# Install the GNOME top-bar usage indicator (see &quot;GNOME usage indicator&quot;)
+claude-sandbox install extension
+
+# Run OpenAI Codex CLI instead of Claude
+claude-sandbox codex
+claude-sandbox codex &quot;explain this code&quot;
+claude-sandbox codex exec &quot;fix the failing test&quot;
+
+# Run the t3code web GUI
+claude-sandbox t3code
+# Optionally enable its pairing portal with a PIN
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
+# For a long-running T3 service, approve push repositories from that portal
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-push t3code
+# Approve private SSH fetch sources from the same portal
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch t3code
+# Approve exact cross-repository GitHub CLI writes once
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-gh t3code
+# Enable independent read and write approvals together
+T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch --t3-managed-push t3code
+# Pin both host ports instead of selecting the first free ports
+T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 claude-sandbox t3code
+# Install the tested invocation as a systemd user service
+T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
+  claude-sandbox --install-service --t3-managed-fetch --t3-managed-push t3code
+
+# Run opencode TUI
+claude-sandbox opencode
+claude-sandbox opencode &quot;explain this code&quot;
+</code></pre>
+<p>Use <code>--</code> to pass arguments to claude instead of claude-sandbox:</p>
+<pre><code class="language-bash">claude-sandbox -p 8080 -- -p
+</code></pre>
+<p>The same top-level flags (<code>-p</code>/<code>--port</code>, <code>--quiet</code>, <code>--auto-update</code>, <code>--host-env</code>, <code>--ssh</code>, <code>--no-audio</code>, …) work with the <code>codex</code> subcommand. Flags after <code>codex</code> are forwarded to the Codex CLI:</p>
+<pre><code class="language-bash">claude-sandbox -p 8080 codex -m gpt-5
+</code></pre>
+<p>Symlink the binary as <code>codex-sandbox</code> to make Codex the default when no subcommand is given:</p>
+<pre><code class="language-bash">ln -s ~/bin/claude-sandbox ~/bin/codex-sandbox
+codex-sandbox             # runs codex
+codex-sandbox &quot;fix bug&quot;   # runs: codex &quot;fix bug&quot;
+</code></pre>
+<h2 id="auto-update"><a class="anchor" href="#auto-update" aria-hidden="true">#</a>Auto-update</h2>
+<p>Skip the interactive update prompt and update automatically:</p>
+<pre><code class="language-bash">claude-sandbox --auto-update
+</code></pre>
+<p>When a new container image is pulled successfully, older images of this project are removed automatically. If the pull fails, the previous image is kept and used.</p>
+<h2 id="quiet-mode"><a class="anchor" href="#quiet-mode" aria-hidden="true">#</a>Quiet mode</h2>
+<p>Suppress informational output, only show errors:</p>
+<pre><code class="language-bash">claude-sandbox --quiet
+</code></pre>
+<p>This is useful when launching from editors or scripts where stdout noise is unwanted.</p>
+<h2 id="host-environment"><a class="anchor" href="#host-environment" aria-hidden="true">#</a>Host environment</h2>
+<p>Override environment variables for the Podman process itself (not the container). Useful when the calling environment injects unwanted paths, e.g. VS Code snap overriding <code>XDG_DATA_HOME</code>:</p>
+<pre><code class="language-bash">claude-sandbox --host-env XDG_DATA_HOME=/home/user/.local/share
+</code></pre>
+<p>Pass without a value to unset a variable:</p>
+<pre><code class="language-bash">claude-sandbox --host-env XDG_DATA_HOME
+</code></pre>
+
+        <nav class="pager" aria-label="Pages">
+          <a class="prev" href="index.html"><span>Previous</span>Overview</a>
+          <a class="next" href="environment.html"><span>Next</span>Container environment</a>
+        </nav>
+        <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/usage.html">Edit this page on GitHub</a></p>
+      </article>
+      <nav class="toc" aria-label="On this page">
+        <p>On this page</p>
+        <ul>
+          <li><a href="#commands">Commands</a></li>
+          <li><a href="#auto-update">Auto-update</a></li>
+          <li><a href="#quiet-mode">Quiet mode</a></li>
+          <li><a href="#host-environment">Host environment</a></li>
+        </ul>
+      </nav>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plan usage · claude-sandbox</title>
+  <meta name="description" content="Account-level plan-limit usage for Anthropic, OpenAI and Ollama, served by the T3 admin portal.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="topbar">
+    <a class="brand" href="index.html">claude-sandbox</a>
+    <label class="menu-button" for="menu-toggle">Menu</label>
+    <a class="repo" href="https://github.com/nsg/claude-sandbox">GitHub</a>
+  </div>
+  <div class="layout">
+    <input type="checkbox" id="menu-toggle" class="menu-toggle">
+    <nav class="sidebar" aria-label="Documentation">
+      <a class="brand" href="index.html">claude-sandbox</a>
+      <p class="nav-group">Getting started</p>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="usage.html">Command-line usage</a></li>
+        <li><a href="environment.html">Container environment</a></li>
+        <li><a href="skills.html">Skills</a></li>
+      </ul>
+      <p class="nav-group">Running agents</p>
+      <ul>
+        <li><a href="t3code.html">T3 Code</a></li>
+        <li><a href="plan-usage.html" aria-current="page">Plan usage</a></li>
+        <li><a href="service.html">Systemd service</a></li>
+        <li><a href="wrap.html">Wrapped sessions</a></li>
+        <li><a href="gui.html">Agent-controlled GUI</a></li>
+      </ul>
+      <p class="nav-group">Host bridges</p>
+      <ul>
+        <li><a href="github.html">GitHub CLI proxy</a></li>
+        <li><a href="ssh.html">SSH proxy</a></li>
+        <li><a href="git-push.html">Git push bridge</a></li>
+        <li><a href="vm.html">Virtual machine bridge</a></li>
+        <li><a href="clipboard.html">Clipboard image bridge</a></li>
+      </ul>
+      <p class="nav-group">Development</p>
+      <ul>
+        <li><a href="building.html">Building locally</a></li>
+      </ul>
+      <p class="nav-group">Project</p>
+      <ul>
+        <li><a href="https://github.com/nsg/claude-sandbox">Source on GitHub</a></li>
+        <li><a href="https://github.com/nsg/claude-sandbox/releases/latest">Latest release</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+      <article>
+        <header>
+          <h1>Plan usage</h1>
+          <p class="lede">Account-level plan-limit usage for Anthropic, OpenAI and Ollama, served by the T3 admin portal.</p>
+        </header>
+<h2 id="http-api"><a class="anchor" href="#http-api" aria-hidden="true">#</a>HTTP API</h2>
+<p>The same host-side server exposes account-level plan-limit usage without
+authentication. Append <code>/api/usage</code> to the admin URL printed at startup:</p>
+<pre><code class="language-bash">curl http://localhost:3774/api/usage
+</code></pre>
+<h2 id="dashboard"><a class="anchor" href="#dashboard" aria-hidden="true">#</a>Dashboard</h2>
+<p>For a human-readable live dashboard with provider gauges, per-limit graphs,
+freshness, and reset timing, open <code>/usage</code> on the same server:</p>
+<pre><code class="language-text">http://localhost:3774/usage
+</code></pre>
+<h2 id="response-format"><a class="anchor" href="#response-format" aria-hidden="true">#</a>Response format</h2>
+<p>The response reports each provider&#39;s data freshness, RFC 3339 UTC <code>updated_at</code>
+time, and available usage buckets under the fixed <code>anthropic</code>, <code>openai</code>, and
+<code>ollama</code> keys. Each bucket contains an integer <code>used_percent</code>, its normalized
+<code>period</code>, and an RFC 3339 UTC <code>resets_at</code> value, or <code>null</code> when the reset time
+is unknown or not reported. A sanitized provider-supplied <code>label</code> and native
+<code>window</code> name are included when available. <code>scope</code> is present only when the
+provider establishes that the limit is <code>overall</code> or model-specific; do not
+infer a scope from an unlabeled or provider-specific limit. Missing buckets are
+omitted rather than reported as 0%.</p>
+<h2 id="how-usage-is-collected"><a class="anchor" href="#how-usage-is-collected" aria-hidden="true">#</a>How usage is collected</h2>
+<p>The host admin service elects one collector across all running sandbox
+instances. It refreshes each provider independently at startup and every 30
+minutes by running a fixed, tool-less probe in one managed container. Failed
+refreshes retain the last good snapshot and retry with bounded backoff; data
+becomes <code>stale</code> after 40 minutes. The sanitized account-global cache is stored
+under <code>${XDG_STATE_HOME:-$HOME/.local/state}/claude-sandbox/usage/usage-v1.json</code>,
+outside the agent-mounted workspace.</p>
+<p>The HTTP request itself reads that cache only and never contacts a provider.
+The collector obtains Anthropic limits through the built-in <code>/usage</code> view in
+an isolated Claude session without sending a model prompt, OpenAI limits from
+the Codex account rate-limit interface, and Ollama limits from its usage
+endpoint. The cache and public response retain provider limit and model labels
+needed to interpret the percentages. They exclude credentials and tokens,
+account identifiers, billing amounts, costs and credits, and raw provider
+errors. The endpoint returns HTTP 503 only when every provider is unknown.
+Treat the result as advisory telemetry.</p>
+<p>This collector supersedes locally customized status-line or hook-based usage
+refreshers. Because those files are user-owned rather than managed by this
+repository, remove any old refresh trigger separately after upgrading; a
+status line may remain as a display-only consumer.</p>
+<h2 id="gnome-usage-indicator"><a class="anchor" href="#gnome-usage-indicator" aria-hidden="true">#</a>GNOME usage indicator</h2>
+<p>Show the plan-limit usage from <a href="#http-api"><code>/api/usage</code></a> in the GNOME top bar. Install the extension:</p>
+<pre><code class="language-bash">claude-sandbox install extension
+</code></pre>
+<p>The command copies a GNOME Shell extension to
+<code>${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/plan-usage@claude-sandbox</code>
+and enables it. Log out and back in to load it; GNOME Shell discovers new
+extensions only at login. The extension targets GNOME Shell 46, as shipped
+with Ubuntu 24.04 LTS.</p>
+<p>An installed extension follows the binary: every launch rewrites its files when
+they differ from the ones in the running <code>claude-sandbox</code>, keeping the
+configured endpoint. The new version loads at the next login.</p>
+<p>The top bar shows the most-used limit of each provider, for example
+<code>A 60 · O 82 · L 0</code> for Anthropic, OpenAI, and Ollama. A value turns amber at
+70% and red at 90%. Stale values are dimmed and a dash means no data. Click the
+indicator for every limit with its reset time and a link to the <code>/usage</code>
+dashboard.</p>
+<p>The extension polls the admin server every 60 seconds, so it has data only
+while a <code>claude-sandbox t3code</code> instance with the <a href="t3code.html#admin-portal">admin portal</a> enabled is
+running. By default it reads from <code>127.0.0.1</code>. Pass <code>--host</code> to read from
+another machine instead:</p>
+<pre><code class="language-bash">claude-sandbox install extension --host build-box:3774
+</code></pre>
+<p>Without a port, in <code>--host</code> or altogether, the command uses
+<code>T3CODE_PAIR_ADMIN_PORT</code>, or 3774 when unset. Write an IPv6 address in
+brackets, as in <code>[fd00::1]:3774</code>. Re-run the command to change the endpoint.
+The request is plain unauthenticated HTTP, so reach a remote host over a
+trusted path such as a VPN.</p>
+
+        <nav class="pager" aria-label="Pages">
+          <a class="prev" href="t3code.html"><span>Previous</span>T3 Code</a>
+          <a class="next" href="service.html"><span>Next</span>Systemd service</a>
+        </nav>
+        <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/plan-usage.html">Edit this page on GitHub</a></p>
+      </article>
+      <nav class="toc" aria-label="On this page">
+        <p>On this page</p>
+        <ul>
+          <li><a href="#http-api">HTTP API</a></li>
+          <li><a href="#dashboard">Dashboard</a></li>
+          <li><a href="#response-format">Response format</a></li>
+          <li><a href="#how-usage-is-collected">How usage is collected</a></li>
+          <li><a href="#gnome-usage-indicator">GNOME usage indicator</a></li>
+        </ul>
+      </nav>
+    </main>
+  </div>
+</body>
+</html>

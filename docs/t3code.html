@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>T3 Code · claude-sandbox</title>
+  <meta name="description" content="Run the t3code web GUI with an optional PIN-protected admin portal on the host.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="topbar">
+    <a class="brand" href="index.html">claude-sandbox</a>
+    <label class="menu-button" for="menu-toggle">Menu</label>
+    <a class="repo" href="https://github.com/nsg/claude-sandbox">GitHub</a>
+  </div>
+  <div class="layout">
+    <input type="checkbox" id="menu-toggle" class="menu-toggle">
+    <nav class="sidebar" aria-label="Documentation">
+      <a class="brand" href="index.html">claude-sandbox</a>
+      <p class="nav-group">Getting started</p>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="usage.html">Command-line usage</a></li>
+        <li><a href="environment.html">Container environment</a></li>
+        <li><a href="skills.html">Skills</a></li>
+      </ul>
+      <p class="nav-group">Running agents</p>
+      <ul>
+        <li><a href="t3code.html" aria-current="page">T3 Code</a></li>
+        <li><a href="plan-usage.html">Plan usage</a></li>
+        <li><a href="service.html">Systemd service</a></li>
+        <li><a href="wrap.html">Wrapped sessions</a></li>
+        <li><a href="gui.html">Agent-controlled GUI</a></li>
+      </ul>
+      <p class="nav-group">Host bridges</p>
+      <ul>
+        <li><a href="github.html">GitHub CLI proxy</a></li>
+        <li><a href="ssh.html">SSH proxy</a></li>
+        <li><a href="git-push.html">Git push bridge</a></li>
+        <li><a href="vm.html">Virtual machine bridge</a></li>
+        <li><a href="clipboard.html">Clipboard image bridge</a></li>
+      </ul>
+      <p class="nav-group">Development</p>
+      <ul>
+        <li><a href="building.html">Building locally</a></li>
+      </ul>
+      <p class="nav-group">Project</p>
+      <ul>
+        <li><a href="https://github.com/nsg/claude-sandbox">Source on GitHub</a></li>
+        <li><a href="https://github.com/nsg/claude-sandbox/releases/latest">Latest release</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+      <article>
+        <header>
+          <h1>T3 Code</h1>
+          <p class="lede">Run the t3code web GUI with an optional PIN-protected admin portal on the host.</p>
+        </header>
+<pre><code class="language-bash">claude-sandbox t3code
+</code></pre>
+<h2 id="admin-portal"><a class="anchor" href="#admin-portal" aria-hidden="true">#</a>Admin portal</h2>
+<p>The admin portal is disabled by default. Set <code>T3CODE_PAIR_ADMIN_PIN</code> to a
+4–12 digit PIN when starting T3 Code to enable it:</p>
+<pre><code class="language-bash">T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
+</code></pre>
+<p>T3 Code uses the first free host port from 3773 by default. Set <code>T3CODE_PORT</code>
+to use one exact host port instead. The host-side portal uses a distinct port,
+selecting the first free port from 3774 by default; set
+<code>T3CODE_PAIR_ADMIN_PORT</code> to pin it. The admin port setting is ignored when no
+PIN is set. A configured port is never substituted with another port, and
+startup fails if it is already taken. The admin port must also differ from the
+T3 Code port and every port published with <code>-p</code> / <code>--port</code>.</p>
+<p>Open the exact URL printed at startup and enter the PIN in its sign-in page. It
+creates five-minute, single-use pairing links on demand and automatically uses
+the running server&#39;s instance database. Open a generated link in the current
+browser, or copy it from the read-only field to another client such as the
+mobile app. Creating or copying the link does not consume it. For another
+device, open the admin portal through a hostname or IP address that device can
+reach before generating the link; a link created through <code>localhost</code> only
+works on the host. The PIN stays on the host, is neither generated nor stored
+by claude-sandbox during normal launches, and must be provided again each time.
+With <code>--install-service</code>, it is stored in the mode-0600 unit file along with
+the other recorded environment variables.</p>
+<h2 id="restart-sandbox"><a class="anchor" href="#restart-sandbox" aria-hidden="true">#</a>Restart sandbox</h2>
+<p>After unlocking the portal, expand <strong>Restart sandbox</strong> and confirm the action
+to stop the exact named T3 container. The launcher runs attached to that
+container, so its exit returns control to the service supervisor. This button
+is intended for a systemd service configured with <code>Restart=always</code> (or an
+equivalent restart policy); a manually launched sandbox remains stopped.</p>
+<h2 id="live-display"><a class="anchor" href="#live-display" aria-hidden="true">#</a>Live display</h2>
+<p>The unlocked portal also links to <strong>Open live display</strong>, served at <code>/display</code>.
+It shows the sandbox&#39;s virtual X display in the browser with keyboard and mouse
+input enabled by default; tick <strong>View only</strong> to watch without interfering with
+an agent that is driving the display. The page uses the vendored noVNC client
+and a WebSocket on the same admin port, which the host relays to an <code>x11vnc</code>
+process started on demand inside the container with <code>podman exec</code>. No extra
+container port is opened and nothing listens inside the container between
+sessions. The display route requires the same PIN session as the rest of the
+portal and, like the portal, is served over plain HTTP.</p>
+<p>The portal also serves <a href="plan-usage.html">plan-limit usage</a>.</p>
+<h2 id="managed-approvals"><a class="anchor" href="#managed-approvals" aria-hidden="true">#</a>Managed approvals</h2>
+<p>For a long-running T3 service, enable managed fetches, pushes, GitHub actions,
+or any combination:</p>
+<pre><code class="language-bash">T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox \
+  --t3-managed-fetch --t3-managed-push --t3-managed-gh t3code
+</code></pre>
+<p>The first authenticated SSH fetch from an unapproved source and the first push
+from an unapproved repository are denied and add separate pending candidates to
+the portal. Choose <strong>Approve once</strong>, <strong>Always allow</strong>, or <strong>Dismiss</strong>. Fetch
+approval grants this sandbox instance read access to one exact SSH repository;
+it never grants push or GitHub CLI write access. Push approval remains bound to
+a workspace-relative repository and its <code>origin</code>, and an origin change suspends
+it. Approvals are stored outside the mounted workspace under
+<code>~/.claude-sandbox/projects/</code>, where the container cannot modify them.</p>
+<p>Managed fetch and push approvals remain independent of the <a href="github.html">GitHub CLI proxy</a>.
+With <code>--t3-managed-gh</code>, the proxy offers one-time portal approval for an exact
+foreign-repository <code>issue create</code>, <code>issue comment</code>, <code>issue close</code>, <code>issue edit</code>,
+<code>issue reopen</code>, <code>pr create</code>, <code>pr comment</code>, <code>pr edit</code>, <code>pr ready</code>, <code>pr close</code>, or
+<code>pr reopen</code> command. It inspects repository, item, and pull-request head
+identities, displays the canonical action, and consumes approval before
+executing it. Other <code>gh</code> writes remain limited to repositories snapshotted
+beneath the workspace.
+For a pending action, the portal can instead always allow that command kind or
+all eleven supported issue and pull-request actions in its repository. This
+gives up content review: anything the agent can read can be posted to that
+repository under your account until you revoke the grant in the portal.
+Approved text is published exactly as shown and may disclose information or
+trigger target-repository automation. Repository and item identity are checked
+immediately before execution, but the mutation itself cannot pin that identity.
+For <code>pr create</code>, approval binds the head commit seen during retry inspection,
+but the pull request follows the head branch; commits pushed to it later,
+including between approval and creation, become part of it.</p>
+<h2 id="security"><a class="anchor" href="#security" aria-hidden="true">#</a>Security</h2>
+<p>The portal uses plain HTTP. Anyone able to observe the traffic can recover both
+the PIN and generated pairing token, and a short PIN can be guessed. Never
+expose it to the internet; use it over an encrypted trusted path such as a VPN
+or SSH tunnel. <a href="plan-usage.html"><code>GET /api/usage</code></a> is intentionally unauthenticated, so anyone who
+can reach the admin port can observe usage percentages, reset schedules, and
+the associated provider limit or model labels.</p>
+
+        <nav class="pager" aria-label="Pages">
+          <a class="prev" href="skills.html"><span>Previous</span>Skills</a>
+          <a class="next" href="plan-usage.html"><span>Next</span>Plan usage</a>
+        </nav>
+        <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/t3code.html">Edit this page on GitHub</a></p>
+      </article>
+      <nav class="toc" aria-label="On this page">
+        <p>On this page</p>
+        <ul>
+          <li><a href="#admin-portal">Admin portal</a></li>
+          <li><a href="#restart-sandbox">Restart sandbox</a></li>
+          <li><a href="#live-display">Live display</a></li>
+          <li><a href="#managed-approvals">Managed approvals</a></li>
+          <li><a href="#security">Security</a></li>
+        </ul>
+      </nav>
+    </main>
+  </div>
+</body>
+</html>

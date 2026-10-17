@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Running as a systemd service · claude-sandbox</title>
+  <meta name="description" content="Install a tested invocation as a systemd user service.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="topbar">
+    <a class="brand" href="index.html">claude-sandbox</a>
+    <label class="menu-button" for="menu-toggle">Menu</label>
+    <a class="repo" href="https://github.com/nsg/claude-sandbox">GitHub</a>
+  </div>
+  <div class="layout">
+    <input type="checkbox" id="menu-toggle" class="menu-toggle">
+    <nav class="sidebar" aria-label="Documentation">
+      <a class="brand" href="index.html">claude-sandbox</a>
+      <p class="nav-group">Getting started</p>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="usage.html">Command-line usage</a></li>
+        <li><a href="environment.html">Container environment</a></li>
+        <li><a href="skills.html">Skills</a></li>
+      </ul>
+      <p class="nav-group">Running agents</p>
+      <ul>
+        <li><a href="t3code.html">T3 Code</a></li>
+        <li><a href="plan-usage.html">Plan usage</a></li>
+        <li><a href="service.html" aria-current="page">Systemd service</a></li>
+        <li><a href="wrap.html">Wrapped sessions</a></li>
+        <li><a href="gui.html">Agent-controlled GUI</a></li>
+      </ul>
+      <p class="nav-group">Host bridges</p>
+      <ul>
+        <li><a href="github.html">GitHub CLI proxy</a></li>
+        <li><a href="ssh.html">SSH proxy</a></li>
+        <li><a href="git-push.html">Git push bridge</a></li>
+        <li><a href="vm.html">Virtual machine bridge</a></li>
+        <li><a href="clipboard.html">Clipboard image bridge</a></li>
+      </ul>
+      <p class="nav-group">Development</p>
+      <ul>
+        <li><a href="building.html">Building locally</a></li>
+      </ul>
+      <p class="nav-group">Project</p>
+      <ul>
+        <li><a href="https://github.com/nsg/claude-sandbox">Source on GitHub</a></li>
+        <li><a href="https://github.com/nsg/claude-sandbox/releases/latest">Latest release</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+      <article>
+        <header>
+          <h1>Running as a systemd service</h1>
+          <p class="lede">Install a tested invocation as a systemd user service.</p>
+        </header>
+<p>First run the complete command by hand from the project directory and check
+that it behaves as intended. Then recall that command, insert
+<code>--install-service</code> immediately after <code>claude-sandbox</code>, and run it again:</p>
+<pre><code class="language-bash">T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
+  claude-sandbox --install-service --t3-managed-fetch --t3-managed-push t3code
+</code></pre>
+<p>This writes <code>~/.config/systemd/user/&lt;name&gt;.service</code> (or the corresponding
+location under an absolute <code>XDG_CONFIG_HOME</code>), reloads the systemd user
+manager, and does not start or enable the service. By default the name is
+<code>claude-sandbox-&lt;command&gt;-&lt;directory&gt;</code>; choose one explicitly with
+<code>--install-service=NAME</code> (letters, digits, <code>_</code> and <code>-</code>). The summary printed
+afterwards shows the recorded command, directory and variable names.</p>
+<p>Use the unit name printed after installation:</p>
+<pre><code class="language-bash">systemctl --user start claude-sandbox-t3code-projects
+systemctl --user enable claude-sandbox-t3code-projects
+loginctl enable-linger
+journalctl --user -u claude-sandbox-t3code-projects -f
+</code></pre>
+<p><code>enable</code> starts it at future logins. <code>loginctl enable-linger</code> additionally
+lets the user manager and enabled service start at boot without an interactive
+login.</p>
+<p>The generated unit records the launcher&#39;s arguments, the current working
+directory, and these environment variables when they are set and non-empty:</p>
+<ul>
+<li><code>PATH</code></li>
+<li><code>T3CODE_PAIR_ADMIN_PIN</code></li>
+<li><code>T3CODE_PORT</code></li>
+<li><code>T3CODE_PAIR_ADMIN_PORT</code></li>
+<li><code>CLIPBOARD_SCREENSHOTS_DIR</code></li>
+<li><code>XDG_CACHE_HOME</code></li>
+<li><code>XDG_CONFIG_HOME</code></li>
+<li><code>XDG_DATA_HOME</code></li>
+<li><code>XDG_STATE_HOME</code></li>
+<li><code>SSH_AUTH_SOCK</code>, only when the socket is in <code>XDG_RUNTIME_DIR</code>; a forwarded
+agent&#39;s socket is gone by the time the service starts</li>
+<li><code>GH_CONFIG_DIR</code></li>
+<li><code>GH_HOST</code></li>
+<li><code>GH_TOKEN</code></li>
+<li><code>GITHUB_TOKEN</code></li>
+</ul>
+<p>The unit file is mode 0600 because it can contain the pairing PIN or a token,
+and it is never written inside the project directory, where the agent could
+read or change it. Add other variables with <code>systemctl --user edit &lt;name&gt;</code>;
+that creates a systemd drop-in which survives re-installing the generated
+unit. Re-running the install command from the same directory regenerates the
+unit. A name that belongs to another working directory, or to a unit that
+claude-sandbox did not generate, is refused; choose a distinct explicit name.</p>
+<p>A T3 Code unit uses <code>Restart=always</code>, so the admin portal&#39;s <strong>Restart sandbox</strong>
+button and a crashed server both bring it back. Units for other commands use
+<code>Restart=on-failure</code>, which lets a <code>run</code> command finish.</p>
+<p>Services have no terminal. T3 Code and non-interactive <code>run</code> commands work
+normally, but the default Claude, Codex, and opencode TUIs and <code>shell</code> need
+<a href="wrap.html"><code>--wrap</code></a> when installed as a service.</p>
+<p>The service updates the launcher and skills only when <code>--auto-update</code> is part
+of the installed command. Without that flag a service start never prompts, and
+while an update is pending it is skipped along with the container image pull.</p>
+<p>With <code>--vm</code>, stopping the service ends the VM proxy before it can delete its
+virtual machines; they are removed the next time the service starts.</p>
+
+        <nav class="pager" aria-label="Pages">
+          <a class="prev" href="plan-usage.html"><span>Previous</span>Plan usage</a>
+          <a class="next" href="wrap.html"><span>Next</span>Wrapped sessions</a>
+        </nav>
+        <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/service.html">Edit this page on GitHub</a></p>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

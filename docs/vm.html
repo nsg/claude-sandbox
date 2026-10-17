@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Virtual machine bridge · claude-sandbox</title>
+  <meta name="description" content="Create and control ephemeral Incus VMs without exposing host credentials or devices.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="topbar">
+    <a class="brand" href="index.html">claude-sandbox</a>
+    <label class="menu-button" for="menu-toggle">Menu</label>
+    <a class="repo" href="https://github.com/nsg/claude-sandbox">GitHub</a>
+  </div>
+  <div class="layout">
+    <input type="checkbox" id="menu-toggle" class="menu-toggle">
+    <nav class="sidebar" aria-label="Documentation">
+      <a class="brand" href="index.html">claude-sandbox</a>
+      <p class="nav-group">Getting started</p>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="usage.html">Command-line usage</a></li>
+        <li><a href="environment.html">Container environment</a></li>
+        <li><a href="skills.html">Skills</a></li>
+      </ul>
+      <p class="nav-group">Running agents</p>
+      <ul>
+        <li><a href="t3code.html">T3 Code</a></li>
+        <li><a href="plan-usage.html">Plan usage</a></li>
+        <li><a href="service.html">Systemd service</a></li>
+        <li><a href="wrap.html">Wrapped sessions</a></li>
+        <li><a href="gui.html">Agent-controlled GUI</a></li>
+      </ul>
+      <p class="nav-group">Host bridges</p>
+      <ul>
+        <li><a href="github.html">GitHub CLI proxy</a></li>
+        <li><a href="ssh.html">SSH proxy</a></li>
+        <li><a href="git-push.html">Git push bridge</a></li>
+        <li><a href="vm.html" aria-current="page">Virtual machine bridge</a></li>
+        <li><a href="clipboard.html">Clipboard image bridge</a></li>
+      </ul>
+      <p class="nav-group">Development</p>
+      <ul>
+        <li><a href="building.html">Building locally</a></li>
+      </ul>
+      <p class="nav-group">Project</p>
+      <ul>
+        <li><a href="https://github.com/nsg/claude-sandbox">Source on GitHub</a></li>
+        <li><a href="https://github.com/nsg/claude-sandbox/releases/latest">Latest release</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+      <article>
+        <header>
+          <h1>Virtual machine bridge</h1>
+          <p class="lede">Create and control ephemeral Incus VMs without exposing host credentials or devices.</p>
+        </header>
+<p>Launch with <code>--vm</code> to let an agent create and control Incus virtual machines
+through a host-side bridge:</p>
+<pre><code class="language-bash">claude-sandbox --vm
+</code></pre>
+<p>The agent never receives the Incus client certificate, the Incus Unix socket,
+or <code>/dev/kvm</code>. The bridge uses a dedicated project-restricted TLS certificate,
+requires an Incus project with security restrictions enabled, validates the
+small set of accepted values, and builds every Incus request itself. It creates
+VMs only, and every VM is ephemeral: <strong>stopping a VM deletes it and its disk</strong>.
+Imported ISO volumes and disk images are retained for later sessions.</p>
+<p>VMs use the network configured in the Incus <code>default</code> profile. Traffic on that
+Incus bridge is not filtered by the Podman sandbox, so apply any required
+network policy on the Incus bridge or upstream network.</p>
+<h2 id="one-time-host-setup"><a class="anchor" href="#one-time-host-setup" aria-hidden="true">#</a>One-time host setup</h2>
+<p>Run the following as an Incus administrator. Replace the example resource
+limits with totals appropriate for this machine. The bridge requires the
+<code>limits.virtual-machines</code>, <code>limits.cpu</code>, <code>limits.memory</code>, and <code>limits.disk</code>
+settings shown below. Replace <code>default</code> and <code>incusbr0</code> if the host uses
+different storage-pool or managed-network names.</p>
+<pre><code class="language-bash">incus config set core.https_address 127.0.0.1:8443
+incus project create claude-sandbox -c restricted=true \
+    -c limits.containers=0 -c limits.virtual-machines=&lt;n&gt; \
+    -c limits.cpu=&lt;n&gt; -c limits.memory=&lt;size&gt; -c limits.disk=&lt;size&gt;
+incus profile device add default root disk path=/ pool=default --project claude-sandbox
+incus profile device add default eth0 nic network=incusbr0 name=eth0 --project claude-sandbox
+incus config trust add claude-sandbox --restricted --projects claude-sandbox
+</code></pre>
+<p>The last command prints a one-use trust token. As the user who runs
+claude-sandbox, enroll a new client in the bridge&#39;s dedicated configuration
+directory:</p>
+<pre><code class="language-bash">INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox &lt;token&gt;
+</code></pre>
+<p>Launch from a project directory, not a directory such as your home directory
+that contains <code>~/.claude-sandbox</code>. The bridge refuses <code>--vm</code> when the workspace
+and its private Incus configuration or import snapshot directory overlap, which
+would expose the client key to the agent.</p>
+<p>Incus project limits for CPU and memory require corresponding per-instance
+limits; the bridge sets both on every VM. With <code>restricted=true</code>, Incus 6.0 and
+newer already block raw QEMU configuration, host-path disk devices, and PCI,
+GPU, USB, Unix-device, and proxy-device passthrough by default. See the official
+documentation for <a href="https://linuxcontainers.org/incus/docs/main/reference/projects/">project limits and restrictions</a>,
+<a href="https://linuxcontainers.org/incus/docs/main/howto/projects_confine/">restricted TLS clients</a>,
+and <a href="https://linuxcontainers.org/incus/docs/main/howto/server_expose/">the HTTPS listener and trust-token flow</a>.
+Newer releases also expose <code>restricted.virtual-machines.nesting</code> (default:
+<code>allow</code>); Incus 6.0 does not. The bridge never accepts <code>security.nesting</code>, so
+the common setup needs no version-specific override.</p>
+<p>When <code>--vm</code> is enabled, startup checks the client, dedicated configuration,
+HTTPS connection, certificate confinement, restricted project, and default
+profile. A missing NIC is a warning; every other failed check is reported with
+a remediation command. Setup failures never prevent the sandbox from starting:
+<code>vm help</code> remains available, <code>vm status</code> reruns and prints the full check, and
+other commands rerun the check and return the same report until setup is fixed.</p>
+<p>The bridge assumes that only one VM-enabled sandbox uses the dedicated project
+at a time. All project VMs are deleted when the bridge starts healthy and when
+the launcher exits. If the bridge process itself is killed directly (including
+by SIGTERM, SIGKILL, or the OOM killer), its VMs keep running until the next
+<code>--vm</code> start; check them with <code>incus list --project claude-sandbox</code>. Keep
+unrelated workloads out of the <code>claude-sandbox</code> project.</p>
+<p>Run <code>vm help</code> inside the container for the complete command reference:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>vm help</code></td>
+<td>Show the complete in-container command reference</td>
+</tr>
+<tr>
+<td><code>vm status</code></td>
+<td>Rerun the host preflight and print every check</td>
+</tr>
+<tr>
+<td><code>vm list [--json]</code></td>
+<td>List VMs, addresses, CPU counts, and memory</td>
+</tr>
+<tr>
+<td><code>vm info NAME [--json]</code></td>
+<td>Show one VM, including its addresses</td>
+</tr>
+<tr>
+<td><code>vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot]</code></td>
+<td>Create and start an ephemeral VM; defaults are 2 CPUs, 4 GiB memory, and a 20 GiB disk</td>
+</tr>
+<tr>
+<td><code>vm stop NAME [--force]</code></td>
+<td>Stop and therefore delete an ephemeral VM</td>
+</tr>
+<tr>
+<td><code>vm restart NAME [--force]</code></td>
+<td>Restart a VM</td>
+</tr>
+<tr>
+<td><code>vm delete NAME</code></td>
+<td>Force-delete a VM</td>
+</tr>
+<tr>
+<td><code>vm screen NAME</code></td>
+<td>Start or reuse its SPICE relay and print <code>spice+unix:///run/claude-sandbox/vm-NAME.spice</code></td>
+</tr>
+<tr>
+<td><code>vm view NAME</code></td>
+<td>Open that display full-screen on the sandbox&#39;s virtual X display with <code>remote-viewer</code></td>
+</tr>
+<tr>
+<td><code>vm exec NAME [--timeout SECS] -- CMD [ARG...]</code></td>
+<td>Run a non-interactive command, with a default 120-second and maximum 3600-second timeout</td>
+</tr>
+<tr>
+<td><code>vm console-log NAME</code></td>
+<td>Print the VM console log (requires an Incus server newer than 6.0.0)</td>
+</tr>
+<tr>
+<td><code>vm import PATH NAME</code></td>
+<td>Import a workspace ISO as a custom volume or a qcow2 disk as an image alias, detected by content</td>
+</tr>
+<tr>
+<td><code>vm media [--json]</code></td>
+<td>List imported ISO volumes and images</td>
+</tr>
+<tr>
+<td><code>vm media-delete NAME</code></td>
+<td>Delete imported media</td>
+</tr>
+</tbody></table>
+</div>
+<p><code>vm exec</code> requires the Incus agent in the guest. Public <code>images:</code> VMs include
+it; a fresh ISO installation does not. Command stdout and stderr are each
+capped at 1 MiB with a truncation notice. Local imports accept ISO9660 and
+standalone qcow2 content only; convert raw disks first with
+<code>qemu-img convert -O qcow2</code>. ISO imports are capped at 16 GiB, qcow2 imports at
+64 GiB, and at most 16 imported media entries may be retained.</p>
+<p>The required <code>limits.disk</code> setting limits instance disks and custom volumes,
+but import accounting varies by Incus version. Incus 6.0 stages an ISO upload
+on the host before checking its quota, and retained images are not counted
+against later image imports, so the bridge&#39;s own import caps are the effective
+bound in those cases. Newer Incus releases check staging against the quota.</p>
+<p>With <code>vm view</code>, the guest fills the virtual display, so the agent reads it with
+<code>scrot</code> and sends keys and clicks with <code>xdotool</code>, and you can watch through the
+<a href="t3code.html#live-display">live display</a> in the T3 admin portal. SPICE serves one viewer at a time: a
+second viewer drops the first. The bridge opens the display through the Incus
+API itself, so SPICE viewers installed on the host, such as <code>remote-viewer</code> or
+<code>spicy</code>, do not affect it. The <a href="skills.html"><code>/vm</code> skill</a> describes the workflow.</p>
+
+        <nav class="pager" aria-label="Pages">
+          <a class="prev" href="git-push.html"><span>Previous</span>Git push bridge</a>
+          <a class="next" href="clipboard.html"><span>Next</span>Clipboard image bridge</a>
+        </nav>
+        <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/vm.html">Edit this page on GitHub</a></p>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

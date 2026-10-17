@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skills · claude-sandbox</title>
+  <meta name="description" content="Optional skills that every harness in the sandbox discovers natively.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="topbar">
+    <a class="brand" href="index.html">claude-sandbox</a>
+    <label class="menu-button" for="menu-toggle">Menu</label>
+    <a class="repo" href="https://github.com/nsg/claude-sandbox">GitHub</a>
+  </div>
+  <div class="layout">
+    <input type="checkbox" id="menu-toggle" class="menu-toggle">
+    <nav class="sidebar" aria-label="Documentation">
+      <a class="brand" href="index.html">claude-sandbox</a>
+      <p class="nav-group">Getting started</p>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="usage.html">Command-line usage</a></li>
+        <li><a href="environment.html">Container environment</a></li>
+        <li><a href="skills.html" aria-current="page">Skills</a></li>
+      </ul>
+      <p class="nav-group">Running agents</p>
+      <ul>
+        <li><a href="t3code.html">T3 Code</a></li>
+        <li><a href="plan-usage.html">Plan usage</a></li>
+        <li><a href="service.html">Systemd service</a></li>
+        <li><a href="wrap.html">Wrapped sessions</a></li>
+        <li><a href="gui.html">Agent-controlled GUI</a></li>
+      </ul>
+      <p class="nav-group">Host bridges</p>
+      <ul>
+        <li><a href="github.html">GitHub CLI proxy</a></li>
+        <li><a href="ssh.html">SSH proxy</a></li>
+        <li><a href="git-push.html">Git push bridge</a></li>
+        <li><a href="vm.html">Virtual machine bridge</a></li>
+        <li><a href="clipboard.html">Clipboard image bridge</a></li>
+      </ul>
+      <p class="nav-group">Development</p>
+      <ul>
+        <li><a href="building.html">Building locally</a></li>
+      </ul>
+      <p class="nav-group">Project</p>
+      <ul>
+        <li><a href="https://github.com/nsg/claude-sandbox">Source on GitHub</a></li>
+        <li><a href="https://github.com/nsg/claude-sandbox/releases/latest">Latest release</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+      <article>
+        <header>
+          <h1>Skills</h1>
+          <p class="lede">Optional skills that every harness in the sandbox discovers natively.</p>
+        </header>
+<p>Install optional skills to <code>~/.claude/skills/</code> and <code>~/.agents/skills/</code> — between them, all three harnesses discover the skills natively (Claude Code reads the former; Codex and opencode read the latter, and opencode reads the former too). Updates are checked automatically on each launch.</p>
+<pre><code class="language-bash">claude-sandbox install skills
+</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/rust</code></td>
+<td>Rust development guidelines and workflow</td>
+</tr>
+<tr>
+<td><code>/git</code></td>
+<td>Git operations with small, atomic commits and clean history</td>
+</tr>
+<tr>
+<td><code>/github-actions</code></td>
+<td>GitHub Actions workflow development with official actions preference</td>
+</tr>
+<tr>
+<td><code>/readme</code></td>
+<td>README writing and maintenance guidelines</td>
+</tr>
+<tr>
+<td><code>/testing</code></td>
+<td>Testing strategy: test only our code, keep suites and CI minimal, prune once the code works</td>
+</tr>
+<tr>
+<td><code>/plan-usage</code></td>
+<td>Check plan-limit headroom and reset timing before routing substantial agent work</td>
+</tr>
+<tr>
+<td><code>/gui</code></td>
+<td>Run and test GUI applications on the virtual X display</td>
+</tr>
+<tr>
+<td><code>/vm</code></td>
+<td>Create, boot, and drive virtual machines through the Incus bridge</td>
+</tr>
+<tr>
+<td><code>/container-images</code></td>
+<td>Build, inspect, export, and push OCI images with Buildah</td>
+</tr>
+<tr>
+<td><code>/wrap</code></td>
+<td>Run and drive interactive terminal programs in a tmux session</td>
+</tr>
+<tr>
+<td><code>/stathost</code></td>
+<td>Publish rich HTML pages to a <a href="https://github.com/nsg/stathost">StatHost</a> bucket and return a clickable link</td>
+</tr>
+<tr>
+<td><code>/claude</code></td>
+<td>Delegate work to Anthropic models through the Claude Code CLI</td>
+</tr>
+<tr>
+<td><code>/codex</code></td>
+<td>Delegate work to OpenAI models through the Codex CLI</td>
+</tr>
+<tr>
+<td><code>/opencode</code></td>
+<td>Delegate non-code work to open-weight models through opencode</td>
+</tr>
+<tr>
+<td><code>/delegate</code></td>
+<td>Choose between Anthropic, OpenAI, and open-weight model pools</td>
+</tr>
+<tr>
+<td><code>/consensus-review</code></td>
+<td>Run a cross-vendor code review and reconcile the findings</td>
+</tr>
+<tr>
+<td><code>/sandbox-environment</code></td>
+<td>Describe the container environment and safe tool installation</td>
+</tr>
+</tbody></table>
+</div>
+<p>Invoke skills manually with <code>/skill-name</code> inside Claude, <code>$skill-name</code> (or the <code>/skills</code> picker) inside Codex, and via the <code>skill</code> tool in opencode; all three also load skills on their own when a task matches a skill&#39;s description.</p>
+
+        <nav class="pager" aria-label="Pages">
+          <a class="prev" href="environment.html"><span>Previous</span>Container environment</a>
+          <a class="next" href="t3code.html"><span>Next</span>T3 Code</a>
+        </nav>
+        <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/skills.html">Edit this page on GitHub</a></p>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

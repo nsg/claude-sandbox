@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GitHub CLI proxy · claude-sandbox</title>
+  <meta name="description" content="Restricted, audited gh access without exposing your credentials to the container.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="topbar">
+    <a class="brand" href="index.html">claude-sandbox</a>
+    <label class="menu-button" for="menu-toggle">Menu</label>
+    <a class="repo" href="https://github.com/nsg/claude-sandbox">GitHub</a>
+  </div>
+  <div class="layout">
+    <input type="checkbox" id="menu-toggle" class="menu-toggle">
+    <nav class="sidebar" aria-label="Documentation">
+      <a class="brand" href="index.html">claude-sandbox</a>
+      <p class="nav-group">Getting started</p>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="usage.html">Command-line usage</a></li>
+        <li><a href="environment.html">Container environment</a></li>
+        <li><a href="skills.html">Skills</a></li>
+      </ul>
+      <p class="nav-group">Running agents</p>
+      <ul>
+        <li><a href="t3code.html">T3 Code</a></li>
+        <li><a href="plan-usage.html">Plan usage</a></li>
+        <li><a href="service.html">Systemd service</a></li>
+        <li><a href="wrap.html">Wrapped sessions</a></li>
+        <li><a href="gui.html">Agent-controlled GUI</a></li>
+      </ul>
+      <p class="nav-group">Host bridges</p>
+      <ul>
+        <li><a href="github.html" aria-current="page">GitHub CLI proxy</a></li>
+        <li><a href="ssh.html">SSH proxy</a></li>
+        <li><a href="git-push.html">Git push bridge</a></li>
+        <li><a href="vm.html">Virtual machine bridge</a></li>
+        <li><a href="clipboard.html">Clipboard image bridge</a></li>
+      </ul>
+      <p class="nav-group">Development</p>
+      <ul>
+        <li><a href="building.html">Building locally</a></li>
+      </ul>
+      <p class="nav-group">Project</p>
+      <ul>
+        <li><a href="https://github.com/nsg/claude-sandbox">Source on GitHub</a></li>
+        <li><a href="https://github.com/nsg/claude-sandbox/releases/latest">Latest release</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+      <article>
+        <header>
+          <h1>GitHub CLI proxy</h1>
+          <p class="lede">Restricted, audited gh access without exposing your credentials to the container.</p>
+        </header>
+<p>The container includes a sandboxed <code>gh</code> proxy that gives agents restricted access to GitHub without exposing your credentials directly. The proxy runs on the host and communicates with the container over a Unix socket.</p>
+<p>Each launch gets a private set of host proxy sockets, mounted read-only at <code>/run/claude-sandbox</code> inside that container. The launcher waits until every enabled proxy accepts connections and aborts startup if one fails, preventing stale sockets or another session&#39;s permissions from being reused. Proxy logs live in private host-side project state under <code>~/.claude-sandbox/projects/&lt;project&gt;/logs/</code>.</p>
+<p>At launch, the host discovers GitHub repositories beneath the mounted workspace and snapshots each repository&#39;s pinned path and <code>origin</code> identity. Discovery reads only a bounded, pinned local Git config with includes disabled; Git directories outside the workspace are rejected. The container forwards its current working directory with every request, but the host executes <code>gh</code> from a neutral directory and supplies the snapshotted repository explicitly. Hooks and later worktree configuration changes therefore cannot influence the host-side command.</p>
+<p>Two exact <code>gh api</code> requests are also available; all other <code>gh api</code> forms remain blocked:</p>
+<ul>
+<li><code>gh api user --jq .login</code>, the account-scoped identity probe, returns only the authenticated login</li>
+<li><code>gh api --hostname &lt;host&gt; repos/&lt;owner&gt;/&lt;repo&gt;/stacks?pull_request=&lt;number&gt;</code> reads the stack a pull request belongs to, which T3 Code needs to sync pull-request status. The proxy accepts no other flags, rebuilds the request as a <code>GET</code>, and limits the host to <code>github.com</code> or a launch-snapshotted repository&#39;s host</li>
+</ul>
+<h2 id="read-commands"><a class="anchor" href="#read-commands" aria-hidden="true">#</a>Read commands</h2>
+<p>Read commands work against any repository:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Group</th>
+<th>Commands</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>auth</code></td>
+<td><code>status</code> (token output is blocked)</td>
+</tr>
+<tr>
+<td><code>pr</code></td>
+<td><code>list</code>, <code>view</code>, <code>diff</code>, <code>checks</code></td>
+</tr>
+<tr>
+<td><code>issue</code></td>
+<td><code>list</code>, <code>view</code></td>
+</tr>
+<tr>
+<td><code>repo</code></td>
+<td><code>view</code>, <code>list</code></td>
+</tr>
+<tr>
+<td><code>release</code></td>
+<td><code>list</code>, <code>view</code></td>
+</tr>
+<tr>
+<td><code>run</code></td>
+<td><code>list</code>, <code>view</code>, <code>watch</code></td>
+</tr>
+<tr>
+<td><code>workflow</code></td>
+<td><code>list</code></td>
+</tr>
+<tr>
+<td><code>search</code></td>
+<td><code>code</code>, <code>commits</code>, <code>issues</code>, <code>prs</code>, <code>repos</code></td>
+</tr>
+</tbody></table>
+</div>
+<h2 id="write-commands"><a class="anchor" href="#write-commands" aria-hidden="true">#</a>Write commands</h2>
+<p>Write commands target the launch-snapshotted repository containing the current working directory. The proxy rejects <code>--repo</code>/<code>-R</code> and positional issue or pull-request URLs that name another repository. An agent may <code>cd</code> between repositories that were present beneath the workspace at launch. New repositories and changed <code>origin</code> values do not expand access until the sandbox is restarted:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Group</th>
+<th>Commands</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>pr</code></td>
+<td><code>create</code>, <code>comment</code>, <code>edit</code>, <code>ready</code>, <code>close</code>, <code>reopen</code>, <code>merge</code> (only with <code>--allow-merge</code>)</td>
+</tr>
+<tr>
+<td><code>issue</code></td>
+<td><code>create</code>, <code>comment</code>, <code>close</code>, <code>edit</code>, <code>reopen</code></td>
+</tr>
+<tr>
+<td><code>run</code></td>
+<td><code>rerun</code>, <code>cancel</code></td>
+</tr>
+</tbody></table>
+</div>
+<p><code>gh pr create</code> requires an explicit <code>--head</code> for an already-pushed branch. The
+proxy resolves the default base when omitted and creates the pull request with
+one GitHub REST call, so GitHub CLI never reads the host worktree.</p>
+<h2 id="agent-disclosure"><a class="anchor" href="#agent-disclosure" aria-hidden="true">#</a>Agent disclosure</h2>
+<p>Agent disclosure is on by default. Issue and pull request bodies and comments the agent publishes under your account say so: the proxy appends a short footer to the text of <code>pr create</code>, <code>pr comment</code>, <code>pr edit --body</code>, <code>issue create</code>, <code>issue comment</code>, <code>issue edit --body</code>, and the <code>--comment</code> of <code>close</code> and <code>reopen</code>:</p>
+<pre><code class="language-markdown">&lt;!-- agent-disclosure --&gt;
+&lt;sub&gt;Posted by an AI agent working on my behalf.&lt;/sub&gt;
+</code></pre>
+<p>The footer is added on the host before validation, so portal approvals show it and it does not depend on the agent remembering to write it. A body that already carries the footer is not given a second one, which keeps edits from stacking them. Titles, milestone descriptions and commit messages, including <code>gh pr merge --body</code>, are left untouched.</p>
+<pre><code class="language-bash"># Use your own wording (Markdown or inline HTML, up to 1024 bytes; one line when installed as a service)
+claude-sandbox --agent-disclosure-text &#39;_Written by an AI agent; reviewed by me before merge._&#39;
+
+# Turn the footer off
+claude-sandbox --no-agent-disclosure
+</code></pre>
+<h2 id="merging-pull-requests"><a class="anchor" href="#merging-pull-requests" aria-hidden="true">#</a>Merging pull requests</h2>
+<p>Merging pull requests is off by default. Launch with <code>--allow-merge</code> to make <code>gh pr merge</code> available for that launch only:</p>
+<pre><code class="language-bash">claude-sandbox --allow-merge
+</code></pre>
+<p>The proxy rebuilds every merge request instead of forwarding it:</p>
+<ul>
+<li>The target is one pull request number or URL in the launch-snapshotted repository containing the current working directory. Branch names are not accepted, and <code>--repo</code>/<code>-R</code> is accepted only when it names that same repository</li>
+<li>Exactly one of <code>--merge</code>, <code>--squash</code>, or <code>--rebase</code> is required, optionally with <code>--auto</code>, <code>--subject</code>, <code>--body</code>, and <code>--match-head-commit &lt;sha&gt;</code> to merge only the commit that was reviewed. <code>--disable-auto</code> stands alone</li>
+<li><code>--admin</code> is never available, so branch protection, required reviews, and required checks still decide whether a merge happens</li>
+<li>Pull requests from forks are refused: a merge can only land a branch of the repository itself, which someone with write access pushed</li>
+<li><code>--delete-branch</code>, <code>--body-file</code>, and <code>--author-email</code> are unavailable, and GitHub CLI always receives an explicit repository, so it performs no Git operations on the host</li>
+</ul>
+<h2 id="extension-commands"><a class="anchor" href="#extension-commands" aria-hidden="true">#</a>Extension commands</h2>
+<p>Extension commands add custom functionality:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>gh ext run-logs &lt;run-id&gt;</code></td>
+<td>Download workflow run logs for the current snapshotted repository as a zip file</td>
+</tr>
+<tr>
+<td><code>gh ext milestone-create &lt;title&gt;</code></td>
+<td>Create a milestone in the current snapshotted repository (supports <code>--description</code>, <code>--due-on</code>)</td>
+</tr>
+<tr>
+<td><code>gh ext milestone-list</code></td>
+<td>List milestones in the current snapshotted repository (supports <code>--state open|closed|all</code>)</td>
+</tr>
+<tr>
+<td><code>gh ext pr-review-threads &lt;pr-number&gt;</code></td>
+<td>List review threads and inline comments as JSON (supports <code>--unresolved</code>, <code>--repo</code>)</td>
+</tr>
+</tbody></table>
+</div>
+<p>Repository-mutating extensions use the same current-working-directory selection and launch snapshot as other write commands.</p>
+<h2 id="logging"><a class="anchor" href="#logging" aria-hidden="true">#</a>Logging</h2>
+<p>All commands are flag-validated against a strict allowlist. Every request is logged to <code>~/.claude-sandbox/projects/&lt;project&gt;/logs/gh-proxy.log</code>.</p>
+<p>Run <code>gh -h</code> inside the container to see available commands.</p>
+
+        <nav class="pager" aria-label="Pages">
+          <a class="prev" href="gui.html"><span>Previous</span>Agent-controlled GUI</a>
+          <a class="next" href="ssh.html"><span>Next</span>SSH proxy</a>
+        </nav>
+        <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/github.html">Edit this page on GitHub</a></p>
+      </article>
+      <nav class="toc" aria-label="On this page">
+        <p>On this page</p>
+        <ul>
+          <li><a href="#read-commands">Read commands</a></li>
+          <li><a href="#write-commands">Write commands</a></li>
+          <li><a href="#agent-disclosure">Agent disclosure</a></li>
+          <li><a href="#merging-pull-requests">Merging pull requests</a></li>
+          <li><a href="#extension-commands">Extension commands</a></li>
+          <li><a href="#logging">Logging</a></li>
+        </ul>
+      </nav>
+    </main>
+  </div>
+</body>
+</html>

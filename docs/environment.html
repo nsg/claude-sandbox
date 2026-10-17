@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Container environment · claude-sandbox</title>
+  <meta name="description" content="What ships in the image and how the container manages agent configuration.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="topbar">
+    <a class="brand" href="index.html">claude-sandbox</a>
+    <label class="menu-button" for="menu-toggle">Menu</label>
+    <a class="repo" href="https://github.com/nsg/claude-sandbox">GitHub</a>
+  </div>
+  <div class="layout">
+    <input type="checkbox" id="menu-toggle" class="menu-toggle">
+    <nav class="sidebar" aria-label="Documentation">
+      <a class="brand" href="index.html">claude-sandbox</a>
+      <p class="nav-group">Getting started</p>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="usage.html">Command-line usage</a></li>
+        <li><a href="environment.html" aria-current="page">Container environment</a></li>
+        <li><a href="skills.html">Skills</a></li>
+      </ul>
+      <p class="nav-group">Running agents</p>
+      <ul>
+        <li><a href="t3code.html">T3 Code</a></li>
+        <li><a href="plan-usage.html">Plan usage</a></li>
+        <li><a href="service.html">Systemd service</a></li>
+        <li><a href="wrap.html">Wrapped sessions</a></li>
+        <li><a href="gui.html">Agent-controlled GUI</a></li>
+      </ul>
+      <p class="nav-group">Host bridges</p>
+      <ul>
+        <li><a href="github.html">GitHub CLI proxy</a></li>
+        <li><a href="ssh.html">SSH proxy</a></li>
+        <li><a href="git-push.html">Git push bridge</a></li>
+        <li><a href="vm.html">Virtual machine bridge</a></li>
+        <li><a href="clipboard.html">Clipboard image bridge</a></li>
+      </ul>
+      <p class="nav-group">Development</p>
+      <ul>
+        <li><a href="building.html">Building locally</a></li>
+      </ul>
+      <p class="nav-group">Project</p>
+      <ul>
+        <li><a href="https://github.com/nsg/claude-sandbox">Source on GitHub</a></li>
+        <li><a href="https://github.com/nsg/claude-sandbox/releases/latest">Latest release</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+      <article>
+        <header>
+          <h1>Container environment</h1>
+          <p class="lede">What ships in the image and how the container manages agent configuration.</p>
+        </header>
+<h2 id="what39s-included"><a class="anchor" href="#what39s-included" aria-hidden="true">#</a>What&#39;s included</h2>
+<p>The container includes:</p>
+<ul>
+<li>Claude CLI</li>
+<li>OpenAI Codex CLI</li>
+<li><a href="https://opencode.ai">opencode</a> TUI coding agent</li>
+<li><a href="https://github.com/pingdotgg/t3code">t3code</a> web GUI for coding agents</li>
+<li>Node.js &amp; npm</li>
+<li>Rust (via rustup) + cargo-audit</li>
+<li>Playwright MCP with Chromium and ffmpeg</li>
+<li>Headless Xvfb virtual display with Openbox, AT-SPI/<code>gui-tree</code>, xdotool, wmctrl, and scrot</li>
+<li><a href="https://buildah.io">Buildah</a> for building OCI images</li>
+<li>Zola</li>
+<li>Starship prompt</li>
+<li>Git, curl, jq, tree, build-essential, patchutils, unzip</li>
+</ul>
+<h2 id="managed-configuration"><a class="anchor" href="#managed-configuration" aria-hidden="true">#</a>Managed configuration</h2>
+<p>The container ships default <code>AGENTS.md</code> instructions (skills guidance, commit conventions) at <code>/etc/AGENTS.md</code>, plus optional per-harness overlays at <code>/etc/AGENTS.claude.md</code>, <code>/etc/AGENTS.codex.md</code>, and <code>/etc/AGENTS.opencode.md</code> (sourced from <code>config/AGENTS.md</code> and <code>config/AGENTS.&lt;harness&gt;.md</code>). At startup, each harness gets the shared base with its overlay appended, merged into <code>~/.claude/CLAUDE.md</code>, <code>~/.codex/AGENTS.md</code>, and <code>~/.config/opencode/AGENTS.md</code> respectively. The managed part is the <code># Global Instructions</code> H1 section — it is replaced on every start, and any H1 sections you add below it are preserved. Overlays must therefore contain only <code>##</code> sections (no H1), so their content stays inside the managed section; CI enforces this.</p>
+<p>Claude MCP server config (<code>/etc/claude/mcp.json</code>) is merged into the project&#39;s <code>.mcp.json</code> — image defaults take precedence for shared server names, project-level config is preserved otherwise.</p>
+<p>Managed Codex config is shipped separately at <code>/etc/codex/config.toml</code> and merged into <code>~/.codex/config.toml</code> inside <code># MANAGED START</code> / <code># MANAGED END</code> markers, preserving user-owned Codex config outside that block. Today that managed block only configures MCP, but it can be extended with other Codex settings later.</p>
+<p>Managed opencode config (<code>/etc/opencode/opencode.json</code>) is merged into <code>~/.config/opencode/opencode.json</code> using the same JSON deep-merge as Claude — image defaults win for shared keys (e.g. <code>mcp.playwright</code>), the rest of your opencode config is preserved.</p>
+<h2 id="per-project-memory"><a class="anchor" href="#per-project-memory" aria-hidden="true">#</a>Per-project memory</h2>
+<p>All containers mount at <code>/workspace</code>, which means Claude&#39;s auto-memory would normally be shared across every project. The entrypoint symlinks the memory directory into <code>.claude-sandbox/memory</code> inside each repository, giving every project its own isolated memory.</p>
+<h2 id="playwright-mcp"><a class="anchor" href="#playwright-mcp" aria-hidden="true">#</a>Playwright MCP</h2>
+<p><a href="https://github.com/anthropics/playwright-mcp">Playwright MCP</a> gives Claude and Codex a headless Chromium browser. They can navigate websites, take screenshots, fill forms, and interact with web pages.</p>
+<p>Browser sessions are recorded to <code>.playwright-output/videos/</code> as <code>.webm</code> files at 1280x720.</p>
+
+        <nav class="pager" aria-label="Pages">
+          <a class="prev" href="usage.html"><span>Previous</span>Command-line usage</a>
+          <a class="next" href="skills.html"><span>Next</span>Skills</a>
+        </nav>
+        <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/environment.html">Edit this page on GitHub</a></p>
+      </article>
+      <nav class="toc" aria-label="On this page">
+        <p>On this page</p>
+        <ul>
+          <li><a href="#what39s-included">What&#39;s included</a></li>
+          <li><a href="#managed-configuration">Managed configuration</a></li>
+          <li><a href="#per-project-memory">Per-project memory</a></li>
+          <li><a href="#playwright-mcp">Playwright MCP</a></li>
+        </ul>
+      </nav>
+    </main>
+  </div>
+</body>
+</html>
