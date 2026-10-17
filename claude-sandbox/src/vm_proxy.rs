@@ -390,7 +390,7 @@ impl IncusBridge {
         if incus.is_some() {
             lines.push("OK   Incus client found in PATH".to_string());
         } else {
-            lines.push("FAIL Incus client not found in PATH; install it with `sudo apt install incus-client` (see README: Virtual Machine Bridge)".to_string());
+            lines.push("FAIL Incus client not found in PATH; install it with `sudo apt install incus-client` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
         }
 
         let workspace = canonicalize_for_comparison(&self.workspace_root);
@@ -404,11 +404,11 @@ impl IncusBridge {
 
         if !self.conf_dir.is_dir() {
             lines.push(format!(
-                "FAIL {} is missing; run `INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>` (see README: Virtual Machine Bridge)",
+                "FAIL {} is missing; run `INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)",
                 self.conf_dir.display()
             ));
         } else if incus.is_none() {
-            lines.push("FAIL cannot check the claude-sandbox remote until the Incus client is installed (see README: Virtual Machine Bridge)".to_string());
+            lines.push("FAIL cannot check the claude-sandbox remote until the Incus client is installed (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
         } else if client_config_has_remote(&self.conf_dir, self.remote) {
             lines.push(format!(
                 "OK   {} contains the claude-sandbox remote",
@@ -416,7 +416,7 @@ impl IncusBridge {
             ));
         } else {
             lines.push(format!(
-                "FAIL {} does not contain the claude-sandbox remote; run `INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>` (see README: Virtual Machine Bridge)",
+                "FAIL {} does not contain the claude-sandbox remote; run `INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)",
                 self.conf_dir.display()
             ));
         }
@@ -426,10 +426,10 @@ impl IncusBridge {
                 Ok(server) if server.get("auth").and_then(Value::as_str) == Some("trusted") => {
                     lines.push("OK   Incus server is reachable and the client certificate is trusted".to_string());
                 }
-                Ok(_) => lines.push("FAIL Incus server does not trust this client certificate; recreate the remote with `INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>` (see README: Virtual Machine Bridge)".to_string()),
-                Err(error) if connection_refused(&error) => lines.push("FAIL Incus HTTPS listener is unreachable; run `incus config set core.https_address 127.0.0.1:8443` as an Incus admin (see README: Virtual Machine Bridge)".to_string()),
-                Err(error) if certificate_not_trusted(&error) => lines.push("FAIL Incus server does not trust this client certificate; recreate the remote with `INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>` (see README: Virtual Machine Bridge)".to_string()),
-                Err(error) => lines.push(format!("FAIL Incus server/certificate check failed: {}; recreate the restricted trust token and remote (see README: Virtual Machine Bridge)", one_line(&error))),
+                Ok(_) => lines.push("FAIL Incus server does not trust this client certificate; recreate the remote with `INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string()),
+                Err(error) if connection_refused(&error) => lines.push("FAIL Incus HTTPS listener is unreachable; run `incus config set core.https_address 127.0.0.1:8443` as an Incus admin (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string()),
+                Err(error) if certificate_not_trusted(&error) => lines.push("FAIL Incus server does not trust this client certificate; recreate the remote with `INCUS_CONF=~/.claude-sandbox/incus incus remote add claude-sandbox <token>` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string()),
+                Err(error) => lines.push(format!("FAIL Incus server/certificate check failed: {}; recreate the restricted trust token and remote (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)", one_line(&error))),
             }
 
             // Incus filters the project list to what the certificate may view, so a
@@ -437,11 +437,11 @@ impl IncusBridge {
             match self.query("/1.0/projects?recursion=1", Duration::from_secs(10)) {
                 Ok(projects) => match visible_projects(&projects) {
                     Some(names) if names == [self.project] => lines.push("OK   Client certificate is confined to the claude-sandbox project".to_string()),
-                    Some(names) if names.iter().any(|name| *name != self.project) => lines.push(format!("FAIL the client certificate can also see other projects ({}); remove it with `incus config trust remove <fingerprint>` and add a replacement using `incus config trust add claude-sandbox --restricted --projects claude-sandbox` (see README: Virtual Machine Bridge)", names.join(", "))),
-                    Some(_) => lines.push("FAIL the client certificate cannot see the claude-sandbox project; create the project, then add a certificate using `incus config trust add claude-sandbox --restricted --projects claude-sandbox` (see README: Virtual Machine Bridge)".to_string()),
-                    None => lines.push("FAIL could not verify certificate confinement: unexpected project list from Incus (see README: Virtual Machine Bridge)".to_string()),
+                    Some(names) if names.iter().any(|name| *name != self.project) => lines.push(format!("FAIL the client certificate can also see other projects ({}); remove it with `incus config trust remove <fingerprint>` and add a replacement using `incus config trust add claude-sandbox --restricted --projects claude-sandbox` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)", names.join(", "))),
+                    Some(_) => lines.push("FAIL the client certificate cannot see the claude-sandbox project; create the project, then add a certificate using `incus config trust add claude-sandbox --restricted --projects claude-sandbox` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string()),
+                    None => lines.push("FAIL could not verify certificate confinement: unexpected project list from Incus (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string()),
                 },
-                Err(error) => lines.push(format!("FAIL could not verify certificate confinement: {} (see README: Virtual Machine Bridge)", one_line(&error))),
+                Err(error) => lines.push(format!("FAIL could not verify certificate confinement: {} (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)", one_line(&error))),
             }
 
             match self.query(
@@ -455,7 +455,7 @@ impl IncusBridge {
                     {
                         lines.push("OK   Project claude-sandbox is readable and restricted".to_string());
                     } else {
-                        lines.push("FAIL project claude-sandbox is not restricted; run `incus project set claude-sandbox restricted=true limits.virtual-machines=<n> limits.cpu=<n> limits.memory=<size> limits.disk=<size>` (see README: Virtual Machine Bridge)".to_string());
+                        lines.push("FAIL project claude-sandbox is not restricted; run `incus project set claude-sandbox restricted=true limits.virtual-machines=<n> limits.cpu=<n> limits.memory=<size> limits.disk=<size>` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
                     }
 
                     let disabled_features: Vec<&str> = [
@@ -508,7 +508,7 @@ impl IncusBridge {
                         lines.push(format!("FAIL project resource limits are missing or empty ({}); run `incus project set claude-sandbox {settings}`", missing_limits.join(", ")));
                     }
                 }
-                Err(error) => lines.push(format!("FAIL project claude-sandbox is not readable: {}; create it with `incus project create claude-sandbox -c restricted=true -c limits.containers=0 -c limits.virtual-machines=<n> -c limits.cpu=<n> -c limits.memory=<size> -c limits.disk=<size>` (see README: Virtual Machine Bridge)", one_line(&error))),
+                Err(error) => lines.push(format!("FAIL project claude-sandbox is not readable: {}; create it with `incus project create claude-sandbox -c restricted=true -c limits.containers=0 -c limits.virtual-machines=<n> -c limits.cpu=<n> -c limits.memory=<size> -c limits.disk=<size>` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)", one_line(&error))),
             }
 
             match self.default_profile() {
@@ -517,18 +517,18 @@ impl IncusBridge {
                     if has_nic {
                         lines.push("OK   Project default profile has a NIC".to_string());
                     } else {
-                        lines.push("WARN Project default profile has no NIC; add one with `incus profile device add default eth0 nic network=incusbr0 name=eth0 --project claude-sandbox` (see README: Virtual Machine Bridge)".to_string());
+                        lines.push("WARN Project default profile has no NIC; add one with `incus profile device add default eth0 nic network=incusbr0 name=eth0 --project claude-sandbox` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
                     }
                 }
-                Err(error) => lines.push(format!("FAIL project default profile has no usable root disk: {}; run `incus profile device add default root disk path=/ pool=default --project claude-sandbox` (see README: Virtual Machine Bridge)", one_line(&error))),
+                Err(error) => lines.push(format!("FAIL project default profile has no usable root disk: {}; run `incus profile device add default root disk path=/ pool=default --project claude-sandbox` (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)", one_line(&error))),
             }
         } else {
-            lines.push("FAIL cannot check server trust until the client and remote are configured (see README: Virtual Machine Bridge)".to_string());
-            lines.push("FAIL cannot check certificate confinement until the client and remote are configured (see README: Virtual Machine Bridge)".to_string());
-            lines.push("FAIL cannot check project restrictions until the client and remote are configured (see README: Virtual Machine Bridge)".to_string());
-            lines.push("FAIL cannot check project media and profile features until the client and remote are configured (see README: Virtual Machine Bridge)".to_string());
-            lines.push("FAIL cannot check project resource limits until the client and remote are configured (see README: Virtual Machine Bridge)".to_string());
-            lines.push("FAIL cannot check the project default profile until the client and remote are configured (see README: Virtual Machine Bridge)".to_string());
+            lines.push("FAIL cannot check server trust until the client and remote are configured (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
+            lines.push("FAIL cannot check certificate confinement until the client and remote are configured (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
+            lines.push("FAIL cannot check project restrictions until the client and remote are configured (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
+            lines.push("FAIL cannot check project media and profile features until the client and remote are configured (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
+            lines.push("FAIL cannot check project resource limits until the client and remote are configured (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
+            lines.push("FAIL cannot check the project default profile until the client and remote are configured (see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup)".to_string());
         }
         let report = format!("Virtual Machine Bridge preflight:\n{}\n", lines.join("\n"));
         self.healthy

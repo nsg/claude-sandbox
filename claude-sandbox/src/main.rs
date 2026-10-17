@@ -1413,7 +1413,9 @@ fn run_container(
         if !vm_proxy::preflight_is_healthy(&report) {
             eprintln!("Warning: Virtual Machine Bridge setup is incomplete:");
             eprintln!("{report}");
-            eprintln!("The sandbox will continue; see README section \"Virtual Machine Bridge\".");
+            eprintln!(
+                "The sandbox will continue; see https://nsg.github.io/claude-sandbox/vm.html#one-time-host-setup"
+            );
         }
         if let Err(error) = ensure_vm_proxy(&proxy_runtime_dir, &cwd) {
             eprintln!("Warning: failed to start vm-proxy: {error}");
