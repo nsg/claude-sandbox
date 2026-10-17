@@ -1,62 +1,96 @@
 <div align="center">
   <img src="header.png" alt="Claude Sandbox" width="600">
-  <p>Run Claude CLI in a containerized environment using Podman.</p>
+  <p>Run AI coding agents in a container with full autonomy and none of your secrets.</p>
+
+[![AI usage: vibe](https://nsg.github.io/aibadge/vibe.svg)](https://nsg.github.io/aibadge/#vibe)
 </div>
 
 ## About
 
-claude-sandbox wraps [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai), and [t3code](https://github.com/pingdotgg/t3code) in a Podman container with a full development toolchain. It mounts your current directory to `/workspace` and your `~/.claude`, `~/.codex`, and `~/.config/opencode` configs into the container, keeping your host system clean while giving each agent access to everything it needs.
+claude-sandbox runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai), and [t3code](https://github.com/pingdotgg/t3code) in a Podman container with a complete development toolchain. Point it at a project directory and the agent gets everything it needs to work there — compilers, a browser, a virtual display, image builds — while your host, SSH keys, and GitHub credentials stay out of reach.
 
-The binary handles container image pulls, self-updates, and skill updates automatically.
+When an agent does need the outside world, it goes through narrow host-side bridges you switch on per launch: an allowlisted `gh`, filtered SSH, single-repository pushes, ephemeral Incus VMs. Every request is validated and logged on the host, so you can let an agent run unattended and still know exactly what it was allowed to do.
 
-## Features
-
-- **[Sandboxed GitHub CLI](https://nsg.github.io/claude-sandbox/github.html)** — proxied `gh` access with an audited command allowlist and launch-snapshotted write targets
-- **[SSH proxy](https://nsg.github.io/claude-sandbox/ssh.html)** — filtered SSH access without exposing keys to the container
-- **[Managed fetch approvals](https://nsg.github.io/claude-sandbox/ssh.html#managed-fetch-approvals)** — portal-approved, read-only access to exact private SSH repositories
-- **[Git push bridge](https://nsg.github.io/claude-sandbox/git-push.html)** — opt-in single-repository pushes plus portal-approved repositories for long-running T3 services
-- **[Virtual machine bridge](https://nsg.github.io/claude-sandbox/vm.html)** — opt-in creation and control of ephemeral Incus VMs without exposing host credentials or devices
-- **[Clipboard image bridge](https://nsg.github.io/claude-sandbox/clipboard.html)** — paste screenshots from your host into the container via `xclip`/`wl-paste`
-- **[Managed configuration](https://nsg.github.io/claude-sandbox/environment.html#managed-configuration)** — ships default `AGENTS.md` instructions while preserving your customizations
-- **[Per-project memory](https://nsg.github.io/claude-sandbox/environment.html#per-project-memory)** — auto-memory is isolated per repository, not shared across all containers
-- **[MCP servers](https://nsg.github.io/claude-sandbox/environment.html#playwright-mcp)** — pre-configured Playwright with headless Chromium
-- **Image builds** — build OCI images from a Containerfile or Dockerfile with Buildah, without a daemon or extra privileges
-- **[Agent-controlled GUI](https://nsg.github.io/claude-sandbox/gui.html)** — a headless Xvfb virtual display with Openbox, window management, screenshots, input, and accessibility-tree tools for Claude and Codex
-- **[Live display](https://nsg.github.io/claude-sandbox/t3code.html#live-display)** — view and control the sandbox's virtual X display from the T3 admin portal through the existing admin port, no extra ports
-- **[GNOME usage indicator](https://nsg.github.io/claude-sandbox/plan-usage.html#gnome-usage-indicator)** — optional top-bar extension showing plan-limit usage for every provider
-- **[Wrapped sessions](https://nsg.github.io/claude-sandbox/wrap.html)** — run the command in a tmux session, inject keystrokes and read the screen from outside with `wrap-type` / `wrap-key` / `wrap-read`
-- **[Auto-updates](https://nsg.github.io/claude-sandbox/usage.html#auto-update)** — binary, skills, and container image updates are checked on every launch
-- **Port exposure** — forward ports from the container with `-p`
-
-## Quick Start
-
-Requires [Podman](https://podman.io/getting-started/installation).
-
-Download the binary and place it in your PATH:
-
-```bash
-curl -fsSL https://github.com/nsg/claude-sandbox/releases/latest/download/claude-sandbox -o ~/bin/claude-sandbox
-chmod +x ~/bin/claude-sandbox
-```
-
-Run it:
-
-```bash
-claude-sandbox
-```
+- **One command** — `claude-sandbox` pulls the image, mounts the project, and starts the agent; the launcher, skills, and image update themselves
+- **Credentials stay on the host** — GitHub, SSH, and Git push access are proxied through audited allowlists
+- **Long-running agents** — run T3 Code as a systemd service with a PIN-protected portal for approvals, plan-limit usage, and a live view of the agent's display
+- **Full workstation inside** — Playwright with Chromium, a headless X display, Buildah, Rust, Node.js, and ready-made skills
 
 ## Documentation
 
-Full documentation at [nsg.github.io/claude-sandbox](https://nsg.github.io/claude-sandbox/):
+Installation, usage, and the full reference are at **[nsg.github.io/claude-sandbox](https://nsg.github.io/claude-sandbox/)**.
 
-- [Command-line usage](https://nsg.github.io/claude-sandbox/usage.html) — subcommands, flags, Codex and opencode, auto-update
-- [T3 Code](https://nsg.github.io/claude-sandbox/t3code.html) — web GUI, admin portal, live display, managed approvals
-- [Running as a systemd service](https://nsg.github.io/claude-sandbox/service.html)
-- [Host bridges](https://nsg.github.io/claude-sandbox/github.html) — GitHub CLI, SSH, Git push, virtual machines, clipboard
-- [Skills](https://nsg.github.io/claude-sandbox/skills.html) and the [container environment](https://nsg.github.io/claude-sandbox/environment.html)
-- [Building locally](https://nsg.github.io/claude-sandbox/building.html)
+## Development
 
-The site is built from [`docs/`](docs/) — plain HTML and CSS, published by GitHub Actions.
+### Repository layout
+
+| Path | Contents |
+|------|----------|
+| `claude-sandbox/` | The launcher: a Rust binary that starts the container and runs the host-side proxies, the T3 admin portal, and the GNOME extension installer |
+| `Containerfile` | The container image, published as `ghcr.io/nsg/claude-sandbox` |
+| `config/` | Files baked into the image: entrypoint, in-container proxy clients, managed `AGENTS.md` and harness config |
+| `skills/` | Skills installed by `claude-sandbox install skills` |
+| `docs/` | The documentation site, plain HTML and CSS |
+| `.github/workflows/` | CI: image, release, and documentation publishing |
+
+### Requirements
+
+- Rust stable, 1.85 or newer (the launcher uses the 2024 edition)
+- Podman or Buildah to build the image, on x86_64
+- Python 3 for the usage probe tests
+
+### Launcher
+
+```bash
+cd claude-sandbox
+cargo build
+cargo test
+cargo fmt --check
+cargo clippy
+```
+
+Build a release binary and put it on your `PATH` to try it in place of the published one:
+
+```bash
+cargo build --release
+cp target/release/claude-sandbox ~/bin/claude-sandbox
+```
+
+The launcher offers to replace it the next time a release is published.
+
+### Container image
+
+```bash
+podman build -f Containerfile -t claude-sandbox:dev .
+```
+
+The launcher always runs `ghcr.io/nsg/claude-sandbox:latest` and pulls it on launch, so a local build checks the Containerfile but is not picked up by `claude-sandbox`. Changes reach users through CI once merged.
+
+Run the usage probe tests from the repository root:
+
+```bash
+python3 -B config/tests/test_usage_probe.py
+```
+
+`config/AGENTS.md` must start with its only H1 heading, and `config/AGENTS.<harness>.md` overlays must contain no H1 headings; CI rejects either mistake.
+
+### Documentation site
+
+Edit the pages in `docs/` directly; there is no build step. Preview locally with:
+
+```bash
+python3 -m http.server -d docs 8000
+```
+
+### Continuous integration
+
+Each workflow runs on pushes to `master` that touch its paths:
+
+| Workflow | Trigger paths | Result |
+|----------|---------------|--------|
+| `container.yml` | `Containerfile`, `config/**` | Validates `AGENTS.md`, runs the probe tests, and publishes the image to GHCR; also runs twice a week |
+| `release.yml` | `claude-sandbox/**`, `skills/**` | Builds the launcher and skills archives and replaces the `latest` release |
+| `pages.yml` | `docs/**` | Publishes the documentation site to GitHub Pages |
 
 ## License
 
