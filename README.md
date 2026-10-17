@@ -814,7 +814,9 @@ bound in those cases. Newer Incus releases check staging against the quota.
 With `vm view`, the guest fills the virtual display, so the agent reads it with
 `scrot` and sends keys and clicks with `xdotool`, and you can watch through the
 live display in the T3 admin portal. SPICE serves one viewer at a time: a
-second viewer drops the first. The `/vm` skill describes the workflow.
+second viewer drops the first. The bridge opens the display through the Incus
+API itself, so SPICE viewers installed on the host, such as `remote-viewer` or
+`spicy`, do not affect it. The `/vm` skill describes the workflow.
 
 ## Clipboard Image Bridge
 

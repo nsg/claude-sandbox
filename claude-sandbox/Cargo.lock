@@ -211,6 +211,7 @@ dependencies = [
  "filetime",
  "flate2",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",

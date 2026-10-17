@@ -2,6 +2,7 @@ mod clipboard_proxy;
 mod extension;
 mod gh_proxy;
 mod git_proxy;
+mod incus_console;
 mod logging;
 mod managed_fetch;
 mod managed_gh;

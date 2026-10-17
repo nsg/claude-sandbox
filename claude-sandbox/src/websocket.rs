@@ -53,6 +53,10 @@ pub fn read_frame(reader: &mut impl Read) -> io::Result<Frame> {
     read_frame_inner(reader, true)
 }
 
+pub fn read_server_frame(reader: &mut impl Read) -> io::Result<Frame> {
+    read_frame_inner(reader, false)
+}
+
 fn read_frame_inner(reader: &mut impl Read, require_mask: bool) -> io::Result<Frame> {
     let mut header = [0_u8; 2];
     reader.read_exact(&mut header)?;
@@ -127,6 +131,24 @@ fn read_frame_inner(reader: &mut impl Read, require_mask: bool) -> io::Result<Fr
 }
 
 pub fn write_frame(writer: &mut impl Write, opcode: Opcode, payload: &[u8]) -> io::Result<()> {
+    write_frame_inner(writer, opcode, payload, None)
+}
+
+pub fn write_masked_frame(
+    writer: &mut impl Write,
+    opcode: Opcode,
+    payload: &[u8],
+    mask: [u8; 4],
+) -> io::Result<()> {
+    write_frame_inner(writer, opcode, payload, Some(mask))
+}
+
+fn write_frame_inner(
+    writer: &mut impl Write,
+    opcode: Opcode,
+    payload: &[u8],
+    mask: Option<[u8; 4]>,
+) -> io::Result<()> {
     let payload_len = u64::try_from(payload.len())
         .map_err(|_| invalid_data("WebSocket payload length does not fit in u64"))?;
     if opcode.is_control() && payload_len > 125 {
@@ -138,19 +160,29 @@ pub fn write_frame(writer: &mut impl Write, opcode: Opcode, payload: &[u8]) -> i
         return Err(invalid_data("WebSocket payload exceeds the size limit"));
     }
 
+    let mask_bit = if mask.is_some() { 0x80 } else { 0 };
     writer.write_all(&[0x80 | opcode as u8])?;
     match payload_len {
-        0..=125 => writer.write_all(&[payload_len as u8])?,
+        0..=125 => writer.write_all(&[mask_bit | payload_len as u8])?,
         126..=65_535 => {
-            writer.write_all(&[126])?;
+            writer.write_all(&[mask_bit | 126])?;
             writer.write_all(&(payload_len as u16).to_be_bytes())?;
         }
         _ => {
-            writer.write_all(&[127])?;
+            writer.write_all(&[mask_bit | 127])?;
             writer.write_all(&payload_len.to_be_bytes())?;
         }
     }
-    writer.write_all(payload)
+    let Some(mask) = mask else {
+        return writer.write_all(payload);
+    };
+    writer.write_all(&mask)?;
+    let masked: Vec<u8> = payload
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ mask[index % mask.len()])
+        .collect();
+    writer.write_all(&masked)
 }
 
 fn invalid_data(message: &'static str) -> io::Error {
@@ -335,6 +367,18 @@ mod tests {
                 }
             );
             assert_eq!(encoded[1] & 0x80, 0, "server frames must be unmasked");
+        }
+    }
+
+    #[test]
+    fn masked_writes_round_trip_through_the_server_reader() {
+        for payload in [vec![0x44; 125], vec![0x55; 65_536]] {
+            let mut encoded = Vec::new();
+            write_masked_frame(&mut encoded, Opcode::Binary, &payload, MASK).unwrap();
+            assert_eq!(
+                read_frame(&mut Cursor::new(&encoded)).unwrap().payload,
+                payload
+            );
         }
     }
 

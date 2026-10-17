@@ -9,14 +9,15 @@ use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, process, thread};
 use tar::Builder;
 
 use crate::gh_proxy::{open_untrusted_path, proc_fd_path};
+use crate::incus_console::{self, ConsoleSession, WebSocket};
 use crate::logging::log_line;
 use crate::{proxy_log, proxy_socket};
 
@@ -106,16 +107,15 @@ enum CommandInput {
 
 #[derive(Clone)]
 struct Relay {
-    child: Arc<Mutex<Child>>,
+    session: Arc<ConsoleSession>,
     socket_path: PathBuf,
-    upstream_path: PathBuf,
     connections: Arc<Mutex<HashMap<u64, RelayConnection>>>,
     stopping: Arc<AtomicBool>,
 }
 
 struct RelayConnection {
     client: UnixStream,
-    upstream: Option<UnixStream>,
+    upstream: Option<Arc<WebSocket>>,
 }
 
 struct Snapshot {
@@ -1229,13 +1229,7 @@ impl IncusBridge {
     fn screen(&self, name: &str) -> Response {
         let _starting = self.relay_start.lock().expect("relay start lock poisoned");
         if let Some(relay) = self.relays.lock().expect("relay lock poisoned").get(name)
-            && relay
-                .child
-                .lock()
-                .expect("relay child lock poisoned")
-                .try_wait()
-                .ok()
-                == Some(None)
+            && relay.session.is_open()
             && relay.socket_path.exists()
         {
             return Response::ok(format!(
@@ -1254,116 +1248,36 @@ impl IncusBridge {
     fn start_relay(&self, name: &str) -> Result<(), String> {
         let public_path = self.runtime_dir.join(format!("vm-{name}.spice"));
         let _ = fs::remove_file(&public_path);
-        let mut command = self.command()?;
-        let mut child = command
-            .args([
-                "console",
-                "--type=vga",
-                "--project",
-                self.project,
-                &format!("{}:{name}", self.remote),
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("failed to start Incus console: {error}"))?;
-        let stdout = child.stdout.take().expect("piped stdout missing");
-        let stderr = child.stderr.take().expect("piped stderr missing");
-        let (line_tx, line_rx) = mpsc::channel();
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                if line_tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        let stderr_bytes = Arc::new(Mutex::new(Vec::new()));
-        let stderr_target = Arc::clone(&stderr_bytes);
-        thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stderr
-                .take(COMMAND_OUTPUT_LIMIT as u64 + 1)
-                .read_to_end(&mut bytes);
-            *stderr_target.lock().expect("relay stderr lock poisoned") = bytes;
-        });
-
-        let deadline = Instant::now() + SCREEN_START_TIMEOUT;
-        let mut upstream = None;
-        while Instant::now() < deadline {
-            match line_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(line)) => {
-                    if let Some(path) = spice_socket_path(&line) {
-                        upstream = Some(path);
-                        break;
-                    }
-                }
-                Ok(Err(error)) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("failed reading Incus console output: {error}"));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => match child.try_wait() {
-                    Ok(Some(status)) => {
-                        let stderr = String::from_utf8_lossy(
-                            &stderr_bytes.lock().expect("relay stderr lock poisoned"),
-                        )
-                        .into_owned();
-                        let _ = child.wait();
-                        return Err(format!(
-                            "Incus console exited with {status}: {}",
-                            stderr.trim()
-                        ));
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(format!("failed checking Incus console: {error}"));
-                    }
-                },
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        let Some(upstream) = upstream else {
-            let _ = child.kill();
-            let _ = child.wait();
-            let stderr =
-                String::from_utf8_lossy(&stderr_bytes.lock().expect("relay stderr lock poisoned"))
-                    .into_owned();
-            return Err(format!(
-                "Incus console did not provide a SPICE socket within 15s: {}",
-                stderr.trim()
-            ));
-        };
+        let session = Arc::new(ConsoleSession::start(
+            &self.conf_dir,
+            self.remote,
+            self.project,
+            name,
+            SCREEN_START_TIMEOUT,
+        )?);
         let listener = match UnixListener::bind(&public_path) {
             Ok(listener) => listener,
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                session.close();
                 return Err(format!("could not bind SPICE relay: {error}"));
             }
         };
         if let Err(error) = fs::set_permissions(&public_path, fs::Permissions::from_mode(0o600)) {
-            let _ = child.kill();
-            let _ = child.wait();
+            session.close();
             let _ = fs::remove_file(&public_path);
             return Err(format!("could not secure SPICE relay: {error}"));
         }
         if let Err(error) = listener.set_nonblocking(true) {
-            let _ = child.kill();
-            let _ = child.wait();
+            session.close();
             let _ = fs::remove_file(&public_path);
             return Err(format!("could not configure SPICE relay: {error}"));
         }
-        let child = Arc::new(Mutex::new(child));
         let connections = Arc::new(Mutex::new(HashMap::new()));
         let connection_count = Arc::new(AtomicUsize::new(0));
         let stopping = Arc::new(AtomicBool::new(false));
         let relay = Relay {
-            child: Arc::clone(&child),
+            session: Arc::clone(&session),
             socket_path: public_path.clone(),
-            upstream_path: upstream.clone(),
             connections: Arc::clone(&connections),
             stopping: Arc::clone(&stopping),
         };
@@ -1409,7 +1323,7 @@ impl IncusBridge {
                             );
                         }
                         had_connection = true;
-                        let upstream = upstream.clone();
+                        let session = Arc::clone(&session);
                         let connections = Arc::clone(&connections);
                         let connection_count = Arc::clone(&connection_count);
                         let stopping = Arc::clone(&stopping);
@@ -1422,17 +1336,10 @@ impl IncusBridge {
                                 connection_count.fetch_sub(1, Ordering::AcqRel);
                                 return;
                             }
-                            let Ok(server) = UnixStream::connect(upstream) else {
-                                connections
-                                    .lock()
-                                    .expect("relay connection lock poisoned")
-                                    .remove(&id);
-                                connection_count.fetch_sub(1, Ordering::AcqRel);
-                                return;
-                            };
-                            let Ok(server_clone) = server.try_clone() else {
+                            // SPICE opens one connection per channel; each gets its own
+                            // data WebSocket on the shared console operation.
+                            let Ok((reader, upstream)) = session.connect() else {
                                 let _ = client.shutdown(Shutdown::Both);
-                                let _ = server.shutdown(Shutdown::Both);
                                 connections
                                     .lock()
                                     .expect("relay connection lock poisoned")
@@ -1445,16 +1352,16 @@ impl IncusBridge {
                                     connections.lock().expect("relay connection lock poisoned");
                                 if stopping.load(Ordering::Acquire) {
                                     let _ = client.shutdown(Shutdown::Both);
-                                    let _ = server.shutdown(Shutdown::Both);
+                                    upstream.shutdown();
                                     active.remove(&id);
                                     connection_count.fetch_sub(1, Ordering::AcqRel);
                                     return;
                                 }
                                 if let Some(connection) = active.get_mut(&id) {
-                                    connection.upstream = Some(server_clone);
+                                    connection.upstream = Some(Arc::clone(&upstream));
                                 }
                             }
-                            copy_bidirectional(client, server);
+                            incus_console::relay(client, reader, upstream);
                             connections
                                 .lock()
                                 .expect("relay connection lock poisoned")
@@ -1465,51 +1372,41 @@ impl IncusBridge {
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(_) => break,
                 }
-                let child_done = child
-                    .lock()
-                    .expect("relay child lock poisoned")
-                    .try_wait()
-                    .map_or(true, |status| status.is_some());
-                if child_done || (!had_connection && started.elapsed() >= idle_timeout) {
+                // Like `incus console`, the relay ends once its viewer has
+                // disconnected every channel, or if nobody connects in time.
+                let idle = connection_count.load(Ordering::Acquire) == 0
+                    && (had_connection || started.elapsed() >= idle_timeout);
+                if !session.is_open() || idle {
                     break;
                 }
                 thread::sleep(Duration::from_millis(25));
             }
             stopping.store(true, Ordering::Release);
             shutdown_connections(&connections);
-            {
-                let mut child = child.lock().expect("relay child lock poisoned");
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            session.close();
             let mut map = relays.lock().expect("relay lock poisoned");
             if map
                 .get(&relay_name)
-                .is_some_and(|relay| Arc::ptr_eq(&relay.child, &child))
+                .is_some_and(|relay| Arc::ptr_eq(&relay.session, &session))
             {
                 map.remove(&relay_name);
                 let _ = fs::remove_file(&public_path);
-                let _ = fs::remove_file(&upstream);
             }
         });
         Ok(())
     }
 
     fn stop_relay(&self, name: &str) {
-        if let Some(relay) = self
+        let relay = self
             .relays
             .lock()
             .expect("relay lock poisoned")
-            .remove(name)
-        {
+            .remove(name);
+        if let Some(relay) = relay {
             relay.stopping.store(true, Ordering::Release);
             shutdown_connections(&relay.connections);
-            let mut child = relay.child.lock().expect("relay child lock poisoned");
-            let _ = child.kill();
-            let _ = child.wait();
+            relay.session.close();
             let _ = fs::remove_file(relay.socket_path);
-            // A killed client cannot remove its own socket.
-            let _ = fs::remove_file(relay.upstream_path);
         }
     }
 
@@ -2165,23 +2062,8 @@ fn find_executable(name: &str) -> Option<PathBuf> {
 }
 
 fn client_config_has_remote(conf_dir: &Path, remote: &str) -> bool {
-    let Ok(config) = fs::read_to_string(conf_dir.join("config.yml")) else {
-        return false;
-    };
-    let mut in_remotes = false;
-    for line in config.lines() {
-        if line == "remotes:" {
-            in_remotes = true;
-            continue;
-        }
-        if in_remotes && !line.is_empty() && !line.starts_with(char::is_whitespace) {
-            break;
-        }
-        if in_remotes && line.trim() == format!("{remote}:") {
-            return true;
-        }
-    }
-    false
+    fs::read_to_string(conf_dir.join("config.yml"))
+        .is_ok_and(|config| incus_console::remote_config(&config, remote).is_some())
 }
 
 fn read_capped(mut reader: impl Read, limit: usize, stream: &str) -> Vec<u8> {
@@ -2349,15 +2231,6 @@ fn truncate_log(value: String) -> String {
         .collect()
 }
 
-fn spice_socket_path(line: &str) -> Option<PathBuf> {
-    let start = line.find("spice+unix://")? + "spice+unix://".len();
-    let path = line[start..].trim();
-    if path.is_empty() {
-        return None;
-    }
-    Path::new(path).is_absolute().then(|| PathBuf::from(path))
-}
-
 fn reserve_connection(count: &AtomicUsize, maximum: usize) -> bool {
     let mut current = count.load(Ordering::Acquire);
     loop {
@@ -2380,7 +2253,7 @@ fn shutdown_connections(connections: &Mutex<HashMap<u64, RelayConnection>>) {
     {
         let _ = connection.client.shutdown(Shutdown::Both);
         if let Some(upstream) = &connection.upstream {
-            let _ = upstream.shutdown(Shutdown::Both);
+            upstream.shutdown();
         }
     }
 }
@@ -2411,37 +2284,22 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
-fn copy_bidirectional(left: UnixStream, right: UnixStream) {
-    let Ok(mut left_reader) = left.try_clone() else {
-        return;
-    };
-    let Ok(mut right_writer) = right.try_clone() else {
-        return;
-    };
-    let left_shutdown = left.try_clone().ok();
-    let right_shutdown = right.try_clone().ok();
-    let forward = thread::spawn(move || {
-        let result = std::io::copy(&mut left_reader, &mut right_writer);
-        if let Some(socket) = left_shutdown {
-            let _ = socket.shutdown(Shutdown::Both);
-        }
-        if let Some(socket) = right_shutdown {
-            let _ = socket.shutdown(Shutdown::Both);
-        }
-        result
-    });
-    let mut right_reader = right;
-    let mut left_writer = left;
-    let _ = std::io::copy(&mut right_reader, &mut left_writer);
-    let _ = right_reader.shutdown(Shutdown::Both);
-    let _ = left_writer.shutdown(Shutdown::Both);
-    let _ = forward.join();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::incus_console::test_certs::{CLIENT_CERT, CLIENT_KEY, SERVER_CERT, SERVER_KEY};
+    use crate::websocket::{Opcode, read_frame, write_frame};
+    use rustls::client::danger::HandshakeSignatureValid;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
+    use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+    use rustls::{
+        DigitallySignedStruct, DistinguishedName, ServerConfig, ServerConnection, SignatureScheme,
+        StreamOwned,
+    };
+    use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::mpsc;
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -2675,19 +2533,6 @@ mod tests {
     }
 
     #[test]
-    fn spice_uri_is_found_without_localized_prose() {
-        assert_eq!(
-            spice_socket_path("beliebiger Text spice+unix:///tmp/incus.sock"),
-            Some(PathBuf::from("/tmp/incus.sock"))
-        );
-        assert_eq!(spice_socket_path("spice+unix://relative"), None);
-        assert_eq!(
-            spice_socket_path("spice+unix:///home/user name/incus.sock  "),
-            Some(PathBuf::from("/home/user name/incus.sock"))
-        );
-    }
-
-    #[test]
     fn preflight_accepts_restricted_setup_and_fails_open_default_project() {
         if !Path::new("/usr/bin/python3").exists() {
             return;
@@ -2890,54 +2735,227 @@ raise SystemExit(0)
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn spice_relay_echoes_through_cli_socket() {
-        if !Path::new("/usr/bin/python3").exists() {
+    #[derive(Debug)]
+    struct ExpectedClient(CertificateDer<'static>);
+
+    impl ClientCertVerifier for ExpectedClient {
+        fn root_hint_subjects(&self) -> &[DistinguishedName] {
+            &[]
+        }
+
+        fn verify_client_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _now: UnixTime,
+        ) -> Result<ClientCertVerified, rustls::Error> {
+            if end_entity.as_ref() == self.0.as_ref() {
+                Ok(ClientCertVerified::assertion())
+            } else {
+                Err(rustls::Error::General(
+                    "unexpected client certificate".into(),
+                ))
+            }
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(message, cert, dss, &algorithms())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(message, cert, dss, &algorithms())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            algorithms().supported_schemes()
+        }
+    }
+
+    fn algorithms() -> rustls::crypto::WebPkiSupportedAlgorithms {
+        rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms
+    }
+
+    fn certificate(pem: &str) -> CertificateDer<'static> {
+        CertificateDer::from_pem_slice(pem.as_bytes()).unwrap()
+    }
+
+    // An in-process Incus HTTPS listener: it creates console operations, echoes
+    // data WebSockets, and reports every request and disconnect.
+    fn fake_incus(conf_dir: &Path) -> mpsc::Receiver<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // A closed port listed first: the bridge must fail over to the live address.
+        let dead_port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        fs::write(
+            conf_dir.join("config.yml"),
+            format!("remotes:\n  claude-sandbox:\n    addr: https://127.0.0.1:{dead_port},https://127.0.0.1:{port}\n    protocol: incus\n"),
+        )
+        .unwrap();
+        fs::create_dir_all(conf_dir.join("servercerts")).unwrap();
+        fs::write(conf_dir.join("servercerts/claude-sandbox.crt"), SERVER_CERT).unwrap();
+        // A decoy default pair: the remote-specific client certificate must win.
+        fs::write(conf_dir.join("client.crt"), SERVER_CERT).unwrap();
+        fs::write(conf_dir.join("client.key"), SERVER_KEY).unwrap();
+        fs::create_dir_all(conf_dir.join("clientcerts")).unwrap();
+        fs::write(conf_dir.join("clientcerts/claude-sandbox.crt"), CLIENT_CERT).unwrap();
+        fs::write(conf_dir.join("clientcerts/claude-sandbox.key"), CLIENT_KEY).unwrap();
+        let config = Arc::new(
+            ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(Arc::new(ExpectedClient(certificate(CLIENT_CERT))))
+            .with_single_cert(
+                vec![certificate(SERVER_CERT)],
+                PrivateKeyDer::from_pem_slice(SERVER_KEY.as_bytes()).unwrap(),
+            )
+            .unwrap(),
+        );
+        let (events, received) = mpsc::channel();
+        thread::spawn(move || {
+            for socket in listener.incoming().flatten() {
+                let config = Arc::clone(&config);
+                let events = events.clone();
+                thread::spawn(move || serve_incus(socket, config, events));
+            }
+        });
+        received
+    }
+
+    fn serve_incus(socket: TcpStream, config: Arc<ServerConfig>, events: mpsc::Sender<String>) {
+        let mut tls = StreamOwned::new(ServerConnection::new(config).unwrap(), socket);
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            if tls.read_until(b'\n', &mut head).unwrap_or(0) == 0 {
+                return;
+            }
+        }
+        let head = String::from_utf8(head).unwrap();
+        let request_line = head.lines().next().unwrap().to_string();
+        let header = |name: &str| {
+            head.lines()
+                .find_map(|line| line.strip_prefix(name))
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        if request_line.starts_with("POST ") {
+            let mut body = vec![0; header("Content-Length:").parse().unwrap()];
+            tls.read_exact(&mut body).unwrap();
+            let _ = events.send(format!(
+                "{request_line} {}",
+                String::from_utf8(body).unwrap()
+            ));
+            let response = r#"{"type":"async","status_code":100,"operation":"/1.0/operations/op-1","metadata":{"id":"op-1","metadata":{"fds":{"control":"c0","0":"d0"}}}}"#;
+            let (first, second) = response.split_at(40);
+            // Chunked, as Go's net/http may send it.
+            write!(
+                tls,
+                "HTTP/1.1 202 Accepted\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\n\r\n",
+                first.len(),
+                second.len()
+            )
+            .unwrap();
+            let _ = tls.flush();
             return;
         }
+        let channel = match request_line.as_str() {
+            "GET /1.0/operations/op-1/websocket?secret=c0 HTTP/1.1" => "control",
+            "GET /1.0/operations/op-1/websocket?secret=d0 HTTP/1.1" => "data",
+            _ => panic!("unexpected request: {request_line}"),
+        };
+        let accept = crate::websocket::accept_key(&header("Sec-WebSocket-Key:"));
+        write!(
+            tls,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        .unwrap();
+        if channel == "data" {
+            write_frame(&mut tls, Opcode::Ping, b"hb").unwrap();
+        }
+        let _ = tls.flush();
+        let _ = events.send(format!("{channel} open"));
+        // read_frame rejects unmasked frames, so this also checks client masking.
+        while let Ok(frame) = read_frame(&mut tls) {
+            match frame.opcode {
+                Opcode::Binary => {
+                    write_frame(&mut tls, Opcode::Binary, &frame.payload).unwrap();
+                    let _ = tls.flush();
+                }
+                Opcode::Pong => {
+                    let _ = events.send(format!("{channel} pong"));
+                }
+                Opcode::Close => break,
+                _ => {}
+            }
+        }
+        let _ = events.send(format!("{channel} closed"));
+    }
+
+    #[test]
+    fn spice_relay_echoes_through_incus_websockets() {
         let root = temp_dir("spice-relay");
         let fake = root.join("incus");
-        executable(
-            &fake,
-            r#"#!/usr/bin/python3
-import os, pathlib, socket, sys
-upstream = pathlib.Path(__file__).with_name("upstream.spice")
-try:
-    upstream.unlink()
-except FileNotFoundError:
-    pass
-s = socket.socket(socket.AF_UNIX)
-s.bind(str(upstream))
-s.listen(1)
-print("localized console text")
-print("connect using")
-print("spice+unix://" + str(upstream), flush=True)
-c, _ = s.accept()
-while True:
-    data = c.recv(65536)
-    if not data:
-        break
-    c.sendall(data)
-c.close()
-s.close()
-"#,
-        );
+        executable(&fake, "#!/bin/sh\nexit 2\n");
         let bridge = test_bridge(&root, &fake);
+        let events = fake_incus(&bridge.conf_dir);
+        let next = || events.recv_timeout(Duration::from_secs(5)).unwrap();
+
         bridge.start_relay("test").unwrap();
-        let mut stream = UnixStream::connect(root.join("runtime/vm-test.spice")).unwrap();
+        let request = next();
+        let (request_line, body) = request.split_once(" HTTP/1.1 ").unwrap();
+        assert_eq!(
+            request_line,
+            "POST /1.0/instances/test/console?project=claude-sandbox"
+        );
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["type"], "vga");
+        assert_eq!(body["force"], true);
+        assert_eq!(next(), "control open");
+
+        let socket = root.join("runtime/vm-test.spice");
+        assert_eq!(
+            fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let mut stream = UnixStream::connect(&socket).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         stream.write_all(b"hello").unwrap();
         let mut echoed = [0_u8; 5];
         stream.read_exact(&mut echoed).unwrap();
         assert_eq!(&echoed, b"hello");
-        drop(stream);
+        assert_eq!(next(), "data open");
+        assert_eq!(next(), "data pong");
+
         bridge.stop_relay("test");
+        let mut closed = [next(), next()];
+        closed.sort();
+        assert_eq!(closed, ["control closed", "data closed"]);
+        assert!(!socket.exists());
 
         let mut expiring_bridge = bridge.clone();
         expiring_bridge.relay_idle_timeout = Duration::from_millis(200);
         expiring_bridge.start_relay("idle").unwrap();
+        next();
+        assert_eq!(next(), "control open");
+        assert_eq!(next(), "control closed");
         let idle_socket = root.join("runtime/vm-idle.spice");
         let deadline = Instant::now() + Duration::from_secs(2);
         while idle_socket.exists() && Instant::now() < deadline {
