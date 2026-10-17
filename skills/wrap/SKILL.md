@@ -39,8 +39,8 @@ before continuing. TUIs redraw asynchronously — never assume input landed.
 
 ## Driving the user's own Claude session
 
-The `claude-sandbox` session is the user's terminal. When you have been asked
-to drive it:
+The `claude-sandbox` session is the user's own shell, often running Claude
+Code. When you have been asked to drive Claude Code there:
 
 - Submit with `wrap-type --enter '<text>'` in one call, not a separate
   `wrap-key Enter`. A trailing Enter can be swallowed by the slash-command

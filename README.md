@@ -17,11 +17,11 @@ Suggestions and pull requests are welcome, but there is no promise that I will m
 
 claude-sandbox runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai), and [t3code](https://github.com/pingdotgg/t3code) in a Podman container with a complete development toolchain. Point it at a project directory and the agent gets everything it needs to work there — compilers, a browser, a virtual display, image builds — while your host, SSH keys, and GitHub credentials stay out of reach.
 
-When an agent does need the outside world, it goes through narrow host-side bridges you switch on per launch: an allowlisted `gh`, SSH fetches and pushes for the launch repository, ephemeral Incus VMs. Every request is validated and logged on the host, so you can let an agent run unattended and still know exactly what it was allowed to do.
+When an agent does need the outside world, it goes through narrow host-side bridges: an allowlisted `gh` that reads anywhere but writes only to repositories in the workspace, SSH fetches of the launch repository's origin, and — when you switch them on per launch — pushes of the launch repository executed on the host (`--allow-push`) and ephemeral Incus VMs (`--vm`). Anything beyond that can be approved request by request in a PIN-protected admin portal (`--portal`). Every request is validated and logged on the host, so you can let an agent run unattended and still know exactly what it was allowed to do.
 
-- **One command** — `claude-sandbox` pulls the image, mounts the project, and opens a shell; add `t3code` to start T3 Code; the launcher, skills, and image update themselves
+- **One command** — `claude-sandbox` pulls the image, mounts the project, and opens a shell; `claude-sandbox run <command>` runs a single command; `claude-sandbox --portal t3code` starts T3 Code with its admin portal; the launcher, skills, and image update themselves
 - **Credentials stay on the host** — GitHub, SSH, and Git push access are proxied through audited allowlists
-- **Long-running agents** — run T3 Code as a systemd service with a PIN-protected portal for approvals, plan-limit usage, and a live view of the agent's display
+- **Long-running agents** — install T3 Code as a systemd service with `--install-service`, with a PIN-protected portal for pairing, approvals, plan-limit usage, and a live view of the agent's display
 - **Full workstation inside** — Playwright with Chromium, a headless X display, Buildah, Rust, Node.js, and ready-made skills
 
 **Why the name?** claude-sandbox started as a sandbox around Claude Code alone. It has since grown to run Codex, opencode, and T3 Code too, but the name stayed for historical reasons. These days I mostly use it through T3 Code, which runs the different harnesses for me from a web browser or its mobile app.

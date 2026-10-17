@@ -1,6 +1,6 @@
 #!/bin/sh
 # git shim: bridge exactly `git push` / `git push --tags` to the host-side
-# push proxy when it is enabled (claude-sandbox --allow-push). Everything
+# push proxy when it runs (--allow-push or --portal). Everything
 # else execs the real git in-place, so behavior is byte-for-byte identical.
 
 if [ -d /run/claude-sandbox ]; then

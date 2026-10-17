@@ -62,15 +62,18 @@
 <p>Suggestions and pull requests are welcome, but there is no promise that I will merge them: this is my project, built for my needs. If you want something merged, <a href="https://github.com/nsg/claude-sandbox/issues">open an issue</a> and we can discuss it.</p>
 </aside>
 <p>claude-sandbox wraps <a href="https://docs.anthropic.com/en/docs/claude-cli">Claude CLI</a>, <a href="https://github.com/openai/codex">OpenAI Codex CLI</a>, <a href="https://opencode.ai">opencode</a>, and <a href="https://github.com/pingdotgg/t3code">t3code</a> in a Podman container with a full development toolchain. It mounts your current directory to <code>/workspace</code> and your <code>~/.claude</code>, <code>~/.codex</code>, and <code>~/.config/opencode</code> configs into the container, keeping your host system clean while giving each agent access to everything it needs.</p>
-<p>The binary handles container image pulls, self-updates, and skill updates automatically.</p>
+<p>Bare <code>claude-sandbox</code> opens a login shell in the container, <code>claude-sandbox run &lt;command&gt;</code> runs a single command, and <code>claude-sandbox --portal t3code</code> starts <a href="t3code.html">T3 Code</a> together with a PIN-protected <a href="t3code.html#admin-portal">admin portal</a> for pairing, approvals, plan usage, and a live view of the display. The binary handles container image pulls, self-updates, and skill updates automatically.</p>
+<p>Your SSH keys and GitHub credentials stay on the host. The agent reaches them only through narrow bridges: <code>gh</code> reads anywhere but writes only to repositories that were in the workspace at launch, SSH fetches the launch repository&#39;s origin, and pushes (<code>--allow-push</code>) and virtual machines (<code>--vm</code>) are off until you enable them for a launch. With <code>--portal</code>, anything beyond that becomes a request you can approve in the portal.</p>
 <p><strong>Why the name?</strong> claude-sandbox started as a sandbox around Claude Code alone. It has since grown to run Codex, opencode, and <a href="t3code.html">T3 Code</a> too, but the name stayed for historical reasons. These days I mostly use it through T3 Code, which runs the different harnesses for me from a web browser or its mobile app.</p>
 <h2 id="features"><a class="anchor" href="#features" aria-hidden="true">#</a>Features</h2>
 <ul>
+<li><strong><a href="t3code.html">T3 Code with an admin portal</a></strong> — the t3code web GUI, plus a PIN-protected portal for pairing, approvals, plan usage, and restarts</li>
+<li><strong><a href="service.html">Systemd service</a></strong> — install a tested invocation as a systemd user service with <code>--install-service</code></li>
 <li><strong><a href="github.html">Sandboxed GitHub CLI</a></strong> — proxied <code>gh</code> access with an audited command allowlist and launch-snapshotted write targets</li>
-<li><strong><a href="ssh.html">SSH fetch bridge</a></strong> — fetch the launch repository&#39;s SSH origin with your host keys, which never enter the container</li>
+<li><strong><a href="ssh.html">SSH fetch bridge</a></strong> — fetch the launch repository&#39;s SSH origin with your host keys, which never enter the container; plain <code>ssh</code> is refused</li>
 <li><strong><a href="t3code.html#portal-approvals">Portal approvals</a></strong> — approve pushes, private SSH fetches, and cross-repository GitHub actions from a PIN-protected admin portal</li>
-<li><strong><a href="git-push.html">Git push bridge</a></strong> — opt-in pushes of the launch repository, executed on the host</li>
-<li><strong><a href="vm.html">Virtual machine bridge</a></strong> — opt-in creation and control of ephemeral Incus VMs without exposing host credentials or devices</li>
+<li><strong><a href="git-push.html">Git push bridge</a></strong> — opt-in pushes of the launch repository with <code>--allow-push</code>, executed on the host</li>
+<li><strong><a href="vm.html">Virtual machine bridge</a></strong> — opt-in (<code>--vm</code>) creation and control of ephemeral Incus VMs without exposing host credentials or devices</li>
 <li><strong><a href="environment.html#managed-configuration">Managed configuration</a></strong> — ships default <code>AGENTS.md</code> instructions while preserving your customizations</li>
 <li><strong><a href="environment.html#per-project-memory">Per-project memory</a></strong> — auto-memory is isolated per repository, not shared across all containers</li>
 <li><strong><a href="environment.html#playwright-mcp">MCP servers</a></strong> — pre-configured Playwright with headless Chromium</li>
@@ -90,6 +93,10 @@ chmod +x ~/bin/claude-sandbox
 </code></pre>
 <p>Run it to open an interactive login shell. Claude Code, Codex, and opencode are installed; start <code>claude</code>, <code>codex</code>, or <code>opencode</code> from that shell:</p>
 <pre><code class="language-bash">claude-sandbox
+</code></pre>
+<p>Run a single command, or start T3 Code with its admin portal:</p>
+<pre><code class="language-bash">claude-sandbox run cargo test
+CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal t3code
 </code></pre>
 <p>Continue with <a href="usage.html">command-line usage</a>, or pick a topic from the menu.</p>
 <h2 id="license"><a class="anchor" href="#license" aria-hidden="true">#</a>License</h2>

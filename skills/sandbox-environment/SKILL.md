@@ -53,8 +53,8 @@ only when they matter.
 
 ## Host-connected components
 
-- Treat GitHub CLI, Git push, and SSH access as narrow host bridges, not as
-  direct access to host credentials.
+- Treat GitHub CLI, Git push, SSH fetch, and the `vm` command as narrow host
+  bridges, not as direct access to host credentials or devices.
 - Expect bridge availability and allowed operations to depend on how the
   sandbox was launched and configured.
 - SSH is a git-fetch bridge only: it fetches the launch repository's SSH

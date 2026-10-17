@@ -100,7 +100,7 @@ CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal --t3-port 3773 --portal
 # Install the tested invocation as a systemd user service
 CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --install-service --portal --t3-port 3773 --portal-port 3774 t3code
 </code></pre>
-<p>Claude Code, Codex, and opencode remain installed in the container. Start <code>claude</code>, <code>codex</code>, or <code>opencode</code> from the shell, or use <code>run</code> to launch a command directly.</p>
+<p>Claude Code, Codex, and opencode are installed in the container. Start <code>claude</code>, <code>codex</code>, or <code>opencode</code> from the shell, or use <code>run</code> to launch a command directly.</p>
 <p><code>run</code> preserves argument boundaries when given multiple arguments. With one argument, it passes the text verbatim to the shell, so pipelines, redirects, and command chaining work.</p>
 <p><a href="wrap.html"><code>--wrap</code></a> applies only to the default shell and <code>run</code>; combining it with <code>t3code</code> is an error.</p>
 <h2 id="auto-update"><a class="anchor" href="#auto-update" aria-hidden="true">#</a>Auto-update</h2>
