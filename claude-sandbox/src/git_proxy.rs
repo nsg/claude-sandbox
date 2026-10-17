@@ -100,8 +100,7 @@ fn config_entries_for_scope(
         .map_err(|error| format!("failed to run git config {scope}: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "git config {scope} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "git config {scope} could not read the repository config"
         ));
     }
     Ok(config_entries(&output.stdout))
@@ -125,10 +124,7 @@ fn bool_config(
         return Ok(None);
     }
     if !output.status.success() {
-        return Err(format!(
-            "could not inspect {key}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Err(format!("could not inspect {key}"));
     }
     match String::from_utf8_lossy(&output.stdout).trim() {
         "true" => Ok(Some(true)),
@@ -163,8 +159,8 @@ fn pin_directory(
     allowed_root: &Path,
     description: &str,
 ) -> Result<PinnedDirectory, String> {
-    let handle = File::open(path)
-        .map_err(|error| format!("could not open {description} {}: {error}", path.display()))?;
+    let handle =
+        File::open(path).map_err(|error| format!("could not open {description}: {error}"))?;
     let metadata = handle
         .metadata()
         .map_err(|error| format!("could not inspect {description}: {error}"))?;
@@ -207,10 +203,7 @@ fn discover_repository_layout(start: &PinnedDirectory) -> Result<[PathBuf; 3], S
         .output()
         .map_err(|error| format!("failed to inspect repository layout: {error}"))?;
     if !output.status.success() {
-        return Err(format!(
-            "could not inspect repository layout: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Err("could not inspect the repository layout".to_string());
     }
     let stdout = String::from_utf8(output.stdout)
         .map_err(|_| "git returned a non-UTF-8 repository layout".to_string())?;
@@ -228,10 +221,7 @@ fn pin_repository(repository: &Path, allowed_root: &Path) -> Result<PinnedReposi
     let [worktree_path, git_dir_path, common_dir_path] = discover_repository_layout(&start)?;
     let worktree = pin_directory(&worktree_path, &allowed_root, "repository worktree")?;
     if worktree.resolved_path != start.resolved_path {
-        return Err(format!(
-            "repository path is not its worktree root: {}",
-            start.resolved_path.display()
-        ));
+        return Err("repository path is not its worktree root".to_string());
     }
     let git_dir = pin_directory(&git_dir_path, &allowed_root, "Git directory")?;
     let common_dir = pin_directory(&common_dir_path, &allowed_root, "Git common directory")?;
@@ -903,6 +893,18 @@ pub fn launch_origin(directory: &Path) -> Result<String, String> {
         .ok_or_else(|| "the launch repository has no 'origin' remote".into())
 }
 
+// Preparation errors can name host temporary paths; only the repository
+// checks that refuse a push are worth showing in the container.
+fn public_prepare_error(error: &str) -> &str {
+    if error.contains("escaping the workspace") || error.contains("could redirect the push") {
+        "the repository's refs or object store point outside the workspace"
+    } else if error.contains("origin tracking ref points outside") {
+        "an origin tracking ref points outside the origin namespace"
+    } else {
+        "the push could not be prepared"
+    }
+}
+
 fn deny(stderr: String) -> Response {
     Response {
         exit_code: 1,
@@ -913,8 +915,8 @@ fn deny(stderr: String) -> Response {
 }
 
 /// Decide whether the pinned, audited repository may push, returning the
-/// origin to push to. Origins here come from the repository's own config,
-/// already confined to the workspace, so echoing them reveals nothing new.
+/// origin to push to. Responses never carry origin URLs or host paths; the
+/// details go to the host log and the admin portal.
 fn authorize_push(
     repository: &managed_push::Repository,
     policy: &Policy,
@@ -934,10 +936,10 @@ fn authorize_push(
                     repository.origin
                 ),
             );
-            return Err(deny(format!(
-                "git-proxy: push refused: remote 'origin' changed since the sandbox was launched (was {origin}, now {})",
-                repository.origin
-            )));
+            return Err(deny(
+                "git-proxy: push refused: remote 'origin' changed since the sandbox was launched"
+                    .to_string(),
+            ));
         }
     }
 
@@ -955,8 +957,12 @@ fn authorize_push(
         )));
     };
 
-    let approval = managed_push::read_approval(state_dir, &repository.relative_path)
-        .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
+    let state_error = |error: String| {
+        log_line(log, &format!("ERROR   push approval state ({error})"));
+        deny("git-proxy: push refused: the push approval state could not be used".to_string())
+    };
+    let approval =
+        managed_push::read_approval(state_dir, &repository.relative_path).map_err(state_error)?;
     match approval {
         Some(approval) if approval.repository.origin == repository.origin => {
             match managed_push::consume_once(state_dir, &approval) {
@@ -965,14 +971,14 @@ fn authorize_push(
                     "git-proxy: the one-time approval was already consumed; approve this repository again"
                         .to_string(),
                 )),
-                Err(error) => Err(deny(format!("git-proxy: push refused: {error}"))),
+                Err(error) => Err(state_error(error)),
             }
         }
         approval => {
             let previous = approval.map(|value| value.repository.origin);
             let id = managed_push::record_candidate(state_dir, repository, previous.clone())
-                .map_err(|error| deny(format!("git-proxy: push refused: {error}")))?;
-            let reason = if let Some(previous) = previous {
+                .map_err(state_error)?;
+            let reason = if let Some(previous) = &previous {
                 format!("origin changed from {previous} to {}", repository.origin)
             } else {
                 "repository is not approved".to_string()
@@ -984,9 +990,14 @@ fn authorize_push(
                     repository.relative_path, reason, id
                 ),
             );
+            let changed = if previous.is_some() {
+                " (its origin changed since it was approved)"
+            } else {
+                ""
+            };
             Err(deny(format!(
-                "git-proxy: push pending approval for '{}' ({})\nOpen the admin portal, approve the repository, and retry.",
-                repository.relative_path, repository.origin
+                "git-proxy: push pending approval for '{}'{changed}\nOpen the admin portal, approve the repository, and retry.",
+                repository.relative_path
             )))
         }
     }
@@ -1074,7 +1085,13 @@ fn handle_request(req: Request, policy: &Policy, log: &Arc<Mutex<File>>) -> Resp
 
     let mut prepared = match prepare_push(&repository, &audit, &expected_origin, &push) {
         Ok(prepared) => prepared,
-        Err(error) => return deny(format!("git-proxy: {error}")),
+        Err(error) => {
+            log_line(log, &format!("ERROR   git {cmd_str} ({error})"));
+            return deny(format!(
+                "git-proxy: push refused: {}",
+                public_prepare_error(&error)
+            ));
+        }
     };
 
     log_line(
@@ -2078,6 +2095,114 @@ mod tests {
             assert!(!denied.stderr.contains("foreign"), "{}", denied.stderr);
         }
         assert!(managed_push::list_candidates(&state).unwrap().is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn responses_never_echo_host_origins_or_paths() {
+        let root = test_root("no-echo");
+        let launch = root.join("project");
+        let approved = root.join("approved-marker.git");
+        fs::create_dir_all(&launch).unwrap();
+        run_git(&root, &["init", "--bare", approved.to_str().unwrap()]);
+        run_git(&root, &["init", launch.to_str().unwrap()]);
+        run_git(
+            &launch,
+            &["remote", "add", "origin", approved.to_str().unwrap()],
+        );
+        let nested = launch.join("nested");
+        run_git(&root, &["init", nested.to_str().unwrap()]);
+        run_git(
+            &nested,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://user:nested-marker@example.com/x.git",
+            ],
+        );
+        let log = test_log(&root);
+        let state = managed_push::prepare_state_dir(&root.join("state")).unwrap();
+        let policy = launch_policy(&launch, &approved);
+        let portal = Policy {
+            portal_state_dir: Some(state.clone()),
+            ..policy.clone()
+        };
+        let push_from = |cwd: &str| Request {
+            args: strs(&["push"]),
+            cwd: Some(cwd.to_string()),
+        };
+        let assert_clean = |response: Response| {
+            assert_ne!(response.exit_code, 0);
+            assert!(!response.stderr.contains("marker"), "{}", response.stderr);
+            assert!(
+                !response.stderr.contains(root.to_str().unwrap()),
+                "{}",
+                response.stderr
+            );
+            response.stderr
+        };
+
+        assert!(
+            assert_clean(handle_request(
+                push_from("/workspace/nested"),
+                &policy,
+                &log
+            ))
+            .contains("only the launch repository")
+        );
+        assert!(
+            assert_clean(handle_request(
+                push_from("/workspace/nested"),
+                &portal,
+                &log
+            ))
+            .contains("pending approval for 'nested'")
+        );
+
+        run_git(
+            &launch,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://user:changed-marker@example.com/x.git",
+            ],
+        );
+        assert!(
+            assert_clean(handle_request(push_from("/workspace"), &policy, &log))
+                .contains("changed since the sandbox was launched")
+        );
+        assert!(
+            assert_clean(handle_request(push_from("/workspace"), &portal, &log))
+                .contains("pending approval for '.'")
+        );
+        let candidate = managed_push::list_candidates(&state)
+            .unwrap()
+            .into_iter()
+            .find(|(_, candidate)| candidate.repository.relative_path == ".")
+            .unwrap()
+            .1;
+        managed_push::approve(
+            &state,
+            &candidate.repository,
+            managed_push::ApprovalScope::Persistent,
+        )
+        .unwrap();
+        run_git(
+            &launch,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://user:third-marker@example.com/x.git",
+            ],
+        );
+        assert!(
+            assert_clean(handle_request(push_from("/workspace"), &portal, &log))
+                .contains("origin changed since it was approved")
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

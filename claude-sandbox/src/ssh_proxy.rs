@@ -298,17 +298,14 @@ fn authorize(request: &Request, policy: &Policy) -> Result<Vec<String>, String> 
         return Ok(fetch_args(&source));
     }
 
+    // The requested source is the caller's own input; the launch origin was
+    // read on the host and is never echoed back.
     let Some(portal) = &policy.portal else {
-        let allowed = policy
-            .launch_origin
-            .as_ref()
-            .map(|origin| {
-                format!(
-                    "only the launch repository's origin ({}) is",
-                    origin.display()
-                )
-            })
-            .unwrap_or_else(|| "nothing is".to_string());
+        let allowed = if policy.launch_origin.is_some() {
+            "only the launch repository's origin is"
+        } else {
+            "nothing is"
+        };
         return Err(format!(
             "fetch refused for {}: {allowed} fetchable through the host's SSH keys",
             source.display()
@@ -321,9 +318,10 @@ fn authorize(request: &Request, policy: &Policy) -> Result<Vec<String>, String> 
         .ok_or_else(|| "fetch request did not include a working directory".to_string())?;
     let requested_from = request_context(&portal.workspace_root, cwd)
         .map_err(|error| format!("fetch request context is invalid: {error}"))?;
-    match managed_fetch::read_approval(&portal.state_dir, &source)? {
+    let state_error = |_: String| "the fetch approval state could not be used".to_string();
+    match managed_fetch::read_approval(&portal.state_dir, &source).map_err(state_error)? {
         Some(approval) => {
-            if !managed_fetch::consume_once(&portal.state_dir, &approval)? {
+            if !managed_fetch::consume_once(&portal.state_dir, &approval).map_err(state_error)? {
                 return Err(
                     "the one-time fetch approval was already consumed; approve this source again"
                         .to_string(),
@@ -332,7 +330,14 @@ fn authorize(request: &Request, policy: &Policy) -> Result<Vec<String>, String> 
             Ok(fetch_args(&source))
         }
         None => {
-            let id = managed_fetch::record_candidate(&portal.state_dir, &source, &requested_from)?;
+            let id = managed_fetch::record_candidate(&portal.state_dir, &source, &requested_from)
+                .map_err(|error| {
+                if error.starts_with("too many pending") {
+                    error
+                } else {
+                    state_error(error)
+                }
+            })?;
             Err(format!(
                 "fetch pending approval for {} (candidate {id}); open the admin portal, approve it, and retry",
                 source.display()
@@ -405,7 +410,10 @@ fn handle_connection(
     let ssh_args = match authorize(&req, policy) {
         Ok(args) => args,
         Err(reason) => {
-            log_line(log, &format!("DENIED  {}", cmd_line));
+            log_line(
+                log,
+                &format!("DENIED  {} ({})", cmd_line, log_safe(&reason)),
+            );
             let resp = HandshakeResponse {
                 status: "denied".to_string(),
                 reason: Some(reason),
@@ -762,6 +770,14 @@ mod tests {
         let error =
             authorize(&fetch("github.com", "org/project.git"), &Policy::default()).unwrap_err();
         assert!(error.contains("nothing is fetchable"), "{error}");
+
+        for other in [
+            fetch("github.com", "org/other.git"),
+            fetch("gitlab.com", "x.git"),
+        ] {
+            let error = authorize(&other, &policy).unwrap_err();
+            assert!(!error.contains("org/project.git"), "{error}");
+        }
     }
 
     #[test]
