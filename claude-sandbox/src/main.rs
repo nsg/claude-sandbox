@@ -127,10 +127,6 @@ struct Cli {
     #[arg(long = "host-env", action = clap::ArgAction::Append)]
     host_env: Vec<String>,
 
-    /// Disable audio passthrough (PulseAudio socket mount for voice mode)
-    #[arg(long)]
-    no_audio: bool,
-
     /// Allow the agent to run `git push` / `git push --tags`, executed on the host
     #[arg(long = "allow-push")]
     allow_push: bool,
@@ -1353,7 +1349,6 @@ fn run_container(
     container_env: &[String],
     quiet: bool,
     ssh: Option<&SshConfig>,
-    audio: bool,
     wrap: bool,
     allow_push: bool,
     allow_merge: bool,
@@ -1520,16 +1515,6 @@ fn run_container(
 
     for entry in container_env {
         cmd.arg("-e").arg(entry);
-    }
-
-    if audio
-        && let Some(pulse_path) = env::var_os("XDG_RUNTIME_DIR")
-            .map(|d| PathBuf::from(d).join("pulse"))
-            .filter(|p| p.join("native").exists())
-    {
-        cmd.arg("-v")
-            .arg(format!("{}:/run/user/0/pulse:ro", pulse_path.display()))
-            .args(["-e", "PULSE_SERVER=unix:/run/user/0/pulse/native"]);
     }
 
     for port in ports {
@@ -1942,7 +1927,6 @@ fn main() {
                 &[],
                 cli.quiet,
                 ssh_config.as_ref(),
-                !cli.no_audio,
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
@@ -2090,7 +2074,6 @@ fn main() {
                 &container_env,
                 cli.quiet,
                 ssh_config.as_ref(),
-                !cli.no_audio,
                 false,
                 cli.allow_push || cli.t3_managed_push,
                 cli.allow_merge,
@@ -2129,7 +2112,6 @@ fn main() {
                 &[],
                 cli.quiet,
                 ssh_config.as_ref(),
-                !cli.no_audio,
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
