@@ -605,13 +605,17 @@ fn validate_port_flags(cli: &Cli, t3code: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn nonempty_env(name: &str) -> Result<Option<String>, String> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
+/// The portal PIN matters only to t3code; other commands ignore it entirely.
+/// A present but empty value still counts as set.
+fn portal_pin(value: Option<std::ffi::OsString>, t3code: bool) -> Result<Option<String>, String> {
+    if !t3code {
+        return Ok(None);
+    }
+    value
         .map(|value| {
             value
                 .into_string()
-                .map_err(|_| format!("{name} is not valid UTF-8"))
+                .map_err(|_| format!("{PORTAL_PIN_VARIABLE} is not valid UTF-8"))
         })
         .transpose()
 }
@@ -1647,7 +1651,7 @@ fn main() {
         return;
     }
     let is_t3code = matches!(&cli.command, Some(Commands::T3code { .. }));
-    if let Err(error) = nonempty_env(PORTAL_PIN_VARIABLE)
+    if let Err(error) = portal_pin(env::var_os(PORTAL_PIN_VARIABLE), is_t3code)
         .and_then(|pin| validate_portal(cli.portal, is_t3code, pin.as_deref()))
         .and_then(|()| validate_port_flags(&cli, is_t3code))
     {
@@ -2032,6 +2036,28 @@ mod tests {
             validate_portal(false, true, Some("1234")).unwrap_err(),
             "CLAUDE_SANDBOX_PORTAL_PIN is set but --portal was not given"
         );
+    }
+
+    #[test]
+    fn portal_pin_is_read_only_for_t3code_and_empty_counts_as_set() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = || Some(std::ffi::OsString::from_vec(vec![0xff, b'1']));
+        assert_eq!(portal_pin(invalid(), false), Ok(None));
+        assert!(portal_pin(invalid(), true).is_err());
+
+        let empty = portal_pin(Some("".into()), true).unwrap();
+        assert_eq!(empty.as_deref(), Some(""));
+        assert!(
+            validate_portal(false, true, empty.as_deref())
+                .unwrap_err()
+                .contains("set but --portal was not given")
+        );
+        assert!(
+            validate_portal(true, true, empty.as_deref())
+                .unwrap_err()
+                .contains("4 to 12 digits")
+        );
+        assert_eq!(portal_pin(None, true), Ok(None));
     }
 
     #[test]
