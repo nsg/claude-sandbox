@@ -53,12 +53,10 @@ only when they matter.
 
 ## Host-connected components
 
-- Treat GitHub CLI, Git push, SSH, and clipboard access as narrow host bridges,
-  not as direct access to host credentials.
+- Treat GitHub CLI, Git push, and SSH access as narrow host bridges, not as
+  direct access to host credentials.
 - Expect bridge availability and allowed operations to depend on how the
   sandbox was launched and configured.
-- Interpret “screenshot” as the host clipboard image; `xclip` and `wl-paste`
-  are proxy clients for that bridge.
 
 ## Skills
 

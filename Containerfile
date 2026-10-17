@@ -114,11 +114,6 @@ COPY config/starship.toml /root/.config/starship.toml
 COPY config/gh-proxy-client.js /usr/local/bin/gh
 RUN chmod +x /usr/local/bin/gh
 
-# Clipboard image proxy client (talks to host-side proxy via Unix socket)
-COPY config/clipboard-proxy-client.js /usr/local/bin/xclip
-RUN chmod +x /usr/local/bin/xclip
-RUN ln -s /usr/local/bin/xclip /usr/local/bin/wl-paste
-
 # SSH proxy client (talks to host-side proxy via Unix socket)
 COPY config/ssh-proxy-client.js /usr/local/bin/ssh
 RUN chmod +x /usr/local/bin/ssh

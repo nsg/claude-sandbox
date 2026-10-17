@@ -20,10 +20,6 @@
 
 - A virtual X display runs on `DISPLAY=:99` — GUI apps work without a physical screen. Launch applications normally; use `wmctrl`, `xdotool`, `scrot`, and `gui-tree` to manage windows, provide input, capture screenshots, and inspect controls. Load the `gui` skill before testing GUI apps.
 
-## Clipboard / Screenshots
-
-- "Screenshot" refers to the clipboard image. To read it: `xclip -selection clipboard -t image/png -o > /tmp/clipboard.png` then read the file
-
 ## Wrapped Terminal Sessions
 
 - The `wrap` commands run and drive interactive terminal programs (TUIs, REPLs, other agents) in named tmux sessions. Load the `wrap` skill before using them.

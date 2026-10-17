@@ -1,4 +1,3 @@
-mod clipboard_proxy;
 mod extension;
 mod gh_proxy;
 mod git_proxy;
@@ -47,7 +46,6 @@ const IMAGE_SOURCE_LABEL: &str =
 const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
 const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
 const GIT_PROXY_SOCKET_NAME: &str = "git-proxy.sock";
-const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
 const VM_PROXY_SOCKET_NAME: &str = "vm-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
 const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
@@ -201,15 +199,6 @@ enum Commands {
         managed_fetch: bool,
         #[arg(long)]
         managed_gh: bool,
-    },
-    /// Start the clipboard image proxy (internal, spawned automatically)
-    ClipboardProxy {
-        /// Socket path (absolute)
-        #[arg(long)]
-        socket: String,
-        /// Persistent log path
-        #[arg(long)]
-        log: PathBuf,
     },
     /// Start the virtual machine proxy (internal, spawned automatically)
     VmProxy {
@@ -1049,18 +1038,6 @@ fn ensure_gh_proxy(
     start_proxy("gh-proxy", &socket_path, command)
 }
 
-fn ensure_clipboard_proxy(runtime_dir: &Path) -> Result<(), String> {
-    let socket_path = runtime_dir.join(CLIPBOARD_PROXY_SOCKET_NAME);
-    let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
-    command
-        .arg("clipboard-proxy")
-        .arg("--socket")
-        .arg(&socket_path)
-        .arg("--log")
-        .arg(proxy_log_path("clipboard-proxy.log")?);
-    start_proxy("clipboard-proxy", &socket_path, command)
-}
-
 fn ensure_vm_proxy(runtime_dir: &Path, workspace_root: &Path) -> Result<(), String> {
     let socket_path = runtime_dir.join(VM_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -1317,7 +1294,6 @@ fn run_container(
         agent_disclosure,
         managed_gh_state,
     ));
-    require_proxy(ensure_clipboard_proxy(&proxy_runtime_dir));
 
     if vm_enabled {
         let report = vm_proxy::preflight(&home_dir(), &cwd, &proxy_runtime_dir);
@@ -1560,9 +1536,6 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 managed_gh: *managed_gh,
             });
         }
-        Some(Commands::ClipboardProxy { socket, log }) => {
-            clipboard_proxy::run(socket, log);
-        }
         Some(Commands::VmProxy {
             socket,
             log,
@@ -1797,7 +1770,6 @@ fn main() {
             Commands::GhProxy { .. }
             | Commands::GitProxy { .. }
             | Commands::T3Admin { .. }
-            | Commands::ClipboardProxy { .. }
             | Commands::VmProxy { .. }
             | Commands::SshProxy { .. },
         ) => unreachable!("internal commands are dispatched before update checks"),
