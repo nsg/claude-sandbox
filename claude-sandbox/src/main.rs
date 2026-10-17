@@ -123,10 +123,6 @@ struct Cli {
     #[arg(short, long)]
     quiet: bool,
 
-    /// Set host environment variable for the podman process (e.g., --host-env XDG_DATA_HOME=/home/user/.local/share)
-    #[arg(long = "host-env", action = clap::ArgAction::Append)]
-    host_env: Vec<String>,
-
     /// Allow the agent to run `git push` / `git push --tags`, executed on the host
     #[arg(long = "allow-push")]
     allow_push: bool,
@@ -1345,7 +1341,6 @@ fn run_container(
     extra_args: &[&str],
     pull_image: bool,
     ports: &[u16],
-    host_env: &[String],
     container_env: &[String],
     quiet: bool,
     ssh: Option<&SshConfig>,
@@ -1446,13 +1441,6 @@ fn run_container(
     }
 
     let mut cmd = Command::new("podman");
-    for entry in host_env {
-        if let Some((key, val)) = entry.split_once('=') {
-            cmd.env(key, val);
-        } else {
-            cmd.env_remove(entry);
-        }
-    }
     cmd.args(["run", "--rm"])
         .args(podman_terminal_flags(std::io::stdin().is_terminal(), wrap))
         .arg("--init");
@@ -1923,7 +1911,6 @@ fn main() {
                 &["bash", "-lc", &cmd_str],
                 should_pull,
                 &cli.ports,
-                &cli.host_env,
                 &[],
                 cli.quiet,
                 ssh_config.as_ref(),
@@ -2070,7 +2057,6 @@ fn main() {
                 &["bash", "-lc", &t3_cmd],
                 should_pull,
                 &ports,
-                &cli.host_env,
                 &container_env,
                 cli.quiet,
                 ssh_config.as_ref(),
@@ -2108,7 +2094,6 @@ fn main() {
                 &["bash", "-l"],
                 should_pull,
                 &cli.ports,
-                &cli.host_env,
                 &[],
                 cli.quiet,
                 ssh_config.as_ref(),

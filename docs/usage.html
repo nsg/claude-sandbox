@@ -117,13 +117,6 @@ T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
 <pre><code class="language-bash">claude-sandbox --quiet
 </code></pre>
 <p>This is useful when launching from editors or scripts where stdout noise is unwanted.</p>
-<h2 id="host-environment"><a class="anchor" href="#host-environment" aria-hidden="true">#</a>Host environment</h2>
-<p>Override environment variables for the Podman process itself (not the container). Useful when the calling environment injects unwanted paths, e.g. VS Code snap overriding <code>XDG_DATA_HOME</code>:</p>
-<pre><code class="language-bash">claude-sandbox --host-env XDG_DATA_HOME=/home/user/.local/share
-</code></pre>
-<p>Pass without a value to unset a variable:</p>
-<pre><code class="language-bash">claude-sandbox --host-env XDG_DATA_HOME
-</code></pre>
 
         <nav class="pager" aria-label="Pages">
           <a class="prev" href="index.html"><span>Previous</span>Overview</a>
@@ -137,7 +130,6 @@ T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
           <li><a href="#commands">Commands</a></li>
           <li><a href="#auto-update">Auto-update</a></li>
           <li><a href="#quiet-mode">Quiet mode</a></li>
-          <li><a href="#host-environment">Host environment</a></li>
         </ul>
       </nav>
     </main>
