@@ -5,6 +5,14 @@
 [![AI usage: vibe](https://nsg.github.io/aibadge/vibe.svg)](https://nsg.github.io/aibadge/#vibe)
 </div>
 
+## A personal toolbox
+
+I built claude-sandbox for my own needs. The tools, scripts, and features in it are the ones I use, and the bundled skills — Git, Rust, testing, delegating between model vendors, and more — are written to be generic but follow how I work.
+
+See it as a toolbox of tools, techniques, and ideas rather than a general-purpose product. If you want something similar, my recommendation is to clone this repository and ask your own AI agent to make a version for you. To pull in later changes from here, have the agent rebase your changes on top of mine — or take your copy in a completely different direction.
+
+Suggestions and pull requests are welcome, but there is no promise that I will merge them: this is my project, built for my needs. If you want something merged, open an issue and we can discuss it.
+
 ## About
 
 claude-sandbox runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai), and [t3code](https://github.com/pingdotgg/t3code) in a Podman container with a complete development toolchain. Point it at a project directory and the agent gets everything it needs to work there — compilers, a browser, a virtual display, image builds — while your host, SSH keys, and GitHub credentials stay out of reach.
@@ -15,6 +23,8 @@ When an agent does need the outside world, it goes through narrow host-side brid
 - **Credentials stay on the host** — GitHub, SSH, and Git push access are proxied through audited allowlists
 - **Long-running agents** — run T3 Code as a systemd service with a PIN-protected portal for approvals, plan-limit usage, and a live view of the agent's display
 - **Full workstation inside** — Playwright with Chromium, a headless X display, Buildah, Rust, Node.js, and ready-made skills
+
+**Why the name?** claude-sandbox started as a sandbox around Claude Code alone. It has since grown to run Codex, opencode, and T3 Code too, but the name stayed for historical reasons. These days I mostly use it through T3 Code, which runs the different harnesses for me from a web browser or its mobile app.
 
 ## Documentation
 

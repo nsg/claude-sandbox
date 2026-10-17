@@ -261,6 +261,21 @@ h2:hover .anchor, h3:hover .anchor, .anchor:focus { opacity: 1; }
   margin: 0 auto 1rem;
 }
 
+.callout {
+  margin: 0 0 2rem;
+  padding: 1.25rem 1.5rem 0.25rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--sand);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.callout h2 {
+  margin: 0 0 0.75rem;
+  padding: 0;
+  border: 0;
+  font-size: 1.2rem;
+}
+
 p, ul, ol, pre, .table-wrap { margin: 0 0 1.1rem; }
 li { margin: 0.25rem 0; }
 li > ul { margin: 0.25rem 0 0; }

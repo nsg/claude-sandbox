@@ -56,8 +56,15 @@
           <h1>claude-sandbox</h1>
           <p class="lede">Run Claude CLI, Codex, opencode and T3 Code in a Podman container with a full development toolchain.</p>
         </header>
+<aside class="callout" aria-labelledby="a-personal-toolbox">
+<h2 id="a-personal-toolbox"><a class="anchor" href="#a-personal-toolbox" aria-hidden="true">#</a>A personal toolbox</h2>
+<p>I built claude-sandbox for my own needs. The tools, scripts, and features in it are the ones I use, and the bundled <a href="skills.html">skills</a> — Git, Rust, testing, delegating between model vendors, and more — are written to be generic but follow how I work.</p>
+<p>See it as a toolbox of tools, techniques, and ideas rather than a general-purpose product. If you want something similar, my recommendation is to clone <a href="https://github.com/nsg/claude-sandbox">the repository</a> and ask your own AI agent to make a version for you. To pull in later changes from here, have the agent rebase your changes on top of mine — or take your copy in a completely different direction.</p>
+<p>Suggestions and pull requests are welcome, but there is no promise that I will merge them: this is my project, built for my needs. If you want something merged, <a href="https://github.com/nsg/claude-sandbox/issues">open an issue</a> and we can discuss it.</p>
+</aside>
 <p>claude-sandbox wraps <a href="https://docs.anthropic.com/en/docs/claude-cli">Claude CLI</a>, <a href="https://github.com/openai/codex">OpenAI Codex CLI</a>, <a href="https://opencode.ai">opencode</a>, and <a href="https://github.com/pingdotgg/t3code">t3code</a> in a Podman container with a full development toolchain. It mounts your current directory to <code>/workspace</code> and your <code>~/.claude</code>, <code>~/.codex</code>, and <code>~/.config/opencode</code> configs into the container, keeping your host system clean while giving each agent access to everything it needs.</p>
 <p>The binary handles container image pulls, self-updates, and skill updates automatically.</p>
+<p><strong>Why the name?</strong> claude-sandbox started as a sandbox around Claude Code alone. It has since grown to run Codex, opencode, and <a href="t3code.html">T3 Code</a> too, but the name stayed for historical reasons. These days I mostly use it through T3 Code, which runs the different harnesses for me from a web browser or its mobile app.</p>
 <h2 id="features"><a class="anchor" href="#features" aria-hidden="true">#</a>Features</h2>
 <ul>
 <li><strong><a href="github.html">Sandboxed GitHub CLI</a></strong> — proxied <code>gh</code> access with an audited command allowlist and launch-snapshotted write targets</li>
@@ -99,6 +106,7 @@ chmod +x ~/bin/claude-sandbox
       <nav class="toc" aria-label="On this page">
         <p>On this page</p>
         <ul>
+          <li><a href="#a-personal-toolbox">A personal toolbox</a></li>
           <li><a href="#features">Features</a></li>
           <li><a href="#quick-start">Quick start</a></li>
           <li><a href="#license">License</a></li>
