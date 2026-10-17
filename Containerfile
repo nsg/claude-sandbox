@@ -114,11 +114,11 @@ COPY config/starship.toml /root/.config/starship.toml
 COPY config/gh-proxy-client.js /usr/local/bin/gh
 RUN chmod +x /usr/local/bin/gh
 
-# SSH proxy client (talks to host-side proxy via Unix socket)
+# SSH fetch bridge client (talks to host-side proxy via Unix socket)
 COPY config/ssh-proxy-client.js /usr/local/bin/ssh
 RUN chmod +x /usr/local/bin/ssh
 
-# git push bridge (talks to host-side proxy via Unix socket; enabled with --allow-push)
+# git push bridge (talks to host-side proxy via Unix socket; enabled with --allow-push or --portal)
 COPY config/git-proxy-client.js /usr/local/bin/git-proxy-client
 COPY config/git-wrapper.sh /usr/local/bin/git
 RUN chmod +x /usr/local/bin/git-proxy-client /usr/local/bin/git

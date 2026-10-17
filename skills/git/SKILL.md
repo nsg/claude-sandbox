@@ -161,9 +161,17 @@ When asked, note how the sandbox bridges pushes to the host:
 - Only the exact commands `git push` and `git push --tags` are bridged to the
   host with the user's credentials. Any other form — extra args or flags, even
   `-C` — runs the container's credential-less git and fails.
-- The bridged push always targets the workspace repository.
+- The bridged push targets the repository containing the current directory,
+  through its `origin` as it was approved.
+- With `--allow-push` alone, only the repository the sandbox was launched from
+  can push, with the `origin` it had at launch. A nested clone, or the launch
+  repository after its `origin` changed, is refused.
 - If a push fails with a hint about `--allow-push`, pushing is disabled for this
-  session: ask the user to relaunch with `claude-sandbox --allow-push`.
+  session: ask the user to relaunch with `claude-sandbox --allow-push` from the
+  repository root.
+- If a push is reported as pending approval, the admin portal is in use: ask
+  the user to approve the repository in the admin portal, then retry the same
+  `git push`.
 
 ## Critical Rules
 

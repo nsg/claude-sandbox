@@ -54,8 +54,9 @@
           <h1>Git push bridge</h1>
           <p class="lede">Opt-in pushes executed on the host with your credentials.</p>
         </header>
-<p>The container has no git credentials, so pushes fail by default. Launch with <code>--allow-push</code> to let the agent trigger a push that is executed <strong>on the host</strong> with your credentials:</p>
-<pre><code class="language-bash">claude-sandbox --allow-push
+<p>The container has no git credentials, so pushes fail by default. Launch with <code>--allow-push</code> from the root of a git repository to let the agent trigger a push of that repository that is executed <strong>on the host</strong> with your credentials:</p>
+<pre><code class="language-bash">cd ~/src/my-project
+claude-sandbox --allow-push
 </code></pre>
 <p>Only two exact commands are bridged, with no arguments accepted from the container:</p>
 <ul>
@@ -67,7 +68,7 @@
 <ul>
 <li>Hooks are disabled (<code>core.hooksPath=/dev/null</code>, <code>--no-verify</code>), so a planted <code>.git/hooks/pre-push</code> never runs on the host</li>
 <li>The worktree, Git directory, and shared Git common directory must remain beneath the approved repository or workspace. The proxy keeps each directory open and runs Git through those pinned handles, so replacing a path or pointing <code>.git</code> outside the approved root cannot redirect an authorized request</li>
-<li>The approved <code>origin</code> URL is pinned (at launch for <code>--allow-push</code> and by portal approval in managed mode). Each push uses it as the push URL of an unguessable, command-scoped remote; validated <code>origin</code> fetch mappings are attached so successful pushes refresh matching <code>refs/remotes/origin/*</code> tracking refs without persisting the temporary remote</li>
+<li>The approved <code>origin</code> URL is pinned (at launch for <code>--allow-push</code> and by approval in the admin portal). Each push uses it as the push URL of an unguessable, command-scoped remote; validated <code>origin</code> fetch mappings are attached so successful pushes refresh matching <code>refs/remotes/origin/*</code> tracking refs without persisting the temporary remote</li>
 <li>The final Git process reads immutable snapshots of the audited system, global, local, and per-worktree config, so replacing a config file after validation cannot redirect an approved push</li>
 <li>Host Git writes tracking changes into private refs. The container client then applies those updates with compare-and-swap and without dereferencing symbolic refs, so an agent-controlled nested ref symlink cannot turn tracking updates into host filesystem writes</li>
 <li>The push is refused if repository config could execute host-side code or redirect the push (<code>credential.*</code>, <code>core.sshCommand</code>, <code>core.worktree</code>, <code>url.*</code>, <code>http.*</code>, <code>remote.*.pushurl</code>, <code>remote.pushDefault</code>, <code>branch.*.pushRemote</code>, …). <code>origin</code> fetch mappings outside <code>refs/remotes/origin/</code> are also rejected, and <code>push.autoSetupRemote</code> is suppressed for the bridged command</li>
@@ -75,13 +76,11 @@
 <li>Credential helpers are reset on the push command line and rebuilt from the host&#39;s system/global git config only, so a helper injected into the workspace repo&#39;s config is never executed</li>
 <li>Terminal credential prompts are disabled (<code>GIT_TERMINAL_PROMPT=0</code>) — pushes that would require interactive auth fail fast instead of hanging</li>
 </ul>
-<p>The grant applies to that launch only and is never persisted — start the next session without the flag and pushes are off again. Every request is logged to <code>~/.claude-sandbox/projects/&lt;project&gt;/logs/git-proxy.log</code>.</p>
-<p><code>--allow-push</code> requires the working directory to be a git repository with an <code>origin</code> remote.</p>
-<p>T3&#39;s <code>--t3-managed-push</code> mode instead routes each request from its container
-working directory to a canonical repository beneath the mounted workspace.
-Paths outside that workspace and repositories not approved in the host-side
-admin portal are rejected. Persistent approvals survive service restarts;
-one-time approvals are consumed by the next push attempt.</p>
+<h2 id="launch-repository"><a class="anchor" href="#launch-repository" aria-hidden="true">#</a>Launch repository</h2>
+<p><code>--allow-push</code> pre-approves the launch repository with the <code>origin</code> URL it has at launch. The launch directory must be a git repository root with an <code>origin</code> remote; otherwise launch fails with an error asking you to launch from the repository root. This applies with <code>--portal</code> too.</p>
+<p>The pre-approval is held in memory for that launch only and never persisted — start the next session without the flag and pushes are off again. Without the portal, pushes from other repositories beneath the workspace, such as a nested clone, are refused, and so is a push after the launch repository&#39;s <code>origin</code> has changed. Without <code>--allow-push</code> and without <code>--portal</code>, no push bridge runs. Every request is logged to <code>~/.claude-sandbox/projects/&lt;project&gt;/logs/git-proxy.log</code>.</p>
+<h2 id="portal-approvals"><a class="anchor" href="#portal-approvals" aria-hidden="true">#</a>Portal approvals</h2>
+<p>With <a href="t3code.html#portal-approvals"><code>--portal</code></a> the push bridge always runs, even without <code>--allow-push</code>. Each request is routed from its container working directory to a canonical repository beneath the mounted workspace; paths outside that workspace are rejected. Any repository there becomes a pending candidate in the admin portal until it is approved once or persistently, and the agent is told to open the admin portal, approve it, and retry. With <code>--allow-push</code> the launch repository is additionally pre-approved; if its <code>origin</code> changes, the push becomes a candidate instead of being refused. Persistent approvals survive service restarts; one-time approvals are consumed by the next push attempt.</p>
 
         <nav class="pager" aria-label="Pages">
           <a class="prev" href="ssh.html"><span>Previous</span>SSH proxy</a>
@@ -89,6 +88,13 @@ one-time approvals are consumed by the next push attempt.</p>
         </nav>
         <p class="edit"><a href="https://github.com/nsg/claude-sandbox/edit/master/docs/git-push.html">Edit this page on GitHub</a></p>
       </article>
+      <nav class="toc" aria-label="On this page">
+        <p>On this page</p>
+        <ul>
+          <li><a href="#launch-repository">Launch repository</a></li>
+          <li><a href="#portal-approvals">Portal approvals</a></li>
+        </ul>
+      </nav>
     </main>
   </div>
 </body>

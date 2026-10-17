@@ -57,6 +57,11 @@ only when they matter.
   direct access to host credentials.
 - Expect bridge availability and allowed operations to depend on how the
   sandbox was launched and configured.
+- SSH is a git-fetch bridge only: it fetches the launch repository's SSH
+  `origin`, plus sources approved in the admin portal. Plain `ssh user@host`
+  commands and pushes over SSH are refused; pushes go through plain `git push`.
+- When a fetch, push, or `gh` action is reported as pending approval, ask the
+  user to approve it in the admin portal, then retry the same command.
 
 ## Skills
 

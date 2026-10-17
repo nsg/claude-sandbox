@@ -70,7 +70,8 @@ claude-sandbox run 'cargo build &amp;&amp; cargo test'
 claude-sandbox -p 8080
 claude-sandbox -p 8080 -p 3000 -p 5173
 
-# Allow the agent to git push (executed on the host, see &quot;Git Push Bridge&quot;)
+# Allow the agent to push the launch repository; run from its root
+# (executed on the host, see &quot;Git Push Bridge&quot;)
 claude-sandbox --allow-push
 
 # Allow the agent to create ephemeral Incus VMs (see &quot;Virtual Machine Bridge&quot;)
@@ -87,21 +88,17 @@ claude-sandbox install extension
 
 # Run the t3code web GUI
 claude-sandbox t3code
-# Optionally enable its pairing portal with a PIN
-T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
-# For a long-running T3 service, approve push repositories from that portal
-T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-push t3code
-# Approve private SSH fetch sources from the same portal
-T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch t3code
-# Approve exact cross-repository GitHub CLI writes once
-T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-gh t3code
-# Enable independent read and write approvals together
-T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch --t3-managed-push t3code
+# Pin the T3 Code port instead of using the first free one from 3773
+claude-sandbox --t3-port 3800 t3code
+# Start the admin portal: pairing, plan usage, live display, and approvals
+# for pushes, SSH fetches and cross-repository GitHub CLI actions
+CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal t3code
+# Also pre-approve pushes of the launch repository (run from its root)
+CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal --allow-push t3code
 # Pin both host ports instead of selecting the first free ports
-T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 claude-sandbox t3code
+CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal --t3-port 3773 --portal-port 3774 t3code
 # Install the tested invocation as a systemd user service
-T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
-  claude-sandbox --install-service --t3-managed-fetch --t3-managed-push t3code
+CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --install-service --portal --t3-port 3773 --portal-port 3774 t3code
 </code></pre>
 <p>Claude Code, Codex, and opencode remain installed in the container. Start <code>claude</code>, <code>codex</code>, or <code>opencode</code> from the shell, or use <code>run</code> to launch a command directly.</p>
 <p><code>run</code> preserves argument boundaries when given multiple arguments. With one argument, it passes the text verbatim to the shell, so pipelines, redirects, and command chaining work.</p>

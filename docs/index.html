@@ -67,16 +67,16 @@
 <h2 id="features"><a class="anchor" href="#features" aria-hidden="true">#</a>Features</h2>
 <ul>
 <li><strong><a href="github.html">Sandboxed GitHub CLI</a></strong> — proxied <code>gh</code> access with an audited command allowlist and launch-snapshotted write targets</li>
-<li><strong><a href="ssh.html">SSH proxy</a></strong> — filtered SSH access without exposing keys to the container</li>
-<li><strong><a href="ssh.html#managed-fetch-approvals">Managed fetch approvals</a></strong> — portal-approved, read-only access to exact private SSH repositories</li>
-<li><strong><a href="git-push.html">Git push bridge</a></strong> — opt-in single-repository pushes plus portal-approved repositories for long-running T3 services</li>
+<li><strong><a href="ssh.html">SSH fetch bridge</a></strong> — fetch the launch repository&#39;s SSH origin with your host keys, which never enter the container</li>
+<li><strong><a href="t3code.html#portal-approvals">Portal approvals</a></strong> — approve pushes, private SSH fetches, and cross-repository GitHub actions from a PIN-protected admin portal</li>
+<li><strong><a href="git-push.html">Git push bridge</a></strong> — opt-in pushes of the launch repository, executed on the host</li>
 <li><strong><a href="vm.html">Virtual machine bridge</a></strong> — opt-in creation and control of ephemeral Incus VMs without exposing host credentials or devices</li>
 <li><strong><a href="environment.html#managed-configuration">Managed configuration</a></strong> — ships default <code>AGENTS.md</code> instructions while preserving your customizations</li>
 <li><strong><a href="environment.html#per-project-memory">Per-project memory</a></strong> — auto-memory is isolated per repository, not shared across all containers</li>
 <li><strong><a href="environment.html#playwright-mcp">MCP servers</a></strong> — pre-configured Playwright with headless Chromium</li>
 <li><strong>Image builds</strong> — build OCI images from a Containerfile or Dockerfile with Buildah, without a daemon or extra privileges</li>
 <li><strong><a href="gui.html">Agent-controlled GUI</a></strong> — a headless Xvfb virtual display with Openbox, window management, screenshots, input, and accessibility-tree tools for Claude and Codex</li>
-<li><strong><a href="t3code.html#live-display">Live display</a></strong> — view and control the sandbox&#39;s virtual X display from the T3 admin portal through the existing admin port, no extra ports</li>
+<li><strong><a href="t3code.html#live-display">Live display</a></strong> — view and control the sandbox&#39;s virtual X display from the admin portal through the existing portal port, no extra ports</li>
 <li><strong><a href="plan-usage.html#gnome-usage-indicator">GNOME usage indicator</a></strong> — optional top-bar extension showing plan-limit usage for every provider</li>
 <li><strong><a href="wrap.html">Wrapped sessions</a></strong> — run the command in a tmux session, inject keystrokes and read the screen from outside with <code>wrap-type</code> / <code>wrap-key</code> / <code>wrap-read</code></li>
 <li><strong><a href="usage.html#auto-update">Auto-updates</a></strong> — binary, skills, and container image updates are checked on every launch</li>

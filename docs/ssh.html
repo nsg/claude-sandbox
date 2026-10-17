@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SSH proxy · claude-sandbox</title>
-  <meta name="description" content="Filtered SSH access and portal-approved private fetches, without your keys entering the container.">
+  <meta name="description" content="Git fetches over SSH with your host keys, without the keys entering the container.">
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -52,80 +52,41 @@
       <article>
         <header>
           <h1>SSH proxy</h1>
-          <p class="lede">Filtered SSH access and portal-approved private fetches, without your keys entering the container.</p>
+          <p class="lede">Git fetches over SSH with your host keys, without the keys entering the container.</p>
         </header>
-<p>The container includes an SSH proxy that gives filtered SSH access without exposing your SSH keys to the container. The proxy runs on the host and communicates with the container over a Unix socket, the same pattern as the GitHub CLI proxy. Your SSH keys never enter the container.</p>
+<p>The container has no SSH keys. Its <code>ssh</code> is a client for a host-side proxy that runs <code>git fetch</code> over SSH with your host keys, for exactly the sources it allows. The proxy talks to the container over a Unix socket, the same pattern as the GitHub CLI proxy, and your keys never enter the container.</p>
 <h2 id="how-it-works"><a class="anchor" href="#how-it-works" aria-hidden="true">#</a>How it works</h2>
-<p>The SSH proxy is opt-in. When a non-empty SSH proxy config exists, <code>/usr/local/bin/ssh</code> inside the container forwards SSH invocations through the proxy. The host-side proxy validates each request against a typed rule set and only spawns the real <code>/usr/bin/ssh</code> if there&#39;s a match. Everything else is denied. Caller-selected SSH flags (like <code>-L</code>, <code>-D</code>, <code>-o</code>) are never accepted. The one exception is Git&#39;s exact <code>-o SendEnv=GIT_PROTOCOL</code> negotiation prefix when it precedes a structurally valid Git service request; managed fetches discard that input and reconstruct their own host command.</p>
-<h2 id="configuration"><a class="anchor" href="#configuration" aria-hidden="true">#</a>Configuration</h2>
-<p>The default config is empty, so the SSH proxy is normally disabled and no SSH proxy process is started. Managed fetch mode starts it independently of this file. To enable static rules, create a non-empty config at <code>~/.claude-sandbox/projects/&lt;project&gt;/ssh-proxy.json</code>. Once enabled, a convenience symlink is placed at <code>.claude-sandbox/ssh-proxy.json</code>.</p>
-<p>The config has three rule types:</p>
-<pre><code class="language-json">{
-  &quot;git&quot;: [
-    &quot;github.com&quot;,
-    &quot;github.com/myorg/*&quot;
-  ],
-  &quot;command&quot;: [
-    &quot;deploy@prod.example.com uptime&quot;
-  ],
-  &quot;host&quot;: [
-    &quot;admin@staging.internal&quot;
-  ]
-}
+<p>The proxy is a git-fetch bridge, not general SSH access. It accepts only Git&#39;s <code>git-upload-pack</code> request for an allowed source and runs a command it reconstructs itself on the host:</p>
+<pre><code class="language-bash">ssh -T -o BatchMode=yes … -o StrictHostKeyChecking=yes … git@&lt;host&gt; git-upload-pack &#39;&lt;path&gt;&#39;
 </code></pre>
-<h2 id="rule-types"><a class="anchor" href="#rule-types" aria-hidden="true">#</a>Rule types</h2>
-<h3 id="git-allow-git-operations-to-a-host"><a class="anchor" href="#git-allow-git-operations-to-a-host" aria-hidden="true">#</a><code>git</code> — allow git operations to a host</h3>
-<p>Each entry is a hostname. The proxy structurally validates that the SSH invocation matches the exact shape git uses (<code>git-receive-pack</code>, <code>git-upload-pack</code>, <code>git-upload-archive</code>). Only <code>git@&lt;host&gt;</code> destinations are accepted.</p>
-<p>This static rule grants both reads and writes. When <code>--t3-managed-fetch</code> is
-active, <code>git-upload-pack</code> requests are instead governed by exact portal
-approvals; static <code>git</code>, <code>command</code>, and <code>host</code> rules cannot bypass the managed
-read check. Static rules can still independently grant pushes, so omit them when
-all writes should use the <a href="git-push.html">Git push bridge</a>.</p>
+<p>The host key must already be in the host&#39;s <code>known_hosts</code>; the proxy never adds or updates it. Each session is limited to 30 minutes and the proxy serves at most 32 concurrent connections.</p>
+<p>The proxy starts only when there is something it could allow: an SSH <code>origin</code> for the launch repository, or <code>--portal</code>. When it runs, the container&#39;s Git uses it for SSH remotes. Without it, <code>ssh</code> in the container reports that the proxy is not running.</p>
+<h2 id="launch-repository-fetch"><a class="anchor" href="#launch-repository-fetch" aria-hidden="true">#</a>Launch repository fetch</h2>
+<p>No flag is needed. When the launch directory is a git repository root (it contains <code>.git</code>) whose <code>origin</code> is an SSH remote, fetching exactly that origin is allowed for the session. The origin is read once at launch on the host and held in memory, so changing it inside the container does not change what can be fetched.</p>
+<p>Two origin forms are supported:</p>
 <ul>
-<li><code>github.com</code> — all repos on GitHub</li>
-<li><code>github.com/myorg/*</code> — only repos under that org</li>
-<li><code>github.com/myorg/specific-repo</code> — only that repo</li>
-<li><code>*.gitlab.com</code> — any GitLab subdomain</li>
+<li><code>git@host:path</code></li>
+<li><code>ssh://git@host/path</code></li>
 </ul>
-<h3 id="command-allow-a-specific-command-on-a-host"><a class="anchor" href="#command-allow-a-specific-command-on-a-host" aria-hidden="true">#</a><code>command</code> — allow a specific command on a host</h3>
-<p>Each entry is an exact <code>user@host command</code> string. No wildcards. The full invocation must match exactly.</p>
+<p>The user must be <code>git</code>, and the host a plain DNS hostname or ssh-config alias without a port. Other users, an explicit <code>:port</code>, and <code>git+ssh://</code> URLs are not supported: launch prints a note and the origin is not fetchable.</p>
+<p>Matching is exact: the host (case-insensitive) and the path Git sends. <code>git@github.com:org/repo.git</code> and <code>ssh://git@github.com/org/repo.git</code> are different sources, and the <code>.git</code> suffix matters. Without the portal, nothing else is fetchable through your host keys.</p>
+<h2 id="portal-approvals"><a class="anchor" href="#portal-approvals" aria-hidden="true">#</a>Portal approvals</h2>
+<p>With <a href="t3code.html#portal-approvals"><code>--portal</code></a>, any other <code>git@host</code> source becomes a pending candidate in the admin portal instead of being refused:</p>
+<pre><code class="language-bash">CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal t3code
+</code></pre>
+<p>The fetch fails with a message telling the agent to open the admin portal, approve it, and retry. Approve it once or persistently; a one-time approval is consumed atomically before SSH starts. Fetch approval is read-only: it never grants a push or GitHub CLI write access. The request must come from a working directory beneath the mounted workspace, which the portal shows as context.</p>
+<p>That workspace path is not an isolation boundary. Every process in one container can read data returned to that container, so use separate sandbox instances when repositories require separate confidentiality boundaries. The bridge controls use of your host credentials; it does not prevent downloading public code over the container&#39;s ordinary network. Private HTTPS remotes and Git LFS authentication are not bridged.</p>
+<h2 id="always-refused"><a class="anchor" href="#always-refused" aria-hidden="true">#</a>Always refused</h2>
 <ul>
-<li><code>deploy@prod.example.com uptime</code></li>
-<li><code>deploy@prod.example.com sudo systemctl restart myapp</code></li>
+<li>Plain <code>ssh user@host …</code> commands and interactive shells</li>
+<li>Pushes over SSH (<code>git-receive-pack</code>); use the <a href="git-push.html">Git push bridge</a> instead</li>
+<li><code>git-upload-archive</code></li>
+<li>Caller-selected SSH flags such as <code>-L</code>, <code>-D</code> or <code>-o</code>, apart from Git&#39;s own <code>-o SendEnv=GIT_PROTOCOL</code> prefix, which the reconstructed command discards</li>
 </ul>
-<p>Remote commands with dash-prefixed arguments must be passed as a single quoted string: <code>ssh deploy@host &quot;ls -la /tmp&quot;</code>, not <code>ssh deploy@host ls -la /tmp</code>. The proxy rejects any argument starting with <code>-</code> to prevent SSH flag injection.</p>
-<h3 id="host-allow-any-command-on-a-host"><a class="anchor" href="#host-allow-any-command-on-a-host" aria-hidden="true">#</a><code>host</code> — allow any command on a host</h3>
-<p>Each entry is a <code>user@host</code> destination. Any remote command is allowed (but a command is always required — interactive shells are denied). This is the broadest permission — prefer <code>command</code> rules when you know the specific commands needed.</p>
-<ul>
-<li><code>admin@staging.internal</code></li>
-</ul>
-<h2 id="discovering-what-to-allow"><a class="anchor" href="#discovering-what-to-allow" aria-hidden="true">#</a>Discovering what to allow</h2>
-<p>After the SSH proxy is enabled, all proxy requests are logged to <code>~/.claude-sandbox/projects/&lt;project&gt;/logs/ssh-proxy.log</code>:</p>
+<h2 id="logs"><a class="anchor" href="#logs" aria-hidden="true">#</a>Logs</h2>
+<p>Every request is logged to <code>~/.claude-sandbox/projects/&lt;project&gt;/logs/ssh-proxy.log</code>:</p>
 <pre><code class="language-bash">grep DENIED ~/.claude-sandbox/projects/*/logs/ssh-proxy.log
-
-# 2026-04-26T12:00:01Z DENIED  git@gitlab.com git-receive-pack &#39;/org/repo.git&#39;
-# 2026-04-26T12:05:30Z DENIED  deploy@prod.example.com uptime
 </code></pre>
-<p>Use the denied command line to determine which rule type and entry to add. If the proxy is disabled because the config is empty or missing, no deny log is written. The proxy must be restarted for config changes to take effect (restart the container).</p>
-<h2 id="managed-fetch-approvals"><a class="anchor" href="#managed-fetch-approvals" aria-hidden="true">#</a>Managed fetch approvals</h2>
-<p>Launch T3 Code with managed fetch access when an agent needs to read private SSH
-repositories without receiving your SSH keys:</p>
-<pre><code class="language-bash">T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox --t3-managed-fetch t3code
-</code></pre>
-<p>The container runs ordinary <code>git fetch</code> and <code>git pull</code> commands locally. For an
-SSH remote, the host proxy permits only a reconstructed <code>git-upload-pack</code>
-command for an exact source approved in the admin portal. It rejects
-caller-selected SSH flags, non-<code>git</code> users, other Git services, invalid
-hostnames, unsafe repository paths, and requests whose reported working
-directory does not resolve beneath the mounted workspace. One-time approval is
-consumed atomically before SSH starts. Managed sessions require an already
-trusted host key and cannot modify the host&#39;s <code>known_hosts</code> file.</p>
-<p>The requesting workspace path shown in the portal is context, not an isolation
-boundary. Every process in one container can read data returned to that
-container, so use separate sandbox instances when repositories require separate
-confidentiality boundaries. This feature controls use of host credentials; it
-does not prevent downloading public code over the container&#39;s ordinary network.
-Private HTTPS remotes and Git LFS authentication are not bridged by this mode.</p>
 
         <nav class="pager" aria-label="Pages">
           <a class="prev" href="github.html"><span>Previous</span>GitHub CLI proxy</a>
@@ -137,10 +98,10 @@ Private HTTPS remotes and Git LFS authentication are not bridged by this mode.</
         <p>On this page</p>
         <ul>
           <li><a href="#how-it-works">How it works</a></li>
-          <li><a href="#configuration">Configuration</a></li>
-          <li><a href="#rule-types">Rule types</a></li>
-          <li><a href="#discovering-what-to-allow">Discovering what to allow</a></li>
-          <li><a href="#managed-fetch-approvals">Managed fetch approvals</a></li>
+          <li><a href="#launch-repository-fetch">Launch repository fetch</a></li>
+          <li><a href="#portal-approvals">Portal approvals</a></li>
+          <li><a href="#always-refused">Always refused</a></li>
+          <li><a href="#logs">Logs</a></li>
         </ul>
       </nav>
     </main>

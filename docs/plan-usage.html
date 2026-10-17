@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Plan usage · claude-sandbox</title>
-  <meta name="description" content="Account-level plan-limit usage for Anthropic, OpenAI and Ollama, served by the T3 admin portal.">
+  <meta name="description" content="Account-level plan-limit usage for Anthropic, OpenAI and Ollama, served by the admin portal.">
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -52,11 +52,12 @@
       <article>
         <header>
           <h1>Plan usage</h1>
-          <p class="lede">Account-level plan-limit usage for Anthropic, OpenAI and Ollama, served by the T3 admin portal.</p>
+          <p class="lede">Account-level plan-limit usage for Anthropic, OpenAI and Ollama, served by the admin portal.</p>
         </header>
 <h2 id="http-api"><a class="anchor" href="#http-api" aria-hidden="true">#</a>HTTP API</h2>
-<p>The same host-side server exposes account-level plan-limit usage without
-authentication. Append <code>/api/usage</code> to the admin URL printed at startup:</p>
+<p>The <a href="t3code.html#admin-portal">admin portal</a>, started with <code>claude-sandbox --portal t3code</code>,
+exposes account-level plan-limit usage without authentication. Append
+<code>/api/usage</code> to the admin portal URL printed at startup:</p>
 <pre><code class="language-bash">curl http://localhost:3774/api/usage
 </code></pre>
 <h2 id="dashboard"><a class="anchor" href="#dashboard" aria-hidden="true">#</a>Dashboard</h2>
@@ -113,13 +114,14 @@ configured endpoint. The new version loads at the next login.</p>
 indicator for every limit with its reset time and a link to the <code>/usage</code>
 dashboard.</p>
 <p>The extension polls the admin server every 60 seconds, so it has data only
-while a <code>claude-sandbox t3code</code> instance with the <a href="t3code.html#admin-portal">admin portal</a> enabled is
+while a <code>claude-sandbox --portal t3code</code> instance with the <a href="t3code.html#admin-portal">admin portal</a> is
 running. By default it reads from <code>127.0.0.1</code>. Pass <code>--host</code> to read from
 another machine instead:</p>
 <pre><code class="language-bash">claude-sandbox install extension --host build-box:3774
 </code></pre>
-<p>Without a port, in <code>--host</code> or altogether, the command uses
-<code>T3CODE_PAIR_ADMIN_PORT</code>, or 3774 when unset. Write an IPv6 address in
+<p>Without a port, in <code>--host</code> or altogether, the extension uses port 3774, the
+portal&#39;s default. For a portal on another port, include it, as in
+<code>--host 127.0.0.1:3801</code>. Write an IPv6 address in
 brackets, as in <code>[fd00::1]:3774</code>. Re-run the command to change the endpoint.
 The request is plain unauthenticated HTTP, so reach a remote host over a
 trusted path such as a VPN.</p>

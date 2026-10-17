@@ -17,7 +17,7 @@ Suggestions and pull requests are welcome, but there is no promise that I will m
 
 claude-sandbox runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai), and [t3code](https://github.com/pingdotgg/t3code) in a Podman container with a complete development toolchain. Point it at a project directory and the agent gets everything it needs to work there — compilers, a browser, a virtual display, image builds — while your host, SSH keys, and GitHub credentials stay out of reach.
 
-When an agent does need the outside world, it goes through narrow host-side bridges you switch on per launch: an allowlisted `gh`, filtered SSH, single-repository pushes, ephemeral Incus VMs. Every request is validated and logged on the host, so you can let an agent run unattended and still know exactly what it was allowed to do.
+When an agent does need the outside world, it goes through narrow host-side bridges you switch on per launch: an allowlisted `gh`, SSH fetches and pushes for the launch repository, ephemeral Incus VMs. Every request is validated and logged on the host, so you can let an agent run unattended and still know exactly what it was allowed to do.
 
 - **One command** — `claude-sandbox` pulls the image, mounts the project, and opens a shell; add `t3code` to start T3 Code; the launcher, skills, and image update themselves
 - **Credentials stay on the host** — GitHub, SSH, and Git push access are proxied through audited allowlists
@@ -36,7 +36,7 @@ Installation, usage, and the full reference are at **[nsg.github.io/claude-sandb
 
 | Path | Contents |
 |------|----------|
-| `claude-sandbox/` | The launcher: a Rust binary that starts the container and runs the host-side proxies, the T3 admin portal, and the GNOME extension installer |
+| `claude-sandbox/` | The launcher: a Rust binary that starts the container and runs the host-side proxies, the admin portal, and the GNOME extension installer |
 | `Containerfile` | The container image, published as `ghcr.io/nsg/claude-sandbox` |
 | `config/` | Files baked into the image: entrypoint, in-container proxy clients, managed `AGENTS.md` and harness config |
 | `skills/` | Skills installed by `claude-sandbox install skills` |

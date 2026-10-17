@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>T3 Code · claude-sandbox</title>
-  <meta name="description" content="Run the t3code web GUI with an optional PIN-protected admin portal on the host.">
+  <meta name="description" content="Run the t3code web GUI, optionally with a PIN-protected admin portal on the host.">
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -52,22 +52,32 @@
       <article>
         <header>
           <h1>T3 Code</h1>
-          <p class="lede">Run the t3code web GUI with an optional PIN-protected admin portal on the host.</p>
+          <p class="lede">Run the t3code web GUI, optionally with a PIN-protected admin portal on the host.</p>
         </header>
 <pre><code class="language-bash">claude-sandbox t3code
 </code></pre>
 <h2 id="admin-portal"><a class="anchor" href="#admin-portal" aria-hidden="true">#</a>Admin portal</h2>
-<p>The admin portal is disabled by default. Set <code>T3CODE_PAIR_ADMIN_PIN</code> to a
-4–12 digit PIN when starting T3 Code to enable it:</p>
-<pre><code class="language-bash">T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox t3code
+<p>The admin portal is off by default. Launch with <code>--portal</code> and a 4–12 digit
+PIN in <code>CLAUDE_SANDBOX_PORTAL_PIN</code> to start it on the host:</p>
+<pre><code class="language-bash">CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal t3code
 </code></pre>
-<p>T3 Code uses the first free host port from 3773 by default. Set <code>T3CODE_PORT</code>
-to use one exact host port instead. The host-side portal uses a distinct port,
-selecting the first free port from 3774 by default; set
-<code>T3CODE_PAIR_ADMIN_PORT</code> to pin it. The admin port setting is ignored when no
-PIN is set. A configured port is never substituted with another port, and
-startup fails if it is already taken. The admin port must also differ from the
-T3 Code port and every port published with <code>-p</code> / <code>--port</code>.</p>
+<p><code>--portal</code> works only with <code>t3code</code> and fails without a valid PIN; setting
+<code>CLAUDE_SANDBOX_PORTAL_PIN</code> without <code>--portal</code> is an error too. The portal
+handles PIN login, T3 pairing, <a href="plan-usage.html">plan usage</a>, the
+<a href="#live-display">live display</a> and <a href="#restart-sandbox">restarts</a>, and it
+<a href="#portal-approvals">approves</a> pushes, fetches and cross-repository GitHub
+actions. Without <code>--portal</code> none of this runs: there is no pairing page, usage
+endpoint, live display or data for the GNOME extension.</p>
+<p>T3 Code uses the first free host port from 3773 by default; <code>--t3-port</code> pins it.
+The portal uses the first free port from 3774, skipping the T3 Code port and every
+port published with <code>-p</code> / <code>--port</code>; <code>--portal-port</code> pins it and needs
+<code>--portal</code>. A pinned port is never substituted with another port, and startup
+fails if it is already taken. A pinned portal port must also differ from the T3 Code
+port and every <code>-p</code> port. Inside the container the portal is reachable on
+<code>127.0.0.1</code> at the same port, exported as <code>CLAUDE_SANDBOX_PORTAL_PORT</code>.</p>
+<p>For a long-running <a href="service.html">service</a>, pin both ports so the addresses stay stable:</p>
+<pre><code class="language-bash">CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal --t3-port 3773 --portal-port 3774 t3code
+</code></pre>
 <p>Open the exact URL printed at startup and enter the PIN in its sign-in page. It
 creates five-minute, single-use pairing links on demand and automatically uses
 the running server&#39;s instance database. Open a generated link in the current
@@ -96,22 +106,28 @@ container port is opened and nothing listens inside the container between
 sessions. The display route requires the same PIN session as the rest of the
 portal and, like the portal, is served over plain HTTP.</p>
 <p>The portal also serves <a href="plan-usage.html">plan-limit usage</a>.</p>
-<h2 id="managed-approvals"><a class="anchor" href="#managed-approvals" aria-hidden="true">#</a>Managed approvals</h2>
-<p>For a long-running T3 service, enable managed fetches, pushes, GitHub actions,
-or any combination:</p>
-<pre><code class="language-bash">T3CODE_PAIR_ADMIN_PIN=123456 claude-sandbox \
-  --t3-managed-fetch --t3-managed-push --t3-managed-gh t3code
-</code></pre>
-<p>The first authenticated SSH fetch from an unapproved source and the first push
-from an unapproved repository are denied and add separate pending candidates to
-the portal. Choose <strong>Approve once</strong>, <strong>Always allow</strong>, or <strong>Dismiss</strong>. Fetch
-approval grants this sandbox instance read access to one exact SSH repository;
-it never grants push or GitHub CLI write access. Push approval remains bound to
-a workspace-relative repository and its <code>origin</code>, and an origin change suspends
-it. Approvals are stored outside the mounted workspace under
+<h2 id="portal-approvals"><a class="anchor" href="#portal-approvals" aria-hidden="true">#</a>Portal approvals</h2>
+<p>With <code>--portal</code>, the portal approves requests for all three host bridges and
+always shows all three approval sections. A request that needs approval is denied
+and added to the portal as a pending candidate, and the agent is told to open the
+admin portal, approve it, and retry. Choose <strong>Approve once</strong>, <strong>Always allow</strong>, or
+<strong>Dismiss</strong>.</p>
+<ul>
+<li><strong>Push</strong>: any repository beneath the workspace can become a candidate. With
+<code>--portal</code> the <a href="git-push.html">push bridge</a> always runs, even without
+<code>--allow-push</code>; adding <code>--allow-push</code> also pre-approves the launch repository.
+Push approval remains bound to a workspace-relative repository and its <code>origin</code>,
+and an origin change suspends it.</li>
+<li><strong>Fetch</strong>: any <code>git@host</code> source other than the launch repository&#39;s
+origin. Approval grants this sandbox instance read access to one exact SSH
+repository through the <a href="ssh.html">SSH proxy</a>; it never grants push or
+GitHub CLI write access.</li>
+<li><strong>GitHub actions</strong>: exact issue and pull-request actions on repositories that were not snapshotted beneath the workspace at launch, described below.</li>
+</ul>
+<p>Approvals are stored outside the mounted workspace under
 <code>~/.claude-sandbox/projects/</code>, where the container cannot modify them.</p>
-<p>Managed fetch and push approvals remain independent of the <a href="github.html">GitHub CLI proxy</a>.
-With <code>--t3-managed-gh</code>, the proxy offers one-time portal approval for an exact
+<p>Fetch and push approvals remain independent of the <a href="github.html">GitHub CLI proxy</a>.
+With <code>--portal</code>, the proxy offers one-time portal approval for an exact
 foreign-repository <code>issue create</code>, <code>issue comment</code>, <code>issue close</code>, <code>issue edit</code>,
 <code>issue reopen</code>, <code>pr create</code>, <code>pr comment</code>, <code>pr edit</code>, <code>pr ready</code>, <code>pr close</code>, or
 <code>pr reopen</code> command. It inspects repository, item, and pull-request head
@@ -148,7 +164,7 @@ the associated provider limit or model labels.</p>
           <li><a href="#admin-portal">Admin portal</a></li>
           <li><a href="#restart-sandbox">Restart sandbox</a></li>
           <li><a href="#live-display">Live display</a></li>
-          <li><a href="#managed-approvals">Managed approvals</a></li>
+          <li><a href="#portal-approvals">Portal approvals</a></li>
           <li><a href="#security">Security</a></li>
         </ul>
       </nav>

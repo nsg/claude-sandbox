@@ -57,8 +57,7 @@
 <p>First run the complete command by hand from the project directory and check
 that it behaves as intended. Then recall that command, insert
 <code>--install-service</code> immediately after <code>claude-sandbox</code>, and run it again:</p>
-<pre><code class="language-bash">T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
-  claude-sandbox --install-service --t3-managed-fetch --t3-managed-push t3code
+<pre><code class="language-bash">CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --install-service --portal --t3-port 3773 --portal-port 3774 t3code
 </code></pre>
 <p>This writes <code>~/.config/systemd/user/&lt;name&gt;.service</code> (or the corresponding
 location under an absolute <code>XDG_CONFIG_HOME</code>), reloads the systemd user
@@ -79,9 +78,7 @@ login.</p>
 directory, and these environment variables when they are set and non-empty:</p>
 <ul>
 <li><code>PATH</code></li>
-<li><code>T3CODE_PAIR_ADMIN_PIN</code></li>
-<li><code>T3CODE_PORT</code></li>
-<li><code>T3CODE_PAIR_ADMIN_PORT</code></li>
+<li><code>CLAUDE_SANDBOX_PORTAL_PIN</code></li>
 <li><code>XDG_CACHE_HOME</code></li>
 <li><code>XDG_CONFIG_HOME</code></li>
 <li><code>XDG_DATA_HOME</code></li>
@@ -93,7 +90,10 @@ agent&#39;s socket is gone by the time the service starts</li>
 <li><code>GH_TOKEN</code></li>
 <li><code>GITHUB_TOKEN</code></li>
 </ul>
-<p>The unit file is mode 0600 because it can contain the pairing PIN or a token,
+<p>Ports travel as flags in the recorded command. Installing a <code>t3code</code> service
+without <code>--t3-port</code> (or, with <code>--portal</code>, without <code>--portal-port</code>) prints a note
+that the service picks the first free port on every start; pin them for a stable address.</p>
+<p>The unit file is mode 0600 because it can contain the portal PIN or a token,
 and it is never written inside the project directory, where the agent could
 read or change it. Add other variables with <code>systemctl --user edit &lt;name&gt;</code>;
 that creates a systemd drop-in which survives re-installing the generated
@@ -113,6 +113,9 @@ button and a crashed server both bring it back. Units for other commands use
 <p>The service updates the launcher and skills only when <code>--auto-update</code> is part
 of the installed command. Without that flag a service start never prompts, and
 while an update is pending it is skipped along with the container image pull.</p>
+<p>When upgrading from an older release, re-install units that set the portal PIN or
+ports through other environment variables or flags: run the updated command, such as
+the one above, with <code>--install-service</code> from the same directory to regenerate the unit.</p>
 <p>With <code>--vm</code>, stopping the service ends the VM proxy before it can delete its
 virtual machines; they are removed the next time the service starts.</p>
 
