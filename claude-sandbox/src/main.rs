@@ -1964,11 +1964,7 @@ mod tests {
             );
         };
         git(&["init", "-q"]);
-        assert!(
-            allow_push_origin(&root)
-                .unwrap_err()
-                .contains("no 'origin'")
-        );
+        assert!(allow_push_origin(&root).unwrap_err().contains("'origin'"));
         fs::create_dir_all(root.join("sub")).unwrap();
         git(&["remote", "add", "origin", "git@example.com:org/repo.git"]);
         assert!(allow_push_origin(&root.join("sub")).is_err());

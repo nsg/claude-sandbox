@@ -320,9 +320,11 @@ pub fn locate_repository(
     Ok((repository_path, relative_path))
 }
 
-/// Refuse repositories whose Git directory or common directory lies outside
-/// `root`: their config (and origin) belongs to some other host repository.
-pub fn ensure_git_dirs_within(repository: &Path, root: &Path) -> Result<(), String> {
+/// The canonical Git directory and common directory of `repository`,
+/// refusing layouts outside `root` (their config belongs to another host
+/// repository) and `config` / `config.worktree` files that are symlinks or
+/// not regular files (they could be another repository's config).
+fn confined_git_dirs(repository: &Path, root: &Path) -> Result<Vec<PathBuf>, String> {
     let root =
         fs::canonicalize(root).map_err(|e| format!("could not resolve {}: {e}", root.display()))?;
     let output = git_command(repository)
@@ -343,14 +345,48 @@ pub fn ensure_git_dirs_within(repository: &Path, root: &Path) -> Result<(), Stri
     if directories.len() != 2 {
         return Err("git returned an unexpected repository layout".to_string());
     }
+    let mut resolved = Vec::new();
     for directory in directories {
-        let resolved = fs::canonicalize(directory)
+        let directory = fs::canonicalize(directory)
             .map_err(|_| "could not resolve the repository's Git directory".to_string())?;
-        if !resolved.starts_with(&root) {
+        if !directory.starts_with(&root) {
             return Err("the repository's Git directory is outside the workspace".to_string());
+        }
+        reject_linked_config(&directory)?;
+        resolved.push(directory);
+    }
+    Ok(resolved)
+}
+
+/// Refuse a Git directory whose `config` or `config.worktree` is a symlink or
+/// anything but a regular file. `directory` may be a pinned `/proc` fd path;
+/// only the final component is checked without following it.
+pub fn reject_linked_config(directory: &Path) -> Result<(), String> {
+    for name in ["config", "config.worktree"] {
+        match fs::symlink_metadata(directory.join(name)) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "the repository's Git {name} is a symlink or not a regular file"
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(format!("could not inspect the repository's Git {name}")),
         }
     }
     Ok(())
+}
+
+/// The origin of a repository whose Git directories are confined to `root`.
+/// The layout is checked again after reading so a swap in between is refused.
+pub fn confined_origin(repository: &Path, root: &Path) -> Result<String, String> {
+    let before = confined_git_dirs(repository, root)?;
+    let origin = origin_url_at(repository)
+        .ok_or_else(|| "the repository does not have a single valid 'origin' URL".to_string())?;
+    if confined_git_dirs(repository, root)? != before {
+        return Err("the repository layout changed while it was being read".to_string());
+    }
+    Ok(origin)
 }
 
 pub fn resolve_repository(
@@ -358,9 +394,7 @@ pub fn resolve_repository(
     container_cwd: &str,
 ) -> Result<(PathBuf, Repository), String> {
     let (repository_path, relative_path) = locate_repository(workspace_root, container_cwd)?;
-    ensure_git_dirs_within(&repository_path, workspace_root)?;
-    let origin = origin_url_at(&repository_path)
-        .ok_or_else(|| "repository does not have a single 'origin' URL".to_string())?;
+    let origin = confined_origin(&repository_path, workspace_root)?;
     let branch = git_stdout(
         &repository_path,
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -392,29 +426,34 @@ pub fn resolve_relative_repository(
 /// system/global config (and its `insteadOf` rewrites) and includes are
 /// ignored, and anything but a single value counts as no origin. This is the
 /// URL git inside the container uses.
-pub fn origin_url_at(repository: &Path) -> Option<String> {
+fn origin_url_at(repository: &Path) -> Option<String> {
     let output = git_command(repository)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args(["config", "--no-includes", "--get-all", "remote.origin.url"])
+        .args([
+            "config",
+            "--null",
+            "--no-includes",
+            "--get-all",
+            "remote.origin.url",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    single_origin(&String::from_utf8(output.stdout).ok()?)
-}
-
-pub fn single_origin(values: &str) -> Option<String> {
-    match values
-        .strip_suffix('\n')
-        .unwrap_or(values)
-        .split('\n')
-        .collect::<Vec<_>>()[..]
-    {
-        [value] if !value.trim().is_empty() => Some(value.to_string()),
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let values: Vec<_> = stdout.strip_suffix('\0')?.split('\0').collect();
+    match values[..] {
+        [value] if is_valid_origin(value) => Some(value.to_string()),
         _ => None,
     }
+}
+
+/// Origins are compared byte for byte; blank values and values containing
+/// control characters (newlines included) are never valid.
+pub fn is_valid_origin(value: &str) -> bool {
+    !value.trim().is_empty() && !value.chars().any(char::is_control)
 }
 
 fn git_command(repository: &Path) -> Command {

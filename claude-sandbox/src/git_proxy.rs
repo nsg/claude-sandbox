@@ -335,6 +335,8 @@ fn credential_entries(entries: &[(String, String)]) -> Vec<(String, String)> {
 }
 
 fn local_config_audit(repository: &PinnedRepository) -> Result<LocalConfigAudit, String> {
+    managed_push::reject_linked_config(&repository.git_dir_command_path)?;
+    managed_push::reject_linked_config(&repository.common_dir_command_path)?;
     let mut entries = config_entries_for_scope(repository, "--local")?;
     if bool_config(repository, Some("--local"), "extensions.worktreeConfig")?.unwrap_or(false) {
         entries.extend(config_entries_for_scope(repository, "--worktree")?);
@@ -849,7 +851,7 @@ fn audited_origin(audit: &LocalConfigAudit) -> Option<String> {
         .map(|(_, value)| value.as_str())
         .collect();
     match values[..] {
-        [value] => managed_push::single_origin(value),
+        [value] if managed_push::is_valid_origin(value) => Some(value.to_string()),
         _ => None,
     }
 }
@@ -888,9 +890,7 @@ pub fn launch_origin(directory: &Path) -> Result<String, String> {
     if repository_root_at(directory).as_deref() != Some(canonical.as_path()) {
         return Err("the launch directory is not a git repository root".into());
     }
-    managed_push::ensure_git_dirs_within(directory, directory)?;
-    managed_push::origin_url_at(directory)
-        .ok_or_else(|| "the launch repository has no 'origin' remote".into())
+    managed_push::confined_origin(directory, directory)
 }
 
 // Preparation errors can name host temporary paths; only the repository
@@ -1069,7 +1069,7 @@ fn handle_request(req: Request, policy: &Policy, log: &Arc<Mutex<File>>) -> Resp
 
     let Some(origin) = audited_origin(&audit) else {
         return deny(
-            "git-proxy: push refused: the repository does not have a single 'origin' URL"
+            "git-proxy: push refused: the repository does not have a single valid 'origin' URL"
                 .to_string(),
         );
     };
@@ -2208,6 +2208,83 @@ mod tests {
     }
 
     #[test]
+    fn symlinked_repository_config_is_refused() {
+        let root = test_root("config-symlink");
+        let (launch, launch_remote) = initialize_repository(&root);
+        let foreign = root.join("foreign");
+        run_git(&root, &["init", foreign.to_str().unwrap()]);
+        run_git(
+            &foreign,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://user:s3cret@example.com/x.git",
+            ],
+        );
+        let config = launch.join(".git/config");
+        fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(foreign.join(".git/config"), &config).unwrap();
+
+        assert!(launch_origin(&launch).unwrap_err().contains("symlink"));
+        assert!(
+            managed_push::resolve_repository(&launch, "/workspace")
+                .unwrap_err()
+                .contains("symlink")
+        );
+        let state = managed_push::prepare_state_dir(&root.join("state")).unwrap();
+        let portal = Policy {
+            portal_state_dir: Some(state.clone()),
+            ..launch_policy(&launch, &launch_remote)
+        };
+        let denied = handle_request(push_request(false), &portal, &test_log(&root));
+        assert!(denied.stderr.contains("symlink"), "{}", denied.stderr);
+        assert!(!denied.stderr.contains("s3cret"), "{}", denied.stderr);
+        assert!(managed_push::list_candidates(&state).unwrap().is_empty());
+
+        fs::remove_file(&config).unwrap();
+        fs::copy(foreign.join(".git/config"), &config).unwrap();
+        let worktree_config = launch.join(".git/config.worktree");
+        std::os::unix::fs::symlink(foreign.join(".git/config"), &worktree_config).unwrap();
+        assert!(
+            launch_origin(&launch)
+                .unwrap_err()
+                .contains("config.worktree")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn origins_with_control_characters_are_invalid_everywhere() {
+        let root = test_root("origin-newline");
+        let (repository, remote) = initialize_repository(&root);
+        run_git(&repository, &["config", "push.default", "current"]);
+        let approved = remote.to_str().unwrap().to_string();
+        run_git(
+            &repository,
+            &["config", "remote.origin.url", &format!("{approved}\n")],
+        );
+        assert!(launch_origin(&repository).is_err());
+        let refused = handle_request(
+            push_request(false),
+            &launch_policy(&repository, &remote),
+            &test_log(&root),
+        );
+        assert!(
+            refused.stderr.contains("single valid 'origin'"),
+            "{}",
+            refused.stderr
+        );
+        assert!(!managed_push::is_valid_origin(
+            "git@example.com:org/x.git\t"
+        ));
+        assert!(managed_push::is_valid_origin("git@example.com:org/x.git"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn origin_is_the_raw_repository_value() {
         let root = test_root("raw-origin");
         let (repository, _) = initialize_repository(&root);
@@ -2263,11 +2340,7 @@ mod tests {
         assert!(launch_origin(&root).is_err());
 
         run_git(&repository, &["remote", "remove", "origin"]);
-        assert!(
-            launch_origin(&repository)
-                .unwrap_err()
-                .contains("no 'origin'")
-        );
+        assert!(launch_origin(&repository).unwrap_err().contains("'origin'"));
 
         fs::remove_dir_all(root).unwrap();
     }
