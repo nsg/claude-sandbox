@@ -133,6 +133,7 @@ enum Commands {
         host: Option<String>,
     },
     /// Start the gh CLI proxy (internal, spawned automatically)
+    #[command(hide = true)]
     GhProxy {
         /// Socket path (absolute)
         #[arg(long)]
@@ -154,6 +155,7 @@ enum Commands {
         portal_state_dir: Option<PathBuf>,
     },
     /// Start the git push proxy (internal, spawned automatically)
+    #[command(hide = true)]
     GitProxy {
         /// Socket path (absolute)
         #[arg(long)]
@@ -172,6 +174,7 @@ enum Commands {
         state_dir: Option<PathBuf>,
     },
     /// Start the host-side admin portal (internal)
+    #[command(hide = true)]
     T3Admin {
         #[arg(long)]
         port: u16,
@@ -193,6 +196,7 @@ enum Commands {
         usage_state_dir: PathBuf,
     },
     /// Start the virtual machine proxy (internal, spawned automatically)
+    #[command(hide = true)]
     VmProxy {
         /// Socket path (absolute)
         #[arg(long)]
@@ -211,6 +215,7 @@ enum Commands {
         parent_pid: u32,
     },
     /// Start the SSH proxy (internal, spawned automatically)
+    #[command(hide = true)]
     SshProxy {
         /// Socket path (absolute)
         #[arg(long)]
