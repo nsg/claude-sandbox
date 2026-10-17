@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Command-line usage · claude-sandbox</title>
-  <meta name="description" content="Launch an agent, pass prompts and flags, and control updates and output.">
+  <meta name="description" content="Open a shell, run commands or T3 Code, and control updates and output.">
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -53,14 +53,19 @@
       <article>
         <header>
           <h1>Command-line usage</h1>
-          <p class="lede">Launch an agent, pass prompts and flags, and control updates and output.</p>
+          <p class="lede">Open a shell, run commands or T3 Code, and control updates and output.</p>
         </header>
 <h2 id="commands"><a class="anchor" href="#commands" aria-hidden="true">#</a>Commands</h2>
-<pre><code class="language-bash"># Run Claude CLI (image is pulled automatically on first run)
+<pre><code class="language-bash"># Open an interactive login shell (bash -l; image is pulled automatically on first run)
 claude-sandbox
 
-# Pass a prompt directly
-claude-sandbox &quot;explain this code&quot;
+# Run commands in the container, preserving each argument
+claude-sandbox run cargo test
+claude-sandbox run claude -p &quot;explain this code&quot;
+claude-sandbox run codex exec &quot;fix the failing test&quot;
+
+# Pass one argument verbatim to the shell for shell syntax
+claude-sandbox run 'cargo build &amp;&amp; cargo test'
 
 # Expose ports from the container
 claude-sandbox -p 8080
@@ -75,19 +80,11 @@ claude-sandbox --vm
 # Allow the agent to merge pull requests (see &quot;GitHub CLI Proxy&quot;)
 claude-sandbox --allow-merge
 
-# Open an interactive shell
-claude-sandbox shell
-
 # Install skills
 claude-sandbox install skills
 
 # Install the GNOME top-bar usage indicator (see &quot;GNOME usage indicator&quot;)
 claude-sandbox install extension
-
-# Run OpenAI Codex CLI instead of Claude
-claude-sandbox codex
-claude-sandbox codex &quot;explain this code&quot;
-claude-sandbox codex exec &quot;fix the failing test&quot;
 
 # Run the t3code web GUI
 claude-sandbox t3code
@@ -106,22 +103,10 @@ T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 claude
 # Install the tested invocation as a systemd user service
 T3CODE_PAIR_ADMIN_PIN=123456 T3CODE_PORT=3800 T3CODE_PAIR_ADMIN_PORT=3801 \
   claude-sandbox --install-service --t3-managed-fetch --t3-managed-push t3code
-
-# Run opencode TUI
-claude-sandbox opencode
-claude-sandbox opencode &quot;explain this code&quot;
 </code></pre>
-<p>Use <code>--</code> to pass arguments to claude instead of claude-sandbox:</p>
-<pre><code class="language-bash">claude-sandbox -p 8080 -- -p
-</code></pre>
-<p>The same top-level flags (<code>-p</code>/<code>--port</code>, <code>--quiet</code>, <code>--auto-update</code>, <code>--host-env</code>, <code>--ssh</code>, <code>--no-audio</code>, …) work with the <code>codex</code> subcommand. Flags after <code>codex</code> are forwarded to the Codex CLI:</p>
-<pre><code class="language-bash">claude-sandbox -p 8080 codex -m gpt-5
-</code></pre>
-<p>Symlink the binary as <code>codex-sandbox</code> to make Codex the default when no subcommand is given:</p>
-<pre><code class="language-bash">ln -s ~/bin/claude-sandbox ~/bin/codex-sandbox
-codex-sandbox             # runs codex
-codex-sandbox &quot;fix bug&quot;   # runs: codex &quot;fix bug&quot;
-</code></pre>
+<p>Claude Code, Codex, and opencode remain installed in the container. Start <code>claude</code>, <code>codex</code>, or <code>opencode</code> from the shell, or use <code>run</code> to launch a command directly.</p>
+<p><code>run</code> preserves argument boundaries when given multiple arguments. With one argument, it passes the text verbatim to the shell, so pipelines, redirects, and command chaining work.</p>
+<p><a href="wrap.html"><code>--wrap</code></a> applies only to the default shell and <code>run</code>; combining it with <code>t3code</code> is an error.</p>
 <h2 id="auto-update"><a class="anchor" href="#auto-update" aria-hidden="true">#</a>Auto-update</h2>
 <p>Skip the interactive update prompt and update automatically:</p>
 <pre><code class="language-bash">claude-sandbox --auto-update

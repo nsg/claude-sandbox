@@ -19,7 +19,7 @@ claude-sandbox runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code
 
 When an agent does need the outside world, it goes through narrow host-side bridges you switch on per launch: an allowlisted `gh`, filtered SSH, single-repository pushes, ephemeral Incus VMs. Every request is validated and logged on the host, so you can let an agent run unattended and still know exactly what it was allowed to do.
 
-- **One command** — `claude-sandbox` pulls the image, mounts the project, and starts the agent; the launcher, skills, and image update themselves
+- **One command** — `claude-sandbox` pulls the image, mounts the project, and opens a shell; add `t3code` to start T3 Code; the launcher, skills, and image update themselves
 - **Credentials stay on the host** — GitHub, SSH, and Git push access are proxied through audited allowlists
 - **Long-running agents** — run T3 Code as a systemd service with a PIN-protected portal for approvals, plan-limit usage, and a live view of the agent's display
 - **Full workstation inside** — Playwright with Chromium, a headless X display, Buildah, Rust, Node.js, and ready-made skills

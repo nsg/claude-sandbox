@@ -95,8 +95,8 @@ fn save_sshd_config(config: &SshdConfig) {
 
 #[derive(Parser)]
 #[command(name = "claude-sandbox")]
-#[command(about = "Run Claude in a sandboxed container")]
-#[command(after_help = "Use -- to pass arguments to claude, e.g.: claude-sandbox -p 8080 -- -p")]
+#[command(about = "Run AI coding agents in a sandboxed container")]
+#[command(after_help = "Run a one-off command with: claude-sandbox run <command>")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -182,15 +182,10 @@ struct Cli {
     /// Run the command in a named tmux session so keys can be injected
     #[arg(long, global = true)]
     wrap: bool,
-
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    args: Vec<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Open interactive bash shell in container
-    Shell,
     /// Install components
     Install {
         /// Component to install: "skills" or "extension" (GNOME usage indicator)
@@ -315,18 +310,8 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
-    /// Run the OpenAI Codex CLI in the container
-    Codex {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Run the t3code web GUI in the container (uses T3CODE_PORT or finds a free port)
     T3code {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Run the opencode CLI in the container
-    Opencode {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -514,6 +499,13 @@ fn shell_command(args: &[&str]) -> String {
         .join(" ")
 }
 
+fn run_command_string(command: &[String]) -> String {
+    match command {
+        [command] => command.clone(),
+        _ => shell_command(&command.iter().map(String::as_str).collect::<Vec<_>>()),
+    }
+}
+
 /// Forward a wrap command to its in-container implementation
 /// (/usr/local/bin/wrap and friends, from config/wrap.sh).
 fn run_in_container(container_name: &str, args: &[&str]) {
@@ -531,7 +523,7 @@ fn run_in_container(container_name: &str, args: &[&str]) {
         // codes come from the wrap script, which prints its own error.
         if status.code() == Some(125) {
             eprintln!(
-                "Error: could not reach the wrapped session. Start one first, for example: claude-sandbox --wrap shell"
+                "Error: could not reach the wrapped session. Start one first, for example: claude-sandbox --wrap"
             );
         }
         std::process::exit(status.code().unwrap_or(1));
@@ -731,20 +723,6 @@ fn t3_settings_from_env(
         pair_admin_pin,
         ports,
     })
-}
-
-fn default_tool() -> &'static str {
-    let invoked = invoked_program();
-    let name = PathBuf::from(&invoked)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
-    if name.starts_with("codex") {
-        "codex"
-    } else {
-        "claude"
-    }
 }
 
 fn invoked_program() -> std::ffi::OsString {
@@ -1376,7 +1354,6 @@ fn run_container(
     quiet: bool,
     ssh: Option<&SshConfig>,
     audio: bool,
-    mount_workspace: bool,
     wrap: bool,
     allow_push: bool,
     allow_merge: bool,
@@ -1499,9 +1476,7 @@ fn run_container(
     if let Some(network) = admin_pasta_network(container_env) {
         cmd.arg("--network").arg(network);
     }
-    if mount_workspace {
-        cmd.arg("-v").arg(format!("{}:/workspace", cwd.display()));
-    }
+    cmd.arg("-v").arg(format!("{}:/workspace", cwd.display()));
     cmd.arg("-v")
         .arg(format!(
             "{}:{}:ro",
@@ -1721,13 +1696,10 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
     true
 }
 
-fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
+fn service_command(cli: &Cli) -> Result<&'static str, (i32, String)> {
     let command = match cli.command.as_ref() {
-        None => default_tool(),
-        Some(Commands::Shell) => "shell",
+        None => "shell",
         Some(Commands::Run { .. }) => "run",
-        Some(Commands::Codex { .. }) => "codex",
-        Some(Commands::Opencode { .. }) => "opencode",
         Some(Commands::T3code { .. }) => "t3code",
         _ => {
             return Err((
@@ -1736,6 +1708,18 @@ fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
             ));
         }
     };
+
+    if command == "shell" && !cli.wrap {
+        return Err((
+            2,
+            "a shell service needs --wrap so it runs in a tmux session: claude-sandbox --wrap --install-service".to_string(),
+        ));
+    }
+    Ok(command)
+}
+
+fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
+    let command = service_command(cli)?;
 
     if command == "t3code" {
         let settings = t3_settings_from_env(
@@ -1756,12 +1740,6 @@ fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
                 "Note: {unpinned} not set; the service picks the first free port on every start. Set {unpinned} for a stable address."
             );
         }
-    }
-
-    if !cli.wrap && !matches!(command, "t3code" | "run") {
-        eprintln!(
-            "Note: {command} needs a terminal and a service has none; install it with --wrap to run it in a tmux session."
-        );
     }
 
     let cwd = env::current_dir()
@@ -1840,6 +1818,10 @@ fn refresh_extension(quiet: bool) {
 
 fn main() {
     let cli = Cli::parse();
+    if cli.wrap && matches!(&cli.command, Some(Commands::T3code { .. })) {
+        eprintln!("Error: --wrap applies to the shell and run, not t3code");
+        std::process::exit(2);
+    }
     if cli.install_service.is_none() && run_internal_command(cli.command.as_ref()) {
         return;
     }
@@ -1933,28 +1915,6 @@ fn main() {
     };
 
     match cli.command {
-        Some(Commands::Shell) => {
-            run_container(
-                &["bash", "-l"],
-                should_pull,
-                &cli.ports,
-                &cli.host_env,
-                &[],
-                cli.quiet,
-                ssh_config.as_ref(),
-                !cli.no_audio,
-                true,
-                cli.wrap,
-                cli.allow_push,
-                cli.allow_merge,
-                agent_disclosure.as_deref(),
-                None,
-                None,
-                None,
-                None,
-                cli.vm,
-            );
-        }
         Some(Commands::Install { target, .. }) => {
             if target == "skills" {
                 install_skills(&client, cli.quiet);
@@ -1973,7 +1933,7 @@ fn main() {
             | Commands::SshProxy { .. },
         ) => unreachable!("internal commands are dispatched before update checks"),
         Some(Commands::Run { command }) => {
-            let cmd_str = command.join(" ");
+            let cmd_str = run_command_string(&command);
             run_container(
                 &["bash", "-lc", &cmd_str],
                 should_pull,
@@ -1983,61 +1943,6 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
-                true,
-                cli.wrap,
-                cli.allow_push,
-                cli.allow_merge,
-                agent_disclosure.as_deref(),
-                None,
-                None,
-                None,
-                None,
-                cli.vm,
-            );
-        }
-        Some(Commands::Codex { args }) => {
-            let codex_cmd = if args.is_empty() {
-                "codex".to_string()
-            } else {
-                format!("codex {}", args.join(" "))
-            };
-            run_container(
-                &["bash", "-lc", &codex_cmd],
-                should_pull,
-                &cli.ports,
-                &cli.host_env,
-                &[],
-                cli.quiet,
-                ssh_config.as_ref(),
-                !cli.no_audio,
-                true,
-                cli.wrap,
-                cli.allow_push,
-                cli.allow_merge,
-                agent_disclosure.as_deref(),
-                None,
-                None,
-                None,
-                None,
-                cli.vm,
-            );
-        }
-        Some(Commands::Opencode { args }) => {
-            let opencode_cmd = if args.is_empty() {
-                "opencode".to_string()
-            } else {
-                format!("opencode {}", args.join(" "))
-            };
-            run_container(
-                &["bash", "-lc", &opencode_cmd],
-                should_pull,
-                &cli.ports,
-                &cli.host_env,
-                &[],
-                cli.quiet,
-                ssh_config.as_ref(),
-                !cli.no_audio,
-                true,
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
@@ -2127,11 +2032,7 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            let container_name = if cli.wrap {
-                wrap_container_name(&cwd)
-            } else {
-                format!("{}-t3-{}", wrap_container_name(&cwd), std::process::id())
-            };
+            let container_name = format!("{}-t3-{}", wrap_container_name(&cwd), std::process::id());
 
             let t3_cmd = format!("t3code-register {}", args.join(" "));
 
@@ -2190,8 +2091,7 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
-                true,
-                cli.wrap,
+                false,
                 cli.allow_push || cli.t3_managed_push,
                 cli.allow_merge,
                 agent_disclosure.as_deref(),
@@ -2221,14 +2121,8 @@ fn main() {
             print_wrap_sessions();
         }
         None => {
-            let tool = default_tool();
-            let inner_cmd = if cli.args.is_empty() {
-                tool.to_string()
-            } else {
-                format!("{} {}", tool, cli.args.join(" "))
-            };
             run_container(
-                &["bash", "-lc", &inner_cmd],
+                &["bash", "-l"],
                 should_pull,
                 &cli.ports,
                 &cli.host_env,
@@ -2236,7 +2130,6 @@ fn main() {
                 cli.quiet,
                 ssh_config.as_ref(),
                 !cli.no_audio,
-                true,
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
@@ -2267,6 +2160,83 @@ mod tests {
             "claude-sandbox-main-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn run_command_preserves_a_single_shell_expression() {
+        let command = ["cargo build && cargo test".to_string()];
+        assert_eq!(run_command_string(&command), "cargo build && cargo test");
+    }
+
+    #[test]
+    fn run_command_quotes_separate_arguments() {
+        let command = ["printf", r"%s\n", "a  b", "x;y", "it's"].map(String::from);
+        assert_eq!(
+            run_command_string(&command),
+            r#"printf '%s\n' 'a  b' 'x;y' 'it'\''s'"#
+        );
+    }
+
+    #[test]
+    fn bare_invocation_has_no_subcommand() {
+        let cli = Cli::try_parse_from(["claude-sandbox"]).unwrap();
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn stray_arguments_and_removed_commands_are_rejected() {
+        for argument in ["foo", "shell", "codex", "opencode"] {
+            assert!(Cli::try_parse_from(["claude-sandbox", argument]).is_err());
+        }
+    }
+
+    #[test]
+    fn run_parsing_preserves_argument_spacing() {
+        let cli = Cli::try_parse_from(["claude-sandbox", "run", "echo", "a  b"]).unwrap();
+        let Some(Commands::Run { command }) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(command, ["echo", "a  b"]);
+    }
+
+    #[test]
+    fn shell_service_requires_wrap() {
+        let cli = Cli::try_parse_from(["claude-sandbox", "--install-service"]).unwrap();
+        assert_eq!(
+            service_command(&cli),
+            Err((
+                2,
+                "a shell service needs --wrap so it runs in a tmux session: claude-sandbox --wrap --install-service".to_string(),
+            ))
+        );
+        let cli = Cli::try_parse_from(["claude-sandbox", "--wrap", "--install-service"]).unwrap();
+        assert_eq!(service_command(&cli), Ok("shell"));
+    }
+
+    #[test]
+    fn service_commands_allow_run_and_t3code_without_wrap() {
+        for (arguments, command) in [
+            (
+                vec!["claude-sandbox", "--install-service", "run", "true"],
+                "run",
+            ),
+            (
+                vec!["claude-sandbox", "--install-service", "t3code"],
+                "t3code",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert_eq!(service_command(&cli), Ok(command));
+        }
+        let cli =
+            Cli::try_parse_from(["claude-sandbox", "--install-service", "wrap-list"]).unwrap();
+        assert_eq!(
+            service_command(&cli),
+            Err((
+                2,
+                "--install-service only applies to commands that start a sandbox".to_string(),
+            ))
+        );
     }
 
     #[test]

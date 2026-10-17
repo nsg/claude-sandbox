@@ -105,9 +105,13 @@ claude-sandbox did not generate, is refused; choose a distinct explicit name.</p
 <p>A T3 Code unit uses <code>Restart=always</code>, so the admin portal&#39;s <strong>Restart sandbox</strong>
 button and a crashed server both bring it back. Units for other commands use
 <code>Restart=on-failure</code>, which lets a <code>run</code> command finish.</p>
-<p>Services have no terminal. T3 Code and non-interactive <code>run</code> commands work
-normally, but the default Claude, Codex, and opencode TUIs and <code>shell</code> need
-<a href="wrap.html"><code>--wrap</code></a> when installed as a service.</p>
+<p>Services support <code>t3code</code>, <code>run &lt;command&gt;</code>, and the default shell with
+<a href="wrap.html"><code>--wrap</code></a>. Installing the default shell without
+<code>--wrap</code> is refused because services have no terminal. Install a wrapped shell with:</p>
+<pre><code class="language-bash">claude-sandbox --wrap --install-service
+</code></pre>
+<p>Use <code>--wrap run &lt;command&gt;</code> for interactive commands that need a terminal.
+<code>--wrap</code> applies only to the shell and <code>run</code>; combining it with <code>t3code</code> is an error.</p>
 <p>The service updates the launcher and skills only when <code>--auto-update</code> is part
 of the installed command. Without that flag a service start never prompts, and
 while an update is pending it is skipped along with the container image pull.</p>

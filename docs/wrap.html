@@ -55,8 +55,8 @@
           <h1>Wrapped sessions</h1>
           <p class="lede">Run a command in a tmux session and drive it from outside.</p>
         </header>
-<p>Pass <code>--wrap</code> to run the command inside a named tmux session in the container, so keystrokes can be injected from another terminal:</p>
-<pre><code class="language-bash">claude-sandbox --wrap shell
+<p>Pass <code>--wrap</code> to run the default shell or a <code>run</code> command inside a named tmux session in the container, so keystrokes can be injected from another terminal. It applies only to the shell and <code>run</code>; <code>--wrap t3code</code> is an error:</p>
+<pre><code class="language-bash">claude-sandbox --wrap
 </code></pre>
 <p>Then, from a second terminal in the same project directory:</p>
 <pre><code class="language-bash"># Type text with a human-like typing cadence, then press Enter
