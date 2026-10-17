@@ -34,9 +34,6 @@ struct Config {
     fetch_state_dir: PathBuf,
     gh_state_dir: PathBuf,
     usage_state_dir: PathBuf,
-    managed_push: bool,
-    managed_fetch: bool,
-    managed_gh: bool,
     pin: String,
     csrf_token: String,
     session_token: String,
@@ -77,15 +74,12 @@ pub struct RunOptions<'a> {
     pub fetch_state_dir: &'a Path,
     pub gh_state_dir: &'a Path,
     pub usage_state_dir: &'a Path,
-    pub managed_push: bool,
-    pub managed_fetch: bool,
-    pub managed_gh: bool,
 }
 
 pub fn run(options: RunOptions<'_>) {
-    let pin = std::env::var("T3CODE_PAIR_ADMIN_PIN").unwrap_or_default();
+    let pin = std::env::var("CLAUDE_SANDBOX_PORTAL_PIN").unwrap_or_default();
     if !valid_pin(&pin) {
-        eprintln!("t3-admin: T3CODE_PAIR_ADMIN_PIN must contain 4 to 12 digits");
+        eprintln!("t3-admin: CLAUDE_SANDBOX_PORTAL_PIN must contain 4 to 12 digits");
         process::exit(2);
     }
     let (restart_tx, restart_rx) = mpsc::channel();
@@ -99,9 +93,6 @@ pub fn run(options: RunOptions<'_>) {
         fetch_state_dir: options.fetch_state_dir.to_path_buf(),
         gh_state_dir: options.gh_state_dir.to_path_buf(),
         usage_state_dir: options.usage_state_dir.to_path_buf(),
-        managed_push: options.managed_push,
-        managed_fetch: options.managed_fetch,
-        managed_gh: options.managed_gh,
         pin,
         csrf_token: random_token(24),
         session_token: random_token(32),
@@ -586,21 +577,17 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/pair") => create_pairing_link(config, request.headers.get("host"))
             .map(|url| format!("PAIR:{url}")),
-        ("POST", "/approve") if config.managed_push => approve_candidate(config, &form),
-        ("POST", "/dismiss") if config.managed_push => dismiss_candidate(config, &form),
-        ("POST", "/revoke") if config.managed_push => revoke_approval(config, &form),
-        ("POST", "/approve-fetch") if config.managed_fetch => {
-            approve_fetch_candidate(config, &form)
-        }
-        ("POST", "/dismiss-fetch") if config.managed_fetch => {
-            dismiss_fetch_candidate(config, &form)
-        }
-        ("POST", "/revoke-fetch") if config.managed_fetch => revoke_fetch_approval(config, &form),
-        ("POST", "/approve-gh") if config.managed_gh => approve_gh_action(config, &form),
-        ("POST", "/dismiss-gh") if config.managed_gh => dismiss_gh_action(config, &form),
-        ("POST", "/revoke-gh") if config.managed_gh => revoke_gh_action(config, &form),
-        ("POST", "/grant-gh") if config.managed_gh => grant_gh_action(config, &form),
-        ("POST", "/revoke-gh-grant") if config.managed_gh => revoke_gh_grant(config, &form),
+        ("POST", "/approve") => approve_candidate(config, &form),
+        ("POST", "/dismiss") => dismiss_candidate(config, &form),
+        ("POST", "/revoke") => revoke_approval(config, &form),
+        ("POST", "/approve-fetch") => approve_fetch_candidate(config, &form),
+        ("POST", "/dismiss-fetch") => dismiss_fetch_candidate(config, &form),
+        ("POST", "/revoke-fetch") => revoke_fetch_approval(config, &form),
+        ("POST", "/approve-gh") => approve_gh_action(config, &form),
+        ("POST", "/dismiss-gh") => dismiss_gh_action(config, &form),
+        ("POST", "/revoke-gh") => revoke_gh_action(config, &form),
+        ("POST", "/grant-gh") => grant_gh_action(config, &form),
+        ("POST", "/revoke-gh-grant") => revoke_gh_grant(config, &form),
         _ => {
             redirect(&mut stream, "/");
             return;
@@ -937,15 +924,9 @@ fn render_page(
         r#"<section><h2>Unlock</h2><form method="post" action="/login"><label>Admin PIN<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,12}" minlength="4" maxlength="12" required autofocus></label><button>Unlock</button></form></section>"#.to_string()
     } else {
         let mut sections = render_pairing_controls(&config.csrf_token, pair_url);
-        if config.managed_push {
-            sections.push_str(&render_push_controls(config));
-        }
-        if config.managed_fetch {
-            sections.push_str(&render_fetch_controls(config));
-        }
-        if config.managed_gh {
-            sections.push_str(&render_gh_controls(config));
-        }
+        sections.push_str(&render_push_controls(config));
+        sections.push_str(&render_fetch_controls(config));
+        sections.push_str(&render_gh_controls(config));
         sections.push_str(render_display_controls());
         sections.push_str(&render_restart_controls(&config.csrf_token));
         sections
@@ -1866,12 +1847,11 @@ mod tests {
     }
 
     #[test]
-    fn manages_fetch_approvals_independently_from_pushes() {
+    fn manages_fetch_approvals() {
         let workspace = temporary_workspace("fetch-approval");
         std::fs::create_dir_all(&workspace).unwrap();
         let mut config = test_config(&workspace);
         config.fetch_state_dir = managed_fetch::prepare_state_dir(&config.fetch_state_dir).unwrap();
-        config.managed_fetch = true;
         let source = managed_fetch::Source {
             host: "github.com".to_string(),
             repository: "org/private.git".to_string(),
@@ -1883,7 +1863,6 @@ mod tests {
         assert!(html.contains("Pending fetch approvals"));
         assert!(html.contains("git@github.com:org/private.git"));
         assert!(html.contains("services/api"));
-        assert!(!html.contains("Pending push approvals"));
 
         let form = HashMap::from([
             ("id".to_string(), id),
@@ -1951,36 +1930,10 @@ mod tests {
     }
 
     #[test]
-    fn managed_gh_routes_are_unavailable_when_disabled() {
-        let workspace = temporary_workspace("gh-disabled");
-        fs::create_dir_all(&workspace).unwrap();
-        let config = test_config(&workspace);
-        for path in [
-            "/approve-gh",
-            "/dismiss-gh",
-            "/revoke-gh",
-            "/grant-gh",
-            "/revoke-gh-grant",
-        ] {
-            let body = "csrf=csrf&handle=0123456789abcdef";
-            let response = make_request(
-                &config,
-                &format!(
-                    "POST {path} HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                ),
-            );
-            assert!(response.starts_with("HTTP/1.1 303 See Other"));
-        }
-        fs::remove_dir_all(workspace).unwrap();
-    }
-
-    #[test]
     fn managed_gh_routes_require_csrf() {
         let workspace = temporary_workspace("gh-csrf");
         fs::create_dir_all(&workspace).unwrap();
-        let mut config = test_config(&workspace);
-        config.managed_gh = true;
+        let config = test_config(&workspace);
         for path in ["/approve-gh", "/grant-gh", "/revoke-gh-grant"] {
             let body = "csrf=wrong&handle=0123456789abcdef&scope=command";
             let response = make_request(
@@ -1999,8 +1952,7 @@ mod tests {
     fn managed_gh_grant_routes_require_session() {
         let workspace = temporary_workspace("gh-grant-session");
         fs::create_dir_all(&workspace).unwrap();
-        let mut config = test_config(&workspace);
-        config.managed_gh = true;
+        let config = test_config(&workspace);
         for path in ["/grant-gh", "/revoke-gh-grant"] {
             let body = "csrf=csrf&handle=0123456789abcdef&scope=command";
             let response = make_request(
@@ -2019,8 +1971,7 @@ mod tests {
     fn managed_gh_grant_rejects_invalid_scope() {
         let workspace = temporary_workspace("gh-grant-scope");
         fs::create_dir_all(&workspace).unwrap();
-        let mut config = test_config(&workspace);
-        config.managed_gh = true;
+        let config = test_config(&workspace);
         let body = "csrf=csrf&handle=0123456789abcdef&scope=invalid";
         let response = make_request(
             &config,
@@ -2040,7 +1991,6 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let mut config = test_config(&workspace);
         config.gh_state_dir = managed_gh::prepare_state_dir(&config.gh_state_dir).unwrap();
-        config.managed_gh = true;
         managed_gh::record_candidate(
             &config.gh_state_dir,
             &gh_action("<script>alert('x')</script>&"),
@@ -2061,7 +2011,6 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let mut config = test_config(&workspace);
         config.gh_state_dir = managed_gh::prepare_state_dir(&config.gh_state_dir).unwrap();
-        config.managed_gh = true;
         let mut action = gh_action("hello");
         action.args.push("--unaccounted".to_string());
         let handle =
@@ -2126,7 +2075,6 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let mut config = test_config(&workspace);
         config.gh_state_dir = managed_gh::prepare_state_dir(&config.gh_state_dir).unwrap();
-        config.managed_gh = true;
         let candidate =
             managed_gh::record_candidate(&config.gh_state_dir, &gh_action("hello"), &gh_context())
                 .unwrap();
@@ -2170,7 +2118,6 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let mut config = test_config(&workspace);
         config.gh_state_dir = managed_gh::prepare_state_dir(&config.gh_state_dir).unwrap();
-        config.managed_gh = true;
         let first =
             managed_gh::record_candidate(&config.gh_state_dir, &gh_action("first"), &gh_context())
                 .unwrap();
@@ -2624,9 +2571,6 @@ mod tests {
             fetch_state_dir: workspace.join("fetch"),
             gh_state_dir: workspace.join("gh"),
             usage_state_dir: workspace.join("usage"),
-            managed_push: false,
-            managed_fetch: false,
-            managed_gh: false,
             pin: "1234".to_string(),
             csrf_token: "csrf".to_string(),
             session_token: "session".to_string(),

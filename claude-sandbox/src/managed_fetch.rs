@@ -257,7 +257,7 @@ mod tests {
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "claude-sandbox-managed-fetch-{label}-{}-{}",
+            "claude-sandbox-fetch-approvals-{label}-{}-{}",
             std::process::id(),
             unix_time()
         ))

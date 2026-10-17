@@ -1342,7 +1342,7 @@ mod tests {
 
     #[test]
     fn managed_push_requires_approval_then_routes_to_repository() {
-        let root = test_root("managed-push");
+        let root = test_root("portal-push");
         let workspace = root.join("workspace");
         let repository = workspace.join("project");
         let remote = root.join("remote.git");

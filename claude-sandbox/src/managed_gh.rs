@@ -671,7 +671,7 @@ mod tests {
 
     fn root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "claude-sandbox-managed-gh-{label}-{}-{}",
+            "claude-sandbox-gh-approvals-{label}-{}-{}",
             std::process::id(),
             crate::git_proxy::random_hex_bytes(8).unwrap()
         ))

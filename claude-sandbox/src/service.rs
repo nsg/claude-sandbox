@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const SERVICE_ENV_VARS: &[&str] = &[
     "PATH",
-    "T3CODE_PAIR_ADMIN_PIN",
+    "CLAUDE_SANDBOX_PORTAL_PIN",
     "T3CODE_PORT",
     "T3CODE_PAIR_ADMIN_PORT",
     "XDG_CACHE_HOME",
@@ -622,10 +622,13 @@ mod tests {
 
     #[test]
     fn renders_complete_unit() {
-        let arguments = vec!["--t3-managed-push".to_string(), "t3code".to_string()];
+        let arguments = vec!["--portal".to_string(), "t3code".to_string()];
         let environment = vec![
             ("PATH".to_string(), "/usr/bin".to_string()),
-            ("T3CODE_PAIR_ADMIN_PIN".to_string(), "123456".to_string()),
+            (
+                "CLAUDE_SANDBOX_PORTAL_PIN".to_string(),
+                "123456".to_string(),
+            ),
         ];
         let spec = UnitSpec {
             command: "t3code",
@@ -643,8 +646,8 @@ Description=claude-sandbox t3code in /home/stefan/projects\n\
 [Service]\n\
 WorkingDirectory=/home/stefan/projects\n\
 Environment=\"PATH=/usr/bin\"\n\
-Environment=\"T3CODE_PAIR_ADMIN_PIN=123456\"\n\
-ExecStart=/home/stefan/bin/claude-sandbox --t3-managed-push t3code\n\
+Environment=\"CLAUDE_SANDBOX_PORTAL_PIN=123456\"\n\
+ExecStart=/home/stefan/bin/claude-sandbox --portal t3code\n\
 Restart=always\n\
 RestartSec=5\n\
 SuccessExitStatus=143\n\

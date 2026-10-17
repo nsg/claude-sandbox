@@ -105,17 +105,9 @@ struct Cli {
     #[arg(long)]
     vm: bool,
 
-    /// Let the T3 admin portal approve repositories for host-side pushes
-    #[arg(long = "t3-managed-push")]
-    t3_managed_push: bool,
-
-    /// Let the T3 admin portal approve private repositories for SSH fetches
-    #[arg(long = "t3-managed-fetch")]
-    t3_managed_fetch: bool,
-
-    /// Let the T3 admin portal approve one-time cross-repository GitHub actions
-    #[arg(long = "t3-managed-gh")]
-    t3_managed_gh: bool,
+    /// Start the admin portal (t3code only; needs CLAUDE_SANDBOX_PORTAL_PIN) and let it approve pushes, fetches and cross-repository GitHub actions
+    #[arg(long)]
+    portal: bool,
 
     /// Run the command in a named tmux session so keys can be injected
     #[arg(long, global = true)]
@@ -149,9 +141,9 @@ enum Commands {
         /// Text appended to issues, pull requests and comments (omit to disable)
         #[arg(long)]
         agent_disclosure: Option<String>,
-        /// Host-only managed GitHub action state directory
+        /// Host-only portal GitHub action state directory
         #[arg(long)]
-        managed_gh_state_dir: Option<PathBuf>,
+        portal_state_dir: Option<PathBuf>,
     },
     /// Start the git push proxy (internal, spawned automatically)
     GitProxy {
@@ -171,7 +163,7 @@ enum Commands {
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
-    /// Start the host-side T3 administration portal (internal)
+    /// Start the host-side admin portal (internal)
     T3Admin {
         #[arg(long)]
         port: u16,
@@ -191,12 +183,6 @@ enum Commands {
         gh_state_dir: PathBuf,
         #[arg(long)]
         usage_state_dir: PathBuf,
-        #[arg(long)]
-        managed_push: bool,
-        #[arg(long)]
-        managed_fetch: bool,
-        #[arg(long)]
-        managed_gh: bool,
     },
     /// Start the virtual machine proxy (internal, spawned automatically)
     VmProxy {
@@ -548,9 +534,6 @@ struct T3AdminConfig<'a> {
     fetch_state_dir: &'a Path,
     gh_state_dir: &'a Path,
     usage_state_dir: &'a Path,
-    managed_push: bool,
-    managed_fetch: bool,
-    managed_gh: bool,
 }
 
 fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
@@ -579,17 +562,8 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    if config.managed_push {
-        command.arg("--managed-push");
-    }
-    if config.managed_fetch {
-        command.arg("--managed-fetch");
-    }
-    if config.managed_gh {
-        command.arg("--managed-gh");
-    }
     if let Err(error) = command.spawn() {
-        eprintln!("Warning: failed to start T3 admin portal: {error}");
+        eprintln!("Warning: failed to start the admin portal: {error}");
         return;
     }
     for _ in 0..30 {
@@ -598,26 +572,36 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
             return;
         }
     }
-    eprintln!("Warning: T3 admin portal did not start in time");
+    eprintln!("Warning: the admin portal did not start in time");
 }
 
-fn is_valid_pair_admin_pin(pin: &str) -> bool {
+const PORTAL_PIN_VARIABLE: &str = "CLAUDE_SANDBOX_PORTAL_PIN";
+
+fn is_valid_portal_pin(pin: &str) -> bool {
     (4..=12).contains(&pin.len()) && pin.chars().all(|character| character.is_ascii_digit())
 }
 
-fn validate_t3_settings(pin: Option<&str>, managed_access: bool) -> Result<(), String> {
-    if let Some(pin) = pin
-        && !is_valid_pair_admin_pin(pin)
-    {
-        return Err("T3CODE_PAIR_ADMIN_PIN must contain 4 to 12 digits".to_string());
+/// `--portal` is a t3code switch that needs the PIN; a PIN without the
+/// switch is refused so a forgotten flag never runs without approvals.
+fn validate_portal(portal: bool, t3code: bool, pin: Option<&str>) -> Result<(), String> {
+    if portal && !t3code {
+        return Err("--portal can only be used with the t3code command".to_string());
     }
-    if managed_access && pin.is_none() {
-        return Err(
-            "managed Git access requires T3CODE_PAIR_ADMIN_PIN so repositories can be approved"
-                .to_string(),
-        );
+    if !t3code {
+        return Ok(());
     }
-    Ok(())
+    match (portal, pin) {
+        (true, None) => Err(format!(
+            "--portal requires {PORTAL_PIN_VARIABLE} (4 to 12 digits) to protect the admin portal"
+        )),
+        (true, Some(pin)) if !is_valid_portal_pin(pin) => {
+            Err(format!("{PORTAL_PIN_VARIABLE} must contain 4 to 12 digits"))
+        }
+        (false, Some(_)) => Err(format!(
+            "{PORTAL_PIN_VARIABLE} is set but --portal was not given"
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn nonempty_env(name: &str) -> Result<Option<String>, String> {
@@ -631,27 +615,13 @@ fn nonempty_env(name: &str) -> Result<Option<String>, String> {
         .transpose()
 }
 
-struct T3Settings {
-    pair_admin_pin: Option<String>,
-    ports: T3PortDecisions,
-}
-
-fn t3_settings_from_env(
-    managed_access: bool,
-    published_ports: &[u16],
-) -> Result<T3Settings, String> {
-    let pair_admin_pin = nonempty_env("T3CODE_PAIR_ADMIN_PIN")?;
-    validate_t3_settings(pair_admin_pin.as_deref(), managed_access)?;
-    let ports = decide_t3_ports(
+fn t3_port_decisions(portal: bool, published_ports: &[u16]) -> Result<T3PortDecisions, String> {
+    decide_t3_ports(
         nonempty_env("T3CODE_PORT")?.as_deref(),
         nonempty_env("T3CODE_PAIR_ADMIN_PORT")?.as_deref(),
-        pair_admin_pin.is_some(),
+        portal,
         published_ports,
-    )?;
-    Ok(T3Settings {
-        pair_admin_pin,
-        ports,
-    })
+    )
 }
 
 fn invoked_program() -> std::ffi::OsString {
@@ -698,6 +668,44 @@ fn prepare_usage_state_dir(path: &Path, workspace: &Path) -> Result<PathBuf, Str
         return Err("usage state must be outside the agent-mounted workspace".to_string());
     }
     Ok(canonical_state)
+}
+
+/// Host-only approval and usage state for the admin portal; never inside
+/// the agent-mounted workspace.
+struct PortalState {
+    push: PathBuf,
+    fetch: PathBuf,
+    gh: PathBuf,
+    usage: PathBuf,
+}
+
+fn prepare_portal_state(home: &Path, instance: &str, cwd: &Path) -> Result<PortalState, String> {
+    let workspace = fs::canonicalize(cwd)
+        .map_err(|error| format!("could not resolve the workspace: {error}"))?;
+    let outside = |name: &str, prepared: Result<PathBuf, String>| {
+        let path = prepared.map_err(|error| format!("could not prepare {name} state: {error}"))?;
+        if path.starts_with(&workspace) {
+            return Err(format!(
+                "{name} state must be outside the agent-mounted workspace"
+            ));
+        }
+        Ok(path)
+    };
+    Ok(PortalState {
+        push: outside(
+            "push approval",
+            managed_push::prepare_state_dir(&managed_push::state_dir(home, instance)),
+        )?,
+        fetch: outside(
+            "fetch approval",
+            managed_fetch::prepare_state_dir(&managed_fetch::state_dir(home, instance)),
+        )?,
+        gh: outside(
+            "GitHub action approval",
+            managed_gh::prepare_state_dir(&managed_gh::state_dir(home, instance)),
+        )?,
+        usage: outside("usage", prepare_usage_state_dir(&usage_state_dir(), cwd))?,
+    })
 }
 
 fn cache_dir() -> PathBuf {
@@ -1012,7 +1020,7 @@ fn ensure_gh_proxy(
     workspace_root: &Path,
     allow_merge: bool,
     agent_disclosure: Option<&str>,
-    managed_gh_state: Option<&Path>,
+    portal_state_dir: Option<&Path>,
 ) -> Result<(), String> {
     let socket_path = runtime_dir.join(GH_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -1030,8 +1038,8 @@ fn ensure_gh_proxy(
     if let Some(text) = agent_disclosure {
         command.arg(format!("--agent-disclosure={text}"));
     }
-    if let Some(state) = managed_gh_state {
-        command.arg("--managed-gh-state-dir").arg(state);
+    if let Some(state) = portal_state_dir {
+        command.arg("--portal-state-dir").arg(state);
     }
     start_proxy("gh-proxy", &socket_path, command)
 }
@@ -1214,9 +1222,7 @@ fn run_container(
     pre_approved_origin: Option<&str>,
     allow_merge: bool,
     agent_disclosure: Option<&str>,
-    managed_push_state: Option<&Path>,
-    managed_fetch_state: Option<&Path>,
-    managed_gh_state: Option<&Path>,
+    portal: Option<&PortalState>,
     explicit_container_name: Option<&str>,
     vm_enabled: bool,
 ) {
@@ -1237,7 +1243,7 @@ fn run_container(
         &cwd,
         allow_merge,
         agent_disclosure,
-        managed_gh_state,
+        portal.map(|state| state.gh.as_path()),
     ));
 
     if vm_enabled {
@@ -1254,21 +1260,21 @@ fn run_container(
         }
     }
 
-    if pre_approved_origin.is_some() || managed_push_state.is_some() {
+    if pre_approved_origin.is_some() || portal.is_some() {
         require_proxy(ensure_git_proxy(
             &proxy_runtime_dir,
             &cwd,
             pre_approved_origin,
-            managed_push_state,
+            portal.map(|state| state.push.as_path()),
         ));
     }
 
     let fetch_origin = launch_fetch_origin(&cwd, quiet);
-    if fetch_origin.is_some() || managed_fetch_state.is_some() {
+    if fetch_origin.is_some() || portal.is_some() {
         require_proxy(ensure_ssh_proxy(
             &proxy_runtime_dir,
             fetch_origin.as_deref(),
-            managed_fetch_state.map(|state_dir| (cwd.as_path(), state_dir)),
+            portal.map(|state| (cwd.as_path(), state.fetch.as_path())),
         ));
     }
 
@@ -1398,7 +1404,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             workspace_root,
             allow_merge,
             agent_disclosure,
-            managed_gh_state_dir,
+            portal_state_dir,
         }) => {
             gh_proxy::run(
                 socket,
@@ -1406,7 +1412,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 workspace_root,
                 *allow_merge,
                 agent_disclosure.as_deref(),
-                managed_gh_state_dir.as_deref(),
+                portal_state_dir.as_deref(),
             );
         }
         Some(Commands::GitProxy {
@@ -1440,9 +1446,6 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             fetch_state_dir,
             gh_state_dir,
             usage_state_dir,
-            managed_push,
-            managed_fetch,
-            managed_gh,
         }) => {
             t3_admin::run(t3_admin::RunOptions {
                 portal_port: *port,
@@ -1454,9 +1457,6 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 fetch_state_dir,
                 gh_state_dir,
                 usage_state_dir,
-                managed_push: *managed_push,
-                managed_fetch: *managed_fetch,
-                managed_gh: *managed_gh,
             });
         }
         Some(Commands::VmProxy {
@@ -1565,16 +1565,12 @@ fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
     let command = service_command(cli)?;
 
     if command == "t3code" {
-        let settings = t3_settings_from_env(
-            cli.t3_managed_push || cli.t3_managed_fetch || cli.t3_managed_gh,
-            &cli.ports,
-        )
-        .map_err(|error| (2, error))?;
+        let ports = t3_port_decisions(cli.portal, &cli.ports).map_err(|error| (2, error))?;
         let mut unpinned = Vec::new();
-        if settings.ports.t3 == PortDecision::Auto {
+        if ports.t3 == PortDecision::Auto {
             unpinned.push("T3CODE_PORT");
         }
-        if settings.ports.admin == Some(PortDecision::Auto) {
+        if ports.admin == Some(PortDecision::Auto) {
             unpinned.push("T3CODE_PAIR_ADMIN_PORT");
         }
         if !unpinned.is_empty() {
@@ -1668,12 +1664,11 @@ fn main() {
     if cli.install_service.is_none() && run_internal_command(cli.command.as_ref()) {
         return;
     }
-    if (cli.t3_managed_push || cli.t3_managed_fetch || cli.t3_managed_gh)
-        && !matches!(&cli.command, Some(Commands::T3code { .. }))
+    let is_t3code = matches!(&cli.command, Some(Commands::T3code { .. }));
+    if let Err(error) = nonempty_env(PORTAL_PIN_VARIABLE)
+        .and_then(|pin| validate_portal(cli.portal, is_t3code, pin.as_deref()))
     {
-        eprintln!(
-            "Error: --t3-managed-push, --t3-managed-fetch, and --t3-managed-gh can only be used with the t3code command"
-        );
+        eprintln!("Error: {error}");
         std::process::exit(2);
     }
     let pre_approved_origin = push_pre_approval(&cli).unwrap_or_else(|error| {
@@ -1750,89 +1745,30 @@ fn main() {
                 agent_disclosure.as_deref(),
                 None,
                 None,
-                None,
-                None,
                 cli.vm,
             );
         }
         Some(Commands::T3code { args }) => {
-            let T3Settings {
-                pair_admin_pin,
-                ports: port_decisions,
-            } = t3_settings_from_env(
-                cli.t3_managed_push || cli.t3_managed_fetch || cli.t3_managed_gh,
-                &cli.ports,
-            )
-            .unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
-                std::process::exit(2);
-            });
+            let port_decisions =
+                t3_port_decisions(cli.portal, &cli.ports).unwrap_or_else(|error| {
+                    eprintln!("Error: {error}");
+                    std::process::exit(2);
+                });
             let t3_port_was_auto = port_decisions.t3 == PortDecision::Auto;
-            let (port, pair_admin_port) = resolve_t3_ports(port_decisions, &cli.ports)
-                .unwrap_or_else(|error| {
+            let (port, portal_port) =
+                resolve_t3_ports(port_decisions, &cli.ports).unwrap_or_else(|error| {
                     eprintln!("Error: {error}");
                     std::process::exit(1);
                 });
             let cwd = env::current_dir().expect("Could not get current directory");
-            let usage_state_dir = pair_admin_port.map(|_| {
-                prepare_usage_state_dir(&usage_state_dir(), &cwd).unwrap_or_else(|error| {
-                    eprintln!("Error: could not prepare usage state: {error}");
+            let instance_name = project_instance_name(&cwd);
+            let instance_dir = format!("/root/.t3/instances/{}", instance_name);
+            let portal = portal_port.map(|_| {
+                prepare_portal_state(&home_dir(), &instance_name, &cwd).unwrap_or_else(|error| {
+                    eprintln!("Error: {error}");
                     std::process::exit(1);
                 })
             });
-            let instance_name = project_instance_name(&cwd);
-            let instance_dir = format!("/root/.t3/instances/{}", instance_name);
-            let mut push_state_dir = managed_push::state_dir(&home_dir(), &instance_name);
-            let mut fetch_state_dir = managed_fetch::state_dir(&home_dir(), &instance_name);
-            let mut gh_state_dir = managed_gh::state_dir(&home_dir(), &instance_name);
-            let canonical_workspace =
-                if cli.t3_managed_push || cli.t3_managed_fetch || cli.t3_managed_gh {
-                    Some(fs::canonicalize(&cwd).unwrap_or_else(|error| {
-                        eprintln!("Error: could not resolve T3 workspace: {error}");
-                        std::process::exit(1);
-                    }))
-                } else {
-                    None
-                };
-            if cli.t3_managed_push {
-                push_state_dir =
-                    managed_push::prepare_state_dir(&push_state_dir).unwrap_or_else(|error| {
-                        eprintln!("Error: could not prepare managed push state: {error}");
-                        std::process::exit(1);
-                    });
-                if push_state_dir.starts_with(canonical_workspace.as_ref().unwrap()) {
-                    eprintln!(
-                        "Error: managed push state must be outside the agent-mounted T3 workspace"
-                    );
-                    std::process::exit(1);
-                }
-            }
-            if cli.t3_managed_fetch {
-                fetch_state_dir = managed_fetch::prepare_state_dir(&fetch_state_dir)
-                    .unwrap_or_else(|error| {
-                        eprintln!("Error: could not prepare managed fetch state: {error}");
-                        std::process::exit(1);
-                    });
-                if fetch_state_dir.starts_with(canonical_workspace.as_ref().unwrap()) {
-                    eprintln!(
-                        "Error: managed fetch state must be outside the agent-mounted T3 workspace"
-                    );
-                    std::process::exit(1);
-                }
-            }
-            if cli.t3_managed_gh {
-                gh_state_dir =
-                    managed_gh::prepare_state_dir(&gh_state_dir).unwrap_or_else(|error| {
-                        eprintln!("Error: could not prepare managed GitHub action state: {error}");
-                        std::process::exit(1);
-                    });
-                if gh_state_dir.starts_with(canonical_workspace.as_ref().unwrap()) {
-                    eprintln!(
-                        "Error: managed GitHub action state must be outside the agent-mounted T3 workspace"
-                    );
-                    std::process::exit(1);
-                }
-            }
             let container_name = format!("{}-t3-{}", wrap_container_name(&cwd), std::process::id());
 
             let t3_cmd = format!("t3code-register {}", args.join(" "));
@@ -1848,26 +1784,18 @@ fn main() {
                 );
             }
             eprintln!("t3code available at http://localhost:{}", port);
-            if let (Some(pair_admin_port), Some(usage_state_dir)) =
-                (pair_admin_port, usage_state_dir.as_deref())
-            {
-                eprintln!(
-                    "t3code admin portal available at http://localhost:{}",
-                    pair_admin_port
-                );
+            if let (Some(portal_port), Some(state)) = (portal_port, portal.as_ref()) {
+                eprintln!("admin portal available at http://localhost:{portal_port}");
                 ensure_t3_admin(&T3AdminConfig {
-                    portal_port: pair_admin_port,
+                    portal_port,
                     t3_port: port,
                     container_name: &container_name,
                     t3_base_dir: &instance_dir,
                     workspace_root: &cwd,
-                    state_dir: &push_state_dir,
-                    fetch_state_dir: &fetch_state_dir,
-                    gh_state_dir: &gh_state_dir,
-                    usage_state_dir,
-                    managed_push: cli.t3_managed_push,
-                    managed_fetch: cli.t3_managed_fetch,
-                    managed_gh: cli.t3_managed_gh,
+                    state_dir: &state.push,
+                    fetch_state_dir: &state.fetch,
+                    gh_state_dir: &state.gh,
+                    usage_state_dir: &state.usage,
                 });
             }
 
@@ -1875,13 +1803,10 @@ fn main() {
                 format!("T3CODE_PORT={}", port),
                 format!("T3CODE_BASE_DIR={}", instance_dir),
             ];
-            if let Some(pair_admin_port) = pair_admin_port {
-                container_env.push(format!("T3CODE_ADMIN_PORT={pair_admin_port}"));
+            if let Some(portal_port) = portal_port {
+                container_env.push(format!("T3CODE_ADMIN_PORT={portal_port}"));
             }
-            let managed_state = cli.t3_managed_push.then_some(push_state_dir.as_path());
-            let managed_fetch_state = cli.t3_managed_fetch.then_some(fetch_state_dir.as_path());
-            let managed_gh_state = cli.t3_managed_gh.then_some(gh_state_dir.as_path());
-            let named_container = pair_admin_pin.as_ref().map(|_| container_name.as_str());
+            let named_container = portal.as_ref().map(|_| container_name.as_str());
 
             run_container(
                 &["bash", "-lc", &t3_cmd],
@@ -1893,9 +1818,7 @@ fn main() {
                 pre_approved_origin.as_deref(),
                 cli.allow_merge,
                 agent_disclosure.as_deref(),
-                managed_state,
-                managed_fetch_state,
-                managed_gh_state,
+                portal.as_ref(),
                 named_container,
                 cli.vm,
             );
@@ -1929,8 +1852,6 @@ fn main() {
                 pre_approved_origin.as_deref(),
                 cli.allow_merge,
                 agent_disclosure.as_deref(),
-                None,
-                None,
                 None,
                 None,
                 cli.vm,
@@ -2094,13 +2015,39 @@ mod tests {
     }
 
     #[test]
-    fn validates_pair_admin_pins() {
-        assert!(is_valid_pair_admin_pin("0000"));
-        assert!(is_valid_pair_admin_pin("123456789012"));
-        assert!(!is_valid_pair_admin_pin(""));
-        assert!(!is_valid_pair_admin_pin("123"));
-        assert!(!is_valid_pair_admin_pin("1234567890123"));
-        assert!(!is_valid_pair_admin_pin("12a4"));
+    fn validates_portal_pins() {
+        assert!(is_valid_portal_pin("0000"));
+        assert!(is_valid_portal_pin("123456789012"));
+        assert!(!is_valid_portal_pin(""));
+        assert!(!is_valid_portal_pin("123"));
+        assert!(!is_valid_portal_pin("1234567890123"));
+        assert!(!is_valid_portal_pin("12a4"));
+    }
+
+    #[test]
+    fn portal_requires_t3code_and_a_pin_and_a_pin_requires_portal() {
+        assert!(validate_portal(true, true, Some("1234")).is_ok());
+        assert!(validate_portal(false, true, None).is_ok());
+        assert!(validate_portal(false, false, Some("1234")).is_ok());
+        assert!(
+            validate_portal(true, false, Some("1234"))
+                .unwrap_err()
+                .contains("only be used with the t3code command")
+        );
+        assert!(
+            validate_portal(true, true, None)
+                .unwrap_err()
+                .contains("requires CLAUDE_SANDBOX_PORTAL_PIN")
+        );
+        assert!(
+            validate_portal(true, true, Some("12ab"))
+                .unwrap_err()
+                .contains("4 to 12 digits")
+        );
+        assert_eq!(
+            validate_portal(false, true, Some("1234")).unwrap_err(),
+            "CLAUDE_SANDBOX_PORTAL_PIN is set but --portal was not given"
+        );
     }
 
     #[test]

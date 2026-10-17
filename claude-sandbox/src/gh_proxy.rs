@@ -3918,7 +3918,7 @@ fn handle_request_with_executors(
         }
         ManagedRoute::Pending(handle) => {
             let reason = format!(
-                "pending approval {handle}; open the T3 admin portal, approve it, and retry the same command"
+                "pending approval {handle}; open the admin portal, approve it, and retry the same command"
             );
             log_line(
                 log,
