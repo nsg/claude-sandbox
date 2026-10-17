@@ -46,10 +46,7 @@ socket.on("data", (chunk) => {
 
     if (response.status !== "ok") {
       process.stderr.write(
-        "ssh-proxy: " +
-          (response.reason ||
-            "denied (ask the user to update ssh-proxy.json to allow this command)") +
-          "\n"
+        "ssh-proxy: " + (response.reason || "denied") + "\n"
       );
       process.exit(1);
     }
@@ -98,7 +95,7 @@ socket.on("end", () => {
 socket.on("error", (err) => {
   if (err.code === "ENOENT" || err.code === "ECONNREFUSED") {
     process.stderr.write(
-      "ssh-proxy: not running (configure ssh-proxy.json to enable it)\n"
+      "ssh-proxy: not running (SSH from the sandbox only fetches the launch repository's SSH origin, or sources approved in the admin portal)\n"
     );
   } else {
     process.stderr.write(

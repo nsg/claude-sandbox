@@ -43,12 +43,10 @@ const SKILLS_URL: &str =
 const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
 const IMAGE_SOURCE_LABEL: &str =
     "org.opencontainers.image.source=https://github.com/nsg/claude-sandbox";
-const GH_PROXY_SUBDIR: &str = ".claude-sandbox";
 const GH_PROXY_SOCKET_NAME: &str = "gh-proxy.sock";
 const GIT_PROXY_SOCKET_NAME: &str = "git-proxy.sock";
 const VM_PROXY_SOCKET_NAME: &str = "vm-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
-const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
 const CONTAINER_PROXY_RUNTIME_DIR: &str = "/run/claude-sandbox";
 // Must match the default session name in config/wrap.sh.
 const WRAP_TMUX_SESSION: &str = "claude-sandbox";
@@ -226,15 +224,15 @@ enum Commands {
         /// Persistent log path
         #[arg(long)]
         log: PathBuf,
-        /// Config as JSON string
+        /// Launch repository origin URL snapshotted at launch
         #[arg(long)]
-        config_json: String,
-        /// Host workspace root used to validate managed fetch request context
+        launch_origin: Option<String>,
+        /// Host workspace root used to validate portal fetch request context
         #[arg(long)]
-        managed_fetch_workspace_root: Option<PathBuf>,
-        /// Host-only managed fetch approval state
+        workspace_root: Option<PathBuf>,
+        /// Host-only portal fetch approval state
         #[arg(long)]
-        managed_fetch_state_dir: Option<PathBuf>,
+        state_dir: Option<PathBuf>,
     },
     /// Run a command inside the container
     Run {
@@ -1091,89 +1089,45 @@ fn ensure_git_proxy_managed(
     start_proxy("managed git-proxy", &socket_path, command)
 }
 
-fn ssh_proxy_host_config_path() -> PathBuf {
-    let cwd = env::current_dir().expect("Could not get current directory");
-    let instance = project_instance_name(&cwd);
-    home_dir()
-        .join(".claude-sandbox/projects")
-        .join(instance)
-        .join(SSH_PROXY_CONFIG_FILE)
-}
-
-fn ssh_proxy_workspace_symlink_path() -> PathBuf {
-    env::current_dir()
-        .expect("Could not get current directory")
-        .join(GH_PROXY_SUBDIR)
-        .join(SSH_PROXY_CONFIG_FILE)
-}
-
-fn ensure_ssh_proxy_symlink() {
-    let link_path = ssh_proxy_workspace_symlink_path();
-    let target = ssh_proxy_host_config_path();
-
-    if link_path.is_symlink() {
-        if let Ok(existing) = fs::read_link(&link_path)
-            && existing == target
-        {
-            return;
-        }
-        let _ = fs::remove_file(&link_path);
-    } else if link_path.exists() {
-        // Regular file exists (old-style config) — migrate it
-        let _ = fs::remove_file(&link_path);
-    }
-
-    if let Some(parent) = link_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    let _ = std::os::unix::fs::symlink(&target, &link_path);
-}
-
-fn load_ssh_proxy_config() -> ssh_proxy::Config {
-    let path = ssh_proxy_host_config_path();
-    match fs::read_to_string(&path) {
-        Ok(contents) => {
-            serde_json::from_str(&contents).unwrap_or_else(|_| ssh_proxy::default_config())
-        }
-        Err(_) => ssh_proxy::default_config(),
-    }
-}
-
-fn save_ssh_proxy_config(config: &ssh_proxy::Config) {
-    let path = ssh_proxy_host_config_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(config) {
-        let _ = fs::write(&path, json);
-    }
-}
-
 fn ensure_ssh_proxy(
     runtime_dir: &Path,
-    config: &ssh_proxy::Config,
-    managed_fetch: Option<(&Path, &Path)>,
+    launch_origin: Option<&str>,
+    portal: Option<(&Path, &Path)>,
 ) -> Result<(), String> {
     let socket_path = runtime_dir.join(SSH_PROXY_SOCKET_NAME);
-    let config_json = serde_json::to_string(config).expect("Failed to serialize ssh-proxy config");
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
     command
         .arg("ssh-proxy")
         .arg("--socket")
         .arg(&socket_path)
         .arg("--log")
-        .arg(proxy_log_path("ssh-proxy.log")?)
-        .arg("--config-json")
-        .arg(config_json);
-    if let Some((workspace_root, state_dir)) = managed_fetch {
+        .arg(proxy_log_path("ssh-proxy.log")?);
+    if let Some(origin) = launch_origin {
+        command.arg("--launch-origin").arg(origin);
+    }
+    if let Some((workspace_root, state_dir)) = portal {
         command
-            .arg("--managed-fetch-workspace-root")
+            .arg("--workspace-root")
             .arg(workspace_root)
-            .arg("--managed-fetch-state-dir")
+            .arg("--state-dir")
             .arg(state_dir);
     }
     start_proxy("ssh-proxy", &socket_path, command)
+}
+
+/// The launch repository's origin, when it is an SSH remote the fetch bridge
+/// can serve. Read once here on the host and held by the SSH proxy.
+fn launch_fetch_origin(cwd: &Path, quiet: bool) -> Option<String> {
+    let url = git_proxy::launch_origin(cwd).ok()?;
+    match ssh_proxy::origin_source(&url) {
+        Ok(source) => source.map(|_| url),
+        Err(reason) => {
+            if !quiet {
+                eprintln!("Note: origin is not fetchable through the host's SSH keys: {reason}");
+            }
+            None
+        }
+    }
 }
 
 fn podman_image_ids(args: &[&str]) -> Vec<String> {
@@ -1328,17 +1282,14 @@ fn run_container(
         (_, false, _) => {}
     }
 
-    let ssh_proxy_config = load_ssh_proxy_config();
-    if ssh_proxy::is_empty(&ssh_proxy_config) && managed_fetch_state.is_none() {
-        save_ssh_proxy_config(&ssh_proxy_config);
-    } else {
+    let fetch_origin = launch_fetch_origin(&cwd, quiet);
+    if fetch_origin.is_some() || managed_fetch_state.is_some() {
         require_proxy(ensure_ssh_proxy(
             &proxy_runtime_dir,
-            &ssh_proxy_config,
+            fetch_origin.as_deref(),
             managed_fetch_state.map(|state_dir| (cwd.as_path(), state_dir)),
         ));
     }
-    ensure_ssh_proxy_symlink();
 
     let home = home_dir();
     let claude_dir = home.join(".claude");
@@ -1548,32 +1499,42 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
         Some(Commands::SshProxy {
             socket,
             log,
-            config_json,
-            managed_fetch_workspace_root,
-            managed_fetch_state_dir,
+            launch_origin,
+            workspace_root,
+            state_dir,
         }) => {
-            let config: ssh_proxy::Config =
-                serde_json::from_str(config_json).unwrap_or_else(|error| {
-                    eprintln!("ssh-proxy: invalid config JSON: {error}");
-                    std::process::exit(1);
+            let launch_origin = launch_origin
+                .as_deref()
+                .map(|url| match ssh_proxy::origin_source(url) {
+                    Ok(Some(source)) => source,
+                    Ok(None) => {
+                        eprintln!("ssh-proxy: launch origin {url} is not an SSH remote");
+                        std::process::exit(2);
+                    }
+                    Err(error) => {
+                        eprintln!("ssh-proxy: {error}");
+                        std::process::exit(2);
+                    }
                 });
-            let managed_fetch = match (
-                managed_fetch_workspace_root.as_ref(),
-                managed_fetch_state_dir.as_ref(),
-            ) {
-                (Some(workspace_root), Some(state_dir)) => Some(ssh_proxy::ManagedFetch {
+            let portal = match (workspace_root.as_ref(), state_dir.as_ref()) {
+                (Some(workspace_root), Some(state_dir)) => Some(ssh_proxy::PortalFetch {
                     workspace_root: workspace_root.clone(),
                     state_dir: state_dir.clone(),
                 }),
                 (None, None) => None,
                 _ => {
-                    eprintln!(
-                        "ssh-proxy managed fetch requires both --managed-fetch-workspace-root and --managed-fetch-state-dir"
-                    );
+                    eprintln!("ssh-proxy requires both --workspace-root and --state-dir");
                     std::process::exit(2);
                 }
             };
-            ssh_proxy::run(socket, log, &config, managed_fetch.as_ref());
+            ssh_proxy::run(
+                socket,
+                log,
+                ssh_proxy::Policy {
+                    launch_origin,
+                    portal,
+                },
+            );
         }
         _ => return false,
     }

@@ -892,6 +892,20 @@ pub fn repository_root() -> Option<PathBuf> {
     repository_root_at(&std::env::current_dir().ok()?)
 }
 
+/// The `origin` URL of the repository rooted exactly at `directory`.
+pub fn launch_origin(directory: &Path) -> Result<String, String> {
+    if fs::symlink_metadata(directory.join(".git")).is_err() {
+        return Err("the launch directory is not a git repository root (it has no .git)".into());
+    }
+    let canonical = fs::canonicalize(directory)
+        .map_err(|error| format!("could not resolve the launch directory: {error}"))?;
+    if repository_root_at(directory).as_deref() != Some(canonical.as_path()) {
+        return Err("the launch directory is not a git repository root".into());
+    }
+    managed_push::origin_url_at(directory)
+        .ok_or_else(|| "the launch repository has no 'origin' remote".into())
+}
+
 fn deny(stderr: String) -> Response {
     Response {
         exit_code: 1,
@@ -1916,6 +1930,32 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
 
         assert_eq!(repository_root_at(&nested), Some(repository.clone()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn launch_origin_requires_a_repository_root_with_origin() {
+        let root = test_root("launch-origin");
+        let (repository, remote) = initialize_repository(&root);
+        assert_eq!(
+            launch_origin(&repository).unwrap(),
+            remote.to_str().unwrap()
+        );
+
+        let nested = repository.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(launch_origin(&nested).unwrap_err().contains("no .git"));
+        fs::write(nested.join(".git"), "not a gitfile\n").unwrap();
+        assert!(launch_origin(&nested).is_err());
+        assert!(launch_origin(&root).is_err());
+
+        run_git(&repository, &["remote", "remove", "origin"]);
+        assert!(
+            launch_origin(&repository)
+                .unwrap_err()
+                .contains("no 'origin'")
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
