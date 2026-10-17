@@ -23,8 +23,6 @@ use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::env;
 use std::fs::{self, DirBuilder, File, Permissions};
 use std::hash::{Hash, Hasher};
@@ -53,45 +51,9 @@ const CLIPBOARD_PROXY_SOCKET_NAME: &str = "clipboard-proxy.sock";
 const VM_PROXY_SOCKET_NAME: &str = "vm-proxy.sock";
 const SSH_PROXY_SOCKET_NAME: &str = "ssh-proxy.sock";
 const SSH_PROXY_CONFIG_FILE: &str = "ssh-proxy.json";
-const SSHD_CONFIG_FILE: &str = "sshd.json";
 const CONTAINER_PROXY_RUNTIME_DIR: &str = "/run/claude-sandbox";
 // Must match the default session name in config/wrap.sh.
 const WRAP_TMUX_SESSION: &str = "claude-sandbox";
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct SshdConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    authorized_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    host_keys: Option<HashMap<String, String>>,
-}
-
-fn sshd_config_path() -> PathBuf {
-    env::current_dir()
-        .expect("Could not get current directory")
-        .join(GH_PROXY_SUBDIR)
-        .join(SSHD_CONFIG_FILE)
-}
-
-fn load_sshd_config() -> SshdConfig {
-    let path = sshd_config_path();
-    match fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-        Err(_) => SshdConfig::default(),
-    }
-}
-
-fn save_sshd_config(config: &SshdConfig) {
-    let path = sshd_config_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(config) {
-        let _ = fs::write(&path, json);
-    }
-}
 
 #[derive(Parser)]
 #[command(name = "claude-sandbox")]
@@ -158,18 +120,6 @@ struct Cli {
     /// Let the T3 admin portal approve one-time cross-repository GitHub actions
     #[arg(long = "t3-managed-gh")]
     t3_managed_gh: bool,
-
-    /// Enable SSH server in the container
-    #[arg(long)]
-    ssh: bool,
-
-    /// Path to the public key file to authorize for SSH access
-    #[arg(long = "ssh-allow-key")]
-    ssh_allow_key: Option<PathBuf>,
-
-    /// Host port to map to container's SSH port 22
-    #[arg(long = "ssh-port")]
-    ssh_port: Option<u16>,
 
     /// Run the command in a named tmux session so keys can be injected
     #[arg(long, global = true)]
@@ -1249,11 +1199,6 @@ fn ensure_ssh_proxy(
     start_proxy("ssh-proxy", &socket_path, command)
 }
 
-struct SshConfig {
-    authorized_key: String,
-    host_port: u16,
-}
-
 fn podman_image_ids(args: &[&str]) -> Vec<String> {
     Command::new("podman")
         .args(["images", "--format", "{{.Id}}"])
@@ -1343,7 +1288,6 @@ fn run_container(
     ports: &[u16],
     container_env: &[String],
     quiet: bool,
-    ssh: Option<&SshConfig>,
     wrap: bool,
     allow_push: bool,
     allow_merge: bool,
@@ -1507,12 +1451,6 @@ fn run_container(
 
     for port in ports {
         cmd.args(["-p", &format!("{}:{}", port, port)]);
-    }
-
-    if let Some(ssh_cfg) = ssh {
-        cmd.arg("-e")
-            .arg(format!("SSH_AUTHORIZED_KEY={}", ssh_cfg.authorized_key));
-        cmd.args(["-p", &format!("{}:22", ssh_cfg.host_port)]);
     }
 
     let mut wrapped_args: Option<Vec<String>> = None;
@@ -1845,48 +1783,6 @@ fn main() {
     let should_pull = perform_updates(&client, &update_status, cli.auto_update, cli.quiet);
     refresh_extension(cli.quiet);
 
-    let ssh_config = if cli.ssh {
-        let mut saved = load_sshd_config();
-
-        // Resolve authorized_key: CLI flag overrides saved value
-        let authorized_key = if let Some(ref key_path) = cli.ssh_allow_key {
-            let key = fs::read_to_string(key_path).unwrap_or_else(|e| {
-                eprintln!(
-                    "Error: could not read public key file {}: {}",
-                    key_path.display(),
-                    e
-                );
-                std::process::exit(1);
-            });
-            let key = key.trim().to_string();
-            if key.is_empty() {
-                eprintln!("Error: public key file {} is empty", key_path.display());
-                std::process::exit(1);
-            }
-            key
-        } else if let Some(ref key) = saved.authorized_key {
-            key.clone()
-        } else {
-            eprintln!("Error: --ssh-allow-key is required (no saved config found)");
-            std::process::exit(1);
-        };
-
-        // Resolve port: CLI flag overrides saved value, default 2222
-        let host_port = cli.ssh_port.or(saved.port).unwrap_or(2222);
-
-        // Save resolved config back to sshd.json
-        saved.authorized_key = Some(authorized_key.clone());
-        saved.port = Some(host_port);
-        save_sshd_config(&saved);
-
-        Some(SshConfig {
-            authorized_key,
-            host_port,
-        })
-    } else {
-        None
-    };
-
     match cli.command {
         Some(Commands::Install { target, .. }) => {
             if target == "skills" {
@@ -1913,7 +1809,6 @@ fn main() {
                 &cli.ports,
                 &[],
                 cli.quiet,
-                ssh_config.as_ref(),
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,
@@ -2059,7 +1954,6 @@ fn main() {
                 &ports,
                 &container_env,
                 cli.quiet,
-                ssh_config.as_ref(),
                 false,
                 cli.allow_push || cli.t3_managed_push,
                 cli.allow_merge,
@@ -2096,7 +1990,6 @@ fn main() {
                 &cli.ports,
                 &[],
                 cli.quiet,
-                ssh_config.as_ref(),
                 cli.wrap,
                 cli.allow_push,
                 cli.allow_merge,

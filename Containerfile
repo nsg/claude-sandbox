@@ -29,7 +29,7 @@ RUN apt-get update && apt-get upgrade -y && \
         yq \
         ruby \
         ffmpeg \
-        openssh-server \
+        openssh-client \
         rustup \
         shellcheck \
         bubblewrap \
@@ -58,7 +58,7 @@ RUN rustup default stable
 RUN rustup target add wasm32-unknown-unknown
 RUN cargo install --locked cargo-audit trunk
 
-# Make cargo binaries available in all login shells (e.g. SSH sessions)
+# Make cargo binaries available in all login shells
 RUN echo 'export PATH="$HOME/.cargo/bin:$PATH"' > /etc/profile.d/cargo.sh
 
 # Node.js 24 (Ubuntu 24.04 ships Node 18, which lacks global `crypto` —

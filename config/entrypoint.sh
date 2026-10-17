@@ -144,57 +144,6 @@ fi
 # Ensure the target directory exists (symlink may point to a not-yet-created path)
 mkdir -p "$MEMORY_TARGET"
 
-# Start SSH server if authorized key is provided
-if [ -n "$SSH_AUTHORIZED_KEY" ]; then
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
-    echo "$SSH_AUTHORIZED_KEY" > /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
-
-    SSHD_JSON="/workspace/.claude-sandbox/sshd.json"
-
-    # Restore or generate host keys
-    if [ -f "$SSHD_JSON" ] && jq -e '.host_keys' "$SSHD_JSON" > /dev/null 2>&1; then
-        # Write persisted host keys to /etc/ssh/
-        for keyname in $(jq -r '.host_keys | keys[]' "$SSHD_JSON"); do
-            jq -r --arg k "$keyname" '.host_keys[$k]' "$SSHD_JSON" > "/etc/ssh/$keyname"
-            # Private keys need strict permissions
-            case "$keyname" in
-                *.pub) chmod 644 "/etc/ssh/$keyname" ;;
-                *)     chmod 600 "/etc/ssh/$keyname" ;;
-            esac
-        done
-    else
-        # First run: generate host keys and persist them
-        ssh-keygen -A
-
-        HOST_KEYS_JSON="{}"
-        for keyfile in /etc/ssh/ssh_host_*; do
-            keyname="$(basename "$keyfile")"
-            content="$(cat "$keyfile")"
-            HOST_KEYS_JSON=$(echo "$HOST_KEYS_JSON" | jq --arg k "$keyname" --arg v "$content" '. + {($k): $v}')
-        done
-
-        mkdir -p "$(dirname "$SSHD_JSON")"
-        if [ -f "$SSHD_JSON" ]; then
-            jq --argjson hk "$HOST_KEYS_JSON" '. + {host_keys: $hk}' "$SSHD_JSON" > "$SSHD_JSON.tmp" \
-                && mv "$SSHD_JSON.tmp" "$SSHD_JSON"
-        else
-            echo "{}" | jq --argjson hk "$HOST_KEYS_JSON" '{host_keys: $hk}' > "$SSHD_JSON"
-        fi
-    fi
-
-    # Configure sshd: key-only auth, no password, no PAM
-    mkdir -p /run/sshd
-    cat > /etc/ssh/sshd_config.d/sandbox.conf <<SSHEOF
-PermitRootLogin prohibit-password
-PasswordAuthentication no
-UsePAM no
-SSHEOF
-
-    /usr/sbin/sshd
-fi
-
 # Choose Buildah's storage driver. Overlay is far smaller and faster than vfs
 # but needs a real filesystem under /var/lib/containers, which the image's
 # volume normally provides; vfs works anywhere. Non-fatal: image builds are
