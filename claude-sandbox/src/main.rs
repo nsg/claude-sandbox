@@ -109,6 +109,14 @@ struct Cli {
     #[arg(long)]
     portal: bool,
 
+    /// Port for the t3code web GUI (t3code only; default: first free port from 3773)
+    #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+    t3_port: Option<u16>,
+
+    /// Port for the admin portal (needs --portal; default: first free port from 3774)
+    #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+    portal_port: Option<u16>,
+
     /// Run the command in a named tmux session so keys can be injected
     #[arg(long, global = true)]
     wrap: bool,
@@ -225,7 +233,7 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
-    /// Run the t3code web GUI in the container (uses T3CODE_PORT or finds a free port)
+    /// Run the t3code web GUI in the container (port from --t3-port or the first free one)
     T3code {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -269,7 +277,7 @@ enum Commands {
 }
 
 const T3CODE_PORT: u16 = 3773;
-const T3CODE_PAIR_ADMIN_PORT: u16 = 3774;
+const PORTAL_PORT: u16 = 3774;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PortDecision {
@@ -283,40 +291,25 @@ struct T3PortDecisions {
     admin: Option<PortDecision>,
 }
 
-fn parse_port_variable(name: &str, raw: Option<&str>) -> Result<PortDecision, String> {
-    let Some(raw) = raw.filter(|value| !value.is_empty()) else {
-        return Ok(PortDecision::Auto);
-    };
-    let port = raw
-        .parse::<u16>()
-        .ok()
-        .filter(|port| *port != 0)
-        .ok_or_else(|| format!("{name} must be a port number between 1 and 65535"))?;
-    Ok(PortDecision::Exact(port))
-}
-
 fn decide_t3_ports(
-    t3_raw: Option<&str>,
-    admin_raw: Option<&str>,
-    pair_admin_enabled: bool,
+    t3_port: Option<u16>,
+    portal_port: Option<u16>,
+    portal: bool,
     published_ports: &[u16],
 ) -> Result<T3PortDecisions, String> {
-    let t3 = parse_port_variable("T3CODE_PORT", t3_raw)?;
-    let admin = if pair_admin_enabled {
-        Some(parse_port_variable("T3CODE_PAIR_ADMIN_PORT", admin_raw)?)
-    } else {
-        None
-    };
+    let exact = |port: Option<u16>| port.map_or(PortDecision::Auto, PortDecision::Exact);
+    let t3 = exact(t3_port);
+    let admin = portal.then(|| exact(portal_port));
 
     if let Some(PortDecision::Exact(admin_port)) = admin {
         if t3 == PortDecision::Exact(admin_port) {
             return Err(format!(
-                "T3CODE_PAIR_ADMIN_PORT={admin_port} conflicts with T3CODE_PORT"
+                "--portal-port {admin_port} conflicts with --t3-port"
             ));
         }
         if published_ports.contains(&admin_port) {
             return Err(format!(
-                "T3CODE_PAIR_ADMIN_PORT={admin_port} conflicts with published port {admin_port}"
+                "--portal-port {admin_port} conflicts with published port {admin_port}"
             ));
         }
     }
@@ -328,8 +321,8 @@ fn fixed_port_is_free(name: &str, port: u16) -> Result<u16, String> {
     TcpListener::bind(("0.0.0.0", port))
         .map(|_| port)
         .map_err(|error| match error.kind() {
-            std::io::ErrorKind::AddrInUse => format!("{name}={port} is already in use"),
-            _ => format!("{name}={port} cannot be used: {error}"),
+            std::io::ErrorKind::AddrInUse => format!("{name} {port} is already in use"),
+            _ => format!("{name} {port} cannot be used: {error}"),
         })
 }
 
@@ -345,18 +338,16 @@ fn resolve_t3_ports(
         PortDecision::Auto => {
             find_free_port_avoiding(T3CODE_PORT, &explicit_admin.into_iter().collect::<Vec<_>>())
         }
-        PortDecision::Exact(port) => fixed_port_is_free("T3CODE_PORT", port)?,
+        PortDecision::Exact(port) => fixed_port_is_free("--t3-port", port)?,
     };
     let admin = match decisions.admin {
         None => None,
         Some(PortDecision::Auto) => {
             let mut excluded = published_ports.to_vec();
             excluded.push(t3);
-            Some(find_free_port_avoiding(T3CODE_PAIR_ADMIN_PORT, &excluded))
+            Some(find_free_port_avoiding(PORTAL_PORT, &excluded))
         }
-        Some(PortDecision::Exact(port)) => {
-            Some(fixed_port_is_free("T3CODE_PAIR_ADMIN_PORT", port)?)
-        }
+        Some(PortDecision::Exact(port)) => Some(fixed_port_is_free("--portal-port", port)?),
     };
     Ok((t3, admin))
 }
@@ -604,6 +595,16 @@ fn validate_portal(portal: bool, t3code: bool, pin: Option<&str>) -> Result<(), 
     }
 }
 
+fn validate_port_flags(cli: &Cli, t3code: bool) -> Result<(), String> {
+    if cli.t3_port.is_some() && !t3code {
+        return Err("--t3-port can only be used with the t3code command".to_string());
+    }
+    if cli.portal_port.is_some() && !cli.portal {
+        return Err("--portal-port needs --portal".to_string());
+    }
+    Ok(())
+}
+
 fn nonempty_env(name: &str) -> Result<Option<String>, String> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -615,13 +616,8 @@ fn nonempty_env(name: &str) -> Result<Option<String>, String> {
         .transpose()
 }
 
-fn t3_port_decisions(portal: bool, published_ports: &[u16]) -> Result<T3PortDecisions, String> {
-    decide_t3_ports(
-        nonempty_env("T3CODE_PORT")?.as_deref(),
-        nonempty_env("T3CODE_PAIR_ADMIN_PORT")?.as_deref(),
-        portal,
-        published_ports,
-    )
+fn t3_port_decisions(cli: &Cli) -> Result<T3PortDecisions, String> {
+    decide_t3_ports(cli.t3_port, cli.portal_port, cli.portal, &cli.ports)
 }
 
 fn invoked_program() -> std::ffi::OsString {
@@ -1164,7 +1160,7 @@ fn stale_image_ids(
 fn admin_pasta_network(container_env: &[String]) -> Option<String> {
     container_env.iter().find_map(|entry| {
         entry
-            .strip_prefix("T3CODE_ADMIN_PORT=")
+            .strip_prefix("CLAUDE_SANDBOX_PORTAL_PORT=")
             .and_then(|port| port.parse::<u16>().ok())
             .map(|port| format!("pasta:-T,{port}"))
     })
@@ -1565,18 +1561,18 @@ fn install_service(cli: &Cli) -> Result<(), (i32, String)> {
     let command = service_command(cli)?;
 
     if command == "t3code" {
-        let ports = t3_port_decisions(cli.portal, &cli.ports).map_err(|error| (2, error))?;
+        let ports = t3_port_decisions(cli).map_err(|error| (2, error))?;
         let mut unpinned = Vec::new();
         if ports.t3 == PortDecision::Auto {
-            unpinned.push("T3CODE_PORT");
+            unpinned.push("--t3-port");
         }
         if ports.admin == Some(PortDecision::Auto) {
-            unpinned.push("T3CODE_PAIR_ADMIN_PORT");
+            unpinned.push("--portal-port");
         }
         if !unpinned.is_empty() {
             let unpinned = unpinned.join(" and ");
             eprintln!(
-                "Note: {unpinned} not set; the service picks the first free port on every start. Set {unpinned} for a stable address."
+                "Note: {unpinned} not given; the service picks the first free port on every start. Pass {unpinned} for a stable address."
             );
         }
     }
@@ -1625,21 +1621,7 @@ fn install_extension(host: Option<&str>) -> Result<(), String> {
         Some(host) => extension::parse_host(host)?,
         None => ("127.0.0.1".to_string(), None),
     };
-    let port = match port {
-        Some(port) => port,
-        None => {
-            let variable = "T3CODE_PAIR_ADMIN_PORT";
-            match parse_port_variable(variable, nonempty_env(variable)?.as_deref())? {
-                PortDecision::Exact(port) => port,
-                PortDecision::Auto => {
-                    eprintln!(
-                        "Note: no port given and {variable} not set; using the default admin port {T3CODE_PAIR_ADMIN_PORT}."
-                    );
-                    T3CODE_PAIR_ADMIN_PORT
-                }
-            }
-        }
-    };
+    let port = port.unwrap_or(PORTAL_PORT);
     let outcome = extension::install(&extension_data_dir(), &host, port)?;
     extension::print_summary(&outcome);
     Ok(())
@@ -1667,6 +1649,7 @@ fn main() {
     let is_t3code = matches!(&cli.command, Some(Commands::T3code { .. }));
     if let Err(error) = nonempty_env(PORTAL_PIN_VARIABLE)
         .and_then(|pin| validate_portal(cli.portal, is_t3code, pin.as_deref()))
+        .and_then(|()| validate_port_flags(&cli, is_t3code))
     {
         eprintln!("Error: {error}");
         std::process::exit(2);
@@ -1750,10 +1733,11 @@ fn main() {
         }
         Some(Commands::T3code { args }) => {
             let port_decisions =
-                t3_port_decisions(cli.portal, &cli.ports).unwrap_or_else(|error| {
-                    eprintln!("Error: {error}");
-                    std::process::exit(2);
-                });
+                decide_t3_ports(cli.t3_port, cli.portal_port, cli.portal, &cli.ports)
+                    .unwrap_or_else(|error| {
+                        eprintln!("Error: {error}");
+                        std::process::exit(2);
+                    });
             let t3_port_was_auto = port_decisions.t3 == PortDecision::Auto;
             let (port, portal_port) =
                 resolve_t3_ports(port_decisions, &cli.ports).unwrap_or_else(|error| {
@@ -1804,7 +1788,7 @@ fn main() {
                 format!("T3CODE_BASE_DIR={}", instance_dir),
             ];
             if let Some(portal_port) = portal_port {
-                container_env.push(format!("T3CODE_ADMIN_PORT={portal_port}"));
+                container_env.push(format!("CLAUDE_SANDBOX_PORTAL_PORT={portal_port}"));
             }
             let named_container = portal.as_ref().map(|_| container_name.as_str());
 
@@ -2009,7 +1993,7 @@ mod tests {
 
     #[test]
     fn admin_port_enables_pasta_reverse_forward() {
-        let env = vec!["T3CODE_ADMIN_PORT=3774".to_string()];
+        let env = vec!["CLAUDE_SANDBOX_PORTAL_PORT=3774".to_string()];
         assert_eq!(admin_pasta_network(&env).as_deref(), Some("pasta:-T,3774"));
         assert_eq!(admin_pasta_network(&[]), None);
     }
@@ -2051,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn t3_port_decisions_cover_auto_exact_and_invalid_values() {
+    fn t3_port_decisions_cover_auto_and_exact_values() {
         assert_eq!(
             decide_t3_ports(None, None, true, &[]).unwrap(),
             T3PortDecisions {
@@ -2060,41 +2044,69 @@ mod tests {
             }
         );
         assert_eq!(
-            decide_t3_ports(Some("3800"), Some("3801"), true, &[]).unwrap(),
+            decide_t3_ports(Some(3800), Some(3801), true, &[]).unwrap(),
             T3PortDecisions {
                 t3: PortDecision::Exact(3800),
                 admin: Some(PortDecision::Exact(3801)),
             }
         );
         assert_eq!(
-            decide_t3_ports(Some("0"), None, false, &[]).unwrap_err(),
-            "T3CODE_PORT must be a port number between 1 and 65535"
+            decide_t3_ports(Some(3800), None, false, &[]).unwrap().admin,
+            None
         );
-        assert_eq!(
-            decide_t3_ports(None, Some("nope"), true, &[]).unwrap_err(),
-            "T3CODE_PAIR_ADMIN_PORT must be a port number between 1 and 65535"
-        );
+        let parse = |args: &[&str]| Cli::try_parse_from([&["claude-sandbox"], args].concat());
+        assert!(parse(&["--t3-port", "0", "t3code"]).is_err());
+        assert!(parse(&["--portal-port", "nope", "t3code"]).is_err());
     }
 
     #[test]
-    fn explicit_admin_port_must_not_collide() {
+    fn explicit_portal_port_must_not_collide() {
         assert!(
-            decide_t3_ports(Some("3800"), Some("3800"), true, &[])
+            decide_t3_ports(Some(3800), Some(3800), true, &[])
                 .unwrap_err()
-                .contains("conflicts with T3CODE_PORT")
+                .contains("conflicts with --t3-port")
         );
         assert!(
-            decide_t3_ports(None, Some("3801"), true, &[3801])
+            decide_t3_ports(None, Some(3801), true, &[3801])
                 .unwrap_err()
                 .contains("conflicts with published port 3801")
         );
     }
 
     #[test]
-    fn auto_t3_port_avoids_an_explicit_admin_port() {
+    fn port_flags_need_t3code_and_portal() {
+        let check = |args: &[&str]| {
+            let cli = Cli::try_parse_from([&["claude-sandbox"], args].concat()).unwrap();
+            let t3code = matches!(cli.command, Some(Commands::T3code { .. }));
+            validate_port_flags(&cli, t3code)
+        };
+        assert!(
+            check(&[
+                "--t3-port",
+                "3800",
+                "--portal",
+                "--portal-port",
+                "3801",
+                "t3code"
+            ])
+            .is_ok()
+        );
+        assert!(
+            check(&["--t3-port", "3800"])
+                .unwrap_err()
+                .contains("only be used with the t3code command")
+        );
+        assert!(check(&["--t3-port", "3800", "run", "true"]).is_err());
+        assert_eq!(
+            check(&["--portal-port", "3801", "t3code"]).unwrap_err(),
+            "--portal-port needs --portal"
+        );
+    }
+
+    #[test]
+    fn auto_t3_port_avoids_an_explicit_portal_port() {
         let first_available = find_free_port_avoiding(T3CODE_PORT, &[]);
-        let admin = first_available.to_string();
-        let decisions = decide_t3_ports(None, Some(&admin), true, &[]).unwrap();
+        let decisions = decide_t3_ports(None, Some(first_available), true, &[]).unwrap();
         let (t3, resolved_admin) = resolve_t3_ports(decisions, &[]).unwrap();
         assert_ne!(t3, first_available);
         assert_eq!(resolved_admin, Some(first_available));

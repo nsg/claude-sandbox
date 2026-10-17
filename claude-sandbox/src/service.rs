@@ -11,8 +11,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SERVICE_ENV_VARS: &[&str] = &[
     "PATH",
     "CLAUDE_SANDBOX_PORTAL_PIN",
-    "T3CODE_PORT",
-    "T3CODE_PAIR_ADMIN_PORT",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
@@ -581,21 +579,24 @@ mod tests {
             recorded_environment(|name| match name {
                 "XDG_RUNTIME_DIR" => Some("/run/user/1000".into()),
                 "SSH_AUTH_SOCK" => Some(socket.into()),
-                "T3CODE_PORT" => Some("3800".into()),
+                "XDG_CACHE_HOME" => Some("/home/stefan/.cache".into()),
                 "HOME" => Some("/home/stefan".into()),
                 _ => None,
             })
             .unwrap()
         };
-        let port = ("T3CODE_PORT".to_string(), "3800".to_string());
+        let host = (
+            "XDG_CACHE_HOME".to_string(),
+            "/home/stefan/.cache".to_string(),
+        );
         assert_eq!(
             record("/tmp/ssh-XXXX/agent.42"),
-            std::slice::from_ref(&port)
+            std::slice::from_ref(&host)
         );
         assert_eq!(
             record("/run/user/1000/keyring/ssh"),
             [
-                port,
+                host,
                 (
                     "SSH_AUTH_SOCK".to_string(),
                     "/run/user/1000/keyring/ssh".to_string()

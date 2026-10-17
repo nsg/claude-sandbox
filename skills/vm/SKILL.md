@@ -129,7 +129,7 @@ xdotool mousemove 640 400 click 1                       # pointer (absolute coor
 - The viewer exits when the VM stops or its display resets (some reboots do
   this). If a screenshot shows the desktop instead of the guest, run
   `vm view NAME` again.
-- The user can watch the same display live from the T3 admin portal.
+- The user can watch the same display live from the admin portal.
 
 `vm screen NAME` prints the raw `spice+unix://` address if another SPICE
 client is needed; `vm view` is that plus `remote-viewer` in kiosk mode.

@@ -252,7 +252,7 @@ class Indicator extends PanelMenu.Button {
         } else {
             const message = new St.Label({
                 text: `No usage data from ${this._url}. The usage service runs with ` +
-                    'claude-sandbox t3code while the admin portal is enabled.',
+                    'claude-sandbox --portal t3code.',
                 style_class: 'plan-usage-message',
                 opacity: DIMMED,
             });

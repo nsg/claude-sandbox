@@ -5,7 +5,7 @@ description: Use when an agent inside claude-sandbox is about to delegate work t
 
 # Plan Usage
 
-Read the cached public usage summary from the host-side T3 admin server. Use it
+Read the cached public usage summary from the host-side admin portal. Use it
 before every delegation to a metered pool — a `codex` or `opencode` launch, a
 substantial subagent, a fan-out, a review round — and when the user asks for
 current usage or reset timing. Figures already in the conversation and under
@@ -15,14 +15,14 @@ it is then reserved for — is in the `delegate` skill under **Live Headroom**.
 
 ## Connect from the sandbox
 
-The agent runs inside Podman. T3 Code reverse-forwards the host admin server's
-TCP port into the container with pasta, so connect to container-local
-`127.0.0.1` and the admin port printed when T3 Code started (3774 unless the
-host selected a fallback):
+The agent runs inside Podman. `claude-sandbox --portal t3code` reverse-forwards
+the host admin portal's TCP port into the container with pasta and exports it
+as `CLAUDE_SANDBOX_PORTAL_PORT`, so connect to container-local `127.0.0.1` on
+that port (3774 unless the host chose another):
 
 ```bash
 read_plan_usage() {
-  local port=${T3CODE_ADMIN_PORT:-3774}
+  local port=${CLAUDE_SANDBOX_PORTAL_PORT:-3774}
   local response status json
 
   if ! response=$(curl --noproxy '*' --silent --show-error \
@@ -65,8 +65,8 @@ Do not add `curl --fail`: HTTP 503 carries the valid API body showing that all
 provider snapshots are unknown. `--noproxy '*'` keeps the request on the local
 container-to-host path even when proxy environment variables are configured.
 
-If 3774 is not the port printed at startup and `T3CODE_ADMIN_PORT` is unset,
-ask for that port rather than scanning the host.
+If `CLAUDE_SANDBOX_PORTAL_PORT` is unset and 3774 is not the port printed at
+startup, ask for that port rather than scanning the host.
 
 ## Interpret the response
 
@@ -147,16 +147,16 @@ Check the reverse-forwarded admin service only:
 ```bash
 curl --noproxy '*' --silent --show-error --dump-header - \
   --output /dev/null --connect-timeout 2 --max-time 5 \
-  "http://127.0.0.1:${T3CODE_ADMIN_PORT:-3774}/"
+  "http://127.0.0.1:${CLAUDE_SANDBOX_PORTAL_PORT:-3774}/"
 ```
 
 - A JSON body with HTTP 200 or 503 means the usage endpoint is working.
 - HTTP 303 with `Location: /`, or the HTML PIN page from `/api/usage`, means the
   reachable host is running an older admin binary. Report that it must be
   updated and restarted; the usage endpoint itself never needs the PIN.
-- Connection refused or timeout usually means the admin server is disabled or
-  the port is wrong. The server is started only when T3 admin is enabled; ask
-  for the startup-printed admin URL.
+- Connection refused or timeout usually means the admin portal is disabled or
+  the port is wrong. The portal is started only with `--portal`; ask for the
+  startup-printed admin portal URL.
 - Connection refused or timeout can also mean the container was launched
   without pasta's reverse TCP forwarding. Do not guess gateway addresses or
   scan other ports.
