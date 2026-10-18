@@ -7,6 +7,7 @@ mod managed_fetch;
 mod managed_gh;
 mod managed_push;
 mod novnc_assets;
+mod portal_ui;
 mod proxy_log;
 mod proxy_socket;
 mod service;

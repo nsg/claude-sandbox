@@ -15,6 +15,7 @@ use crate::managed_fetch;
 use crate::managed_gh;
 use crate::managed_push::{self, ApprovalScope};
 use crate::novnc_assets;
+use crate::portal_ui::{self, Nav};
 use crate::usage_api;
 use crate::usage_collector;
 use crate::usage_dashboard;
@@ -23,6 +24,8 @@ const MAX_REQUEST_BYTES: usize = 16_384;
 const MAX_BODY_BYTES: usize = 8_192;
 const MAX_LOGIN_ATTEMPTS: u32 = 5;
 const LOGIN_LOCKOUT: Duration = Duration::from_secs(60);
+const MAX_NOTICES: usize = 32;
+const NOTICE_TTL: Duration = Duration::from_secs(300);
 
 struct Config {
     portal_port: u16,
@@ -41,6 +44,7 @@ struct Config {
     restart_queued: AtomicBool,
     gh_grant_lock: Mutex<()>,
     failed_logins: Mutex<HashMap<String, LoginFailures>>,
+    notices: Mutex<HashMap<String, (Instant, Notice)>>,
     display_command: fn(&str) -> Command,
 }
 
@@ -53,6 +57,7 @@ struct LoginFailures {
 struct Request {
     method: String,
     path: String,
+    query: String,
     headers: HashMap<String, String>,
     body: Vec<u8>,
     peer: SocketAddr,
@@ -100,6 +105,7 @@ pub fn run(options: RunOptions<'_>) {
         restart_queued: AtomicBool::new(false),
         gh_grant_lock: Mutex::new(()),
         failed_logins: Mutex::new(HashMap::new()),
+        notices: Mutex::new(HashMap::new()),
         display_command,
     });
 
@@ -476,14 +482,8 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
         return;
     }
 
-    if request.method == "GET" && request.path == "/" {
-        let authorized = is_authorized(&request, config);
-        send_html(
-            &mut stream,
-            200,
-            &render_page(config, !authorized, None, None),
-            &[],
-        );
+    if request.method == "GET" && request.path == "/assets/portal.js" {
+        send_portal_script(&mut stream);
         return;
     }
 
@@ -519,6 +519,23 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
         return;
     }
 
+    if request.method == "GET"
+        && let Some(page) = parse_page(&request.path)
+    {
+        let body = if !is_authorized(&request, config) {
+            render_lock(&login_target(Some(&request.path)), None)
+        } else {
+            let notice = take_notice(config, &request.query);
+            match page {
+                Page::Access => render_access(config, notice.as_ref()),
+                Page::System => render_system(config, None, notice.as_ref()),
+                page => render_inbox(config, Some(&page), notice.as_ref()),
+            }
+        };
+        send_html(&mut stream, 200, &body, &[]);
+        return;
+    }
+
     if !is_authorized(&request, config) {
         redirect(&mut stream, "/");
         return;
@@ -530,87 +547,147 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
             send_html(
                 &mut stream,
                 400,
-                &render_page(config, false, None, Some(&error)),
+                &render_inbox(config, None, Some(&Notice::error(error))),
                 &[],
             );
             return;
         }
     };
-    if !safe_equal(
-        form.get("csrf").map(String::as_str).unwrap_or(""),
-        &config.csrf_token,
-    ) {
+    if request.method != "POST"
+        || !safe_equal(
+            form.get("csrf").map(String::as_str).unwrap_or(""),
+            &config.csrf_token,
+        )
+    {
         send_html(
             &mut stream,
             403,
-            &render_page(
+            &render_inbox(
                 config,
-                false,
                 None,
-                Some("The form expired. Reload and try again."),
+                Some(&Notice::error("The form expired. Reload and try again.")),
             ),
             &[],
         );
         return;
     }
 
-    if request.method == "POST" && request.path == "/restart" {
-        let queued = !config.restart_queued.swap(true, Ordering::AcqRel);
-        let notice = if queued {
-            "Restart requested. The admin page will be unavailable briefly."
-        } else {
-            "A sandbox restart is already in progress."
-        };
-        send_html(
-            &mut stream,
-            200,
-            &render_page(config, false, None, Some(notice)),
-            &[],
-        );
-        let _ = stream.flush();
-        if queued {
-            let _ = config.restart_tx.send(());
+    match request.path.as_str() {
+        "/restart" => {
+            let queued = !config.restart_queued.swap(true, Ordering::AcqRel);
+            let notice = if queued {
+                "Restart requested. The admin page will be unavailable briefly."
+            } else {
+                "A sandbox restart is already in progress."
+            };
+            send_html(
+                &mut stream,
+                200,
+                &render_system(config, None, Some(&Notice::ok(notice))),
+                &[],
+            );
+            let _ = stream.flush();
+            if queued {
+                let _ = config.restart_tx.send(());
+            }
+            return;
         }
-        return;
+        "/pair" => {
+            match create_pairing_link(config, request.headers.get("host")) {
+                Ok(url) => send_html(
+                    &mut stream,
+                    200,
+                    &render_system(config, Some(&url), None),
+                    &[],
+                ),
+                Err(error) => send_html(
+                    &mut stream,
+                    400,
+                    &render_system(config, None, Some(&Notice::error(error))),
+                    &[],
+                ),
+            }
+            return;
+        }
+        "/lock" => {
+            redirect_with_headers(
+                &mut stream,
+                "/",
+                &[(
+                    "Set-Cookie",
+                    "t3_admin_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0".to_string(),
+                )],
+            );
+            return;
+        }
+        _ => {}
     }
 
-    let result = match (request.method.as_str(), request.path.as_str()) {
-        ("POST", "/pair") => create_pairing_link(config, request.headers.get("host"))
-            .map(|url| format!("PAIR:{url}")),
-        ("POST", "/approve") => approve_candidate(config, &form),
-        ("POST", "/dismiss") => dismiss_candidate(config, &form),
-        ("POST", "/revoke") => revoke_approval(config, &form),
-        ("POST", "/approve-fetch") => approve_fetch_candidate(config, &form),
-        ("POST", "/dismiss-fetch") => dismiss_fetch_candidate(config, &form),
-        ("POST", "/revoke-fetch") => revoke_fetch_approval(config, &form),
-        ("POST", "/approve-gh") => approve_gh_action(config, &form),
-        ("POST", "/dismiss-gh") => dismiss_gh_action(config, &form),
-        ("POST", "/revoke-gh") => revoke_gh_action(config, &form),
-        ("POST", "/grant-gh") => grant_gh_action(config, &form),
-        ("POST", "/revoke-gh-grant") => revoke_gh_grant(config, &form),
+    let field = |name: &str| form.get(name).map(String::as_str).unwrap_or("");
+    let decided = match request.path.as_str() {
+        "/approve" | "/dismiss" => RequestKey::parse(&format!("push-{}", field("id"))),
+        "/approve-fetch" | "/dismiss-fetch" => RequestKey::parse(&format!("fetch-{}", field("id"))),
+        "/approve-gh" | "/dismiss-gh" | "/grant-gh" => {
+            RequestKey::parse(&format!("gh-{}", field("handle")))
+        }
+        _ => None,
+    };
+    let before: Vec<RequestKey> = if decided.is_some() {
+        pending_requests(config).iter().map(Pending::key).collect()
+    } else {
+        Vec::new()
+    };
+
+    let result = match request.path.as_str() {
+        "/approve" => approve_candidate(config, &form),
+        "/dismiss" => dismiss_candidate(config, &form),
+        "/revoke" => revoke_approval(config, &form),
+        "/approve-fetch" => approve_fetch_candidate(config, &form),
+        "/dismiss-fetch" => dismiss_fetch_candidate(config, &form),
+        "/revoke-fetch" => revoke_fetch_approval(config, &form),
+        "/approve-gh" => approve_gh_action(config, &form),
+        "/dismiss-gh" => dismiss_gh_action(config, &form),
+        "/revoke-gh" => revoke_gh_action(config, &form),
+        "/grant-gh" => grant_gh_action(config, &form),
+        "/revoke-gh-grant" => revoke_gh_grant(config, &form),
         _ => {
             redirect(&mut stream, "/");
             return;
         }
     };
 
-    match result {
-        Ok(message) if message.starts_with("PAIR:") => send_html(
-            &mut stream,
-            200,
-            &render_page(config, false, message.strip_prefix("PAIR:"), None),
-            &[],
-        ),
-        Ok(message) => send_html(
-            &mut stream,
-            200,
-            &render_page(config, false, None, Some(&message)),
-            &[],
-        ),
-        Err(error) => send_html(
+    match (result, decided) {
+        (Ok(message), Some(decided)) => {
+            let token = store_notice(config, Notice::ok(message));
+            redirect(
+                &mut stream,
+                &format!("{}?n={token}", next_after(config, &before, &decided)),
+            );
+        }
+        (Ok(message), None) => {
+            let token = store_notice(config, Notice::ok(message));
+            redirect(&mut stream, &format!("/access?n={token}"));
+        }
+        (Err(error), Some(decided)) => send_html(
             &mut stream,
             400,
-            &render_page(config, false, None, Some(&error)),
+            &render_inbox(
+                config,
+                Some(&Page::Request(Some(decided))),
+                Some(&Notice::error(error)),
+            ),
+            &[],
+        ),
+        (Err(error), None) if request.path.starts_with("/revoke") => send_html(
+            &mut stream,
+            400,
+            &render_access(config, Some(&Notice::error(error))),
+            &[],
+        ),
+        (Err(error), None) => send_html(
+            &mut stream,
+            400,
+            &render_inbox(config, None, Some(&Notice::error(error))),
             &[],
         ),
     }
@@ -618,6 +695,8 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
 
 fn handle_login(stream: &mut TcpStream, request: &Request, config: &Config) {
     let address = request.peer.ip().to_string();
+    let form = parse_form(&request.body).unwrap_or_default();
+    let next = login_target(form.get("next").map(String::as_str));
     {
         let mut failures = config.failed_logins.lock().unwrap();
         if let Some(state) = failures.get(&address).copied() {
@@ -628,10 +707,8 @@ fn handle_login(stream: &mut TcpStream, request: &Request, config: &Config) {
                 send_html(
                     stream,
                     429,
-                    &render_page(
-                        config,
-                        true,
-                        None,
+                    &render_lock(
+                        &next,
                         Some("Too many attempts. Wait one minute and try again."),
                     ),
                     &[],
@@ -644,7 +721,6 @@ fn handle_login(stream: &mut TcpStream, request: &Request, config: &Config) {
         }
     }
 
-    let form = parse_form(&request.body).unwrap_or_default();
     if !safe_equal(
         form.get("pin").map(String::as_str).unwrap_or(""),
         &config.pin,
@@ -672,20 +748,23 @@ fn handle_login(stream: &mut TcpStream, request: &Request, config: &Config) {
         send_html(
             stream,
             401,
-            &render_page(config, true, None, Some("That PIN is not correct.")),
+            &render_lock(&next, Some("That PIN is not correct.")),
             &[],
         );
         return;
     }
 
     config.failed_logins.lock().unwrap().remove(&address);
+    // Lax rather than Strict so a deep link opened from the agent's chat (a
+    // cross-site top-level navigation) arrives signed in. Every state change
+    // is a POST that also needs the CSRF token.
     redirect_with_headers(
         stream,
-        "/",
+        &next,
         &[(
             "Set-Cookie",
             format!(
-                "t3_admin_session={}; HttpOnly; SameSite=Strict; Path=/",
+                "t3_admin_session={}; HttpOnly; SameSite=Lax; Path=/",
                 config.session_token
             ),
         )],
@@ -718,9 +797,15 @@ fn approve_candidate(config: &Config, form: &HashMap<String, String>) -> Result<
     managed_push::approve(&config.state_dir, &current, scope)?;
     managed_push::remove_candidate(&config.state_dir, id)?;
     Ok(match scope {
-        ApprovalScope::Once => format!("Approved the next push from {}.", current.relative_path),
+        ApprovalScope::Once => format!(
+            "Approved the next push from {}. The agent can retry now.",
+            current.relative_path
+        ),
         ApprovalScope::Persistent => {
-            format!("Approved persistent pushes from {}.", current.relative_path)
+            format!(
+                "Always allowing pushes from {}. The agent can retry now.",
+                current.relative_path
+            )
         }
     })
 }
@@ -759,10 +844,13 @@ fn approve_fetch_candidate(
     managed_fetch::approve(&config.fetch_state_dir, &candidate.source, scope)?;
     managed_fetch::remove_candidate(&config.fetch_state_dir, id)?;
     Ok(match scope {
-        ApprovalScope::Once => format!("Approved one fetch from {}.", candidate.source.display()),
+        ApprovalScope::Once => format!(
+            "Approved one fetch from {}. The agent can retry now.",
+            candidate.source.display()
+        ),
         ApprovalScope::Persistent => {
             format!(
-                "Approved persistent fetches from {}.",
+                "Always allowing fetches from {}. The agent can retry now.",
                 candidate.source.display()
             )
         }
@@ -808,7 +896,10 @@ fn approve_gh_action(config: &Config, form: &HashMap<String, String>) -> Result<
         return Err("GitHub action cannot be displayed and cannot be approved".to_string());
     }
     managed_gh::approve(&config.gh_state_dir, handle)?;
-    Ok("Approved this GitHub action once.".to_string())
+    Ok(format!(
+        "Approved this GitHub action once. The agent can retry the same command within {} minutes.",
+        managed_gh::APPROVAL_TTL / 60
+    ))
 }
 
 fn dismiss_gh_action(config: &Config, form: &HashMap<String, String>) -> Result<String, String> {
@@ -847,7 +938,7 @@ fn grant_gh_action(config: &Config, form: &HashMap<String, String>) -> Result<St
         return Err("GitHub action cannot be displayed and cannot be granted".to_string());
     }
     managed_gh::grant_candidate(&config.gh_state_dir, handle, scope)?;
-    Ok("GitHub repository grant saved.".to_string())
+    Ok("GitHub repository grant saved. The agent can retry now.".to_string())
 }
 
 fn revoke_gh_grant(config: &Config, form: &HashMap<String, String>) -> Result<String, String> {
@@ -914,36 +1005,1144 @@ fn parse_hostname(host: &str) -> Option<String> {
     Some(hostname.to_string())
 }
 
-fn render_page(
-    config: &Config,
-    locked: bool,
-    pair_url: Option<&str>,
-    notice: Option<&str>,
-) -> String {
-    let action = if locked {
-        r#"<section><h2>Unlock</h2><form method="post" action="/login"><label>Admin PIN<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,12}" minlength="4" maxlength="12" required autofocus></label><button>Unlock</button></form></section>"#.to_string()
-    } else {
-        let mut sections = render_pairing_controls(&config.csrf_token, pair_url);
-        sections.push_str(&render_push_controls(config));
-        sections.push_str(&render_fetch_controls(config));
-        sections.push_str(&render_gh_controls(config));
-        sections.push_str(render_display_controls());
-        sections.push_str(&render_restart_controls(&config.csrf_token));
-        sections
+struct Notice {
+    error: bool,
+    text: String,
+}
+
+impl Notice {
+    fn ok(text: impl Into<String>) -> Self {
+        Self {
+            error: false,
+            text: text.into(),
+        }
+    }
+
+    fn error(text: impl Into<String>) -> Self {
+        Self {
+            error: true,
+            text: text.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RequestKind {
+    Push,
+    Fetch,
+    Gh,
+}
+
+impl RequestKind {
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::Fetch => "fetch",
+            Self::Gh => "gh",
+        }
+    }
+}
+
+/// The deep link to one pending request, as the proxies hand it to the agent.
+pub(crate) fn request_url(base: &str, kind: RequestKind, id: &str) -> String {
+    format!("{}/r/{}-{id}", base.trim_end_matches('/'), kind.slug())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RequestKey {
+    kind: RequestKind,
+    id: String,
+}
+
+impl RequestKey {
+    fn new(kind: RequestKind, id: &str) -> Self {
+        Self {
+            kind,
+            id: id.to_string(),
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let (kind, id) = value.split_once('-')?;
+        let kind = match kind {
+            "push" => RequestKind::Push,
+            "fetch" => RequestKind::Fetch,
+            "gh" => RequestKind::Gh,
+            _ => return None,
+        };
+        (id.len() == 16
+            && id
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| Self::new(kind, id))
+    }
+
+    fn path(&self) -> String {
+        format!("/r/{}-{}", self.kind.slug(), self.id)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Page {
+    Inbox,
+    Request(Option<RequestKey>),
+    Access,
+    System,
+}
+
+fn parse_page(path: &str) -> Option<Page> {
+    match path {
+        "/" => Some(Page::Inbox),
+        "/access" => Some(Page::Access),
+        "/system" => Some(Page::System),
+        _ => path
+            .strip_prefix("/r/")
+            .map(|key| Page::Request(RequestKey::parse(key))),
+    }
+}
+
+/// Where a successful unlock continues: only known portal pages, rebuilt
+/// from the parsed value so nothing the client sent is echoed into Location.
+fn login_target(next: Option<&str>) -> String {
+    match next.and_then(parse_page) {
+        Some(Page::Access) => "/access".to_string(),
+        Some(Page::System) => "/system".to_string(),
+        Some(Page::Request(Some(key))) => key.path(),
+        _ => "/".to_string(),
+    }
+}
+
+enum Pending {
+    Push(String, managed_push::Candidate),
+    Fetch(String, managed_fetch::Candidate),
+    Gh(String, managed_gh::Candidate),
+}
+
+impl Pending {
+    fn key(&self) -> RequestKey {
+        match self {
+            Self::Push(id, _) => RequestKey::new(RequestKind::Push, id),
+            Self::Fetch(id, _) => RequestKey::new(RequestKind::Fetch, id),
+            Self::Gh(handle, _) => RequestKey::new(RequestKind::Gh, handle),
+        }
+    }
+
+    fn requested_at(&self) -> u64 {
+        match self {
+            Self::Push(_, candidate) => candidate.requested_at,
+            Self::Fetch(_, candidate) => candidate.requested_at,
+            Self::Gh(_, candidate) => candidate.context.requested_at,
+        }
+    }
+
+    fn needs_attention(&self) -> bool {
+        matches!(self, Self::Push(_, candidate) if candidate.previously_approved_origin.is_some())
+    }
+}
+
+/// Every pending request, the ones needing extra care first, then newest first.
+fn pending_requests(config: &Config) -> Vec<Pending> {
+    let mut pending: Vec<Pending> = managed_push::list_candidates(&config.state_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .take(100)
+        .map(|(id, candidate)| Pending::Push(id, candidate))
+        .collect();
+    pending.extend(
+        managed_fetch::list_candidates(&config.fetch_state_dir)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, candidate)| Pending::Fetch(id, candidate)),
+    );
+    let gh = {
+        let _guard = config.gh_grant_lock.lock().unwrap();
+        managed_gh::remove_covered_candidates(&config.gh_state_dir)
+            .and_then(|()| managed_gh::list_candidates(&config.gh_state_dir))
+            .unwrap_or_default()
     };
-    let notice = notice
-        .map(|message| format!(r#"<div class="notice">{}</div>"#, escape_html(message)))
-        .unwrap_or_default();
+    pending.extend(
+        gh.into_iter()
+            .map(|(handle, candidate)| Pending::Gh(handle, candidate)),
+    );
+    pending.sort_by_key(|request| {
+        (
+            !request.needs_attention(),
+            std::cmp::Reverse(request.requested_at()),
+        )
+    });
+    pending
+}
+
+/// After a decision, continue with the request that followed the decided one.
+fn next_after(config: &Config, before: &[RequestKey], decided: &RequestKey) -> String {
+    let now: Vec<RequestKey> = pending_requests(config).iter().map(Pending::key).collect();
+    let start = before
+        .iter()
+        .position(|key| key == decided)
+        .map_or(0, |index| index + 1);
+    before
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(before.len())
+        .find(|key| now.contains(key))
+        .or_else(|| now.first())
+        .map_or_else(|| "/".to_string(), RequestKey::path)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn short_age(timestamp: u64) -> String {
+    let seconds = unix_now().saturating_sub(timestamp);
+    match seconds {
+        0..60 => "now".to_string(),
+        60..3_600 => format!("{}m", seconds / 60),
+        3_600..86_400 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+fn duration_text(seconds: u64) -> String {
+    if seconds >= 3_600 {
+        format!("{}h {}m", seconds / 3_600, seconds % 3_600 / 60)
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    }
+}
+
+fn ago_text(timestamp: u64) -> String {
+    match short_age(timestamp).as_str() {
+        "now" => "just now".to_string(),
+        age => format!("{age} ago"),
+    }
+}
+
+fn requested_text(timestamp: u64) -> String {
+    format!("requested {}", ago_text(timestamp))
+}
+
+fn date_text(timestamp: u64) -> String {
+    let full = usage_api::format_epoch(i64::try_from(timestamp).unwrap_or(i64::MAX));
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>T3 Code · Admin</title><style>
-:root{{--ink:#f4f1e8;--muted:#a4a49b;--line:#353630;--acid:#d8ff4f;--danger:#ff8c7e;--bg:#11120f}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;color:var(--ink);background:radial-gradient(circle at 85% 10%,#293315 0,transparent 30%),var(--bg);font:14px/1.55 "IBM Plex Mono","Courier New",monospace}}main{{width:min(920px,calc(100% - 32px));margin:auto;padding:48px 0 80px}}header{{border-top:1px solid var(--acid);padding-top:16px;margin-bottom:48px}}h1{{font:400 clamp(42px,8vw,76px)/.95 Georgia,serif;letter-spacing:-.05em;margin:18px 0}}h2{{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:var(--acid)}}section{{border:1px solid var(--line);padding:22px;margin:14px 0;background:#11120fd9}}p,small{{color:var(--muted)}}form{{display:inline-flex;gap:10px;align-items:end;margin:5px 8px 5px 0}}label{{display:grid;gap:7px}}input{{background:#090a08;color:var(--ink);border:1px solid var(--line);padding:12px}}button,.pair{{display:inline-block;border:0;background:var(--acid);color:#15170d;padding:12px 15px;font:700 11px/1 monospace;text-transform:uppercase;text-decoration:none;cursor:pointer}}button.secondary{{background:#34362e;color:var(--ink)}}button.danger{{background:#713a34;color:#fff}}.usage{{color:var(--ink);text-underline-offset:4px}}.usage:hover{{color:var(--acid)}}.pair-result{{border-top:1px solid var(--line);margin-top:17px;padding-top:17px}}.pair-url{{width:100%;margin:5px 0 12px}}.repo{{padding:16px 0;border-top:1px solid var(--line)}}.repo:first-of-type{{border-top:0}}code{{color:var(--ink);overflow-wrap:anywhere}}.meta{{display:grid;grid-template-columns:100px 1fr;gap:5px 12px}}.notice{{border:1px solid #6f752f;padding:13px;margin-bottom:14px}}.changed,.public{{color:var(--danger)}}.gh-value{{margin:16px 0}}.gh-value small{{margin-left:12px}}.gh-value pre{{white-space:normal;overflow-wrap:anywhere;border:1px solid var(--line);padding:10px}}.gh-value pre span{{display:block;white-space:pre-wrap;overflow-wrap:anywhere}}.gh-value pre b{{display:inline-block;width:3em;color:var(--muted);user-select:none}}.gh-value pre .whitespace{{display:inline;color:var(--muted)}}.gh-action .meta{{grid-template-columns:150px 1fr}}.gh-action-footer{{border-top:1px solid var(--line);padding-top:12px}}.gh-action-footer strong{{display:block;margin-bottom:8px}}footer{{margin-top:42px;color:#67685f;font-size:10px;text-transform:uppercase;letter-spacing:.12em}}@media(max-width:600px){{.meta{{grid-template-columns:1fr}}form{{display:flex;flex-wrap:wrap}}}}
-</style></head><body><main><header><small>Private control plane · {}</small><h1>T3 Code<br>Admin.</h1><a class="usage" href="/usage">Public usage dashboard ↗</a></header>{notice}{action}<footer>Host-owned administration surface</footer></main></body></html>"#,
-        config.portal_port
+        r#"<span title="{}">since {}</span>"#,
+        escape_html(&full),
+        escape_html(full.get(..10).unwrap_or(&full))
     )
 }
 
-fn render_display_controls() -> &'static str {
-    r#"<section><h2>Display</h2><p>View and control the sandbox's virtual X display in this browser.</p><a class="pair" href="/display">Open live display ↗</a></section>"#
+fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+fn hidden(name: &str, value: &str) -> String {
+    format!(
+        r#"<input type="hidden" name="{name}" value="{}">"#,
+        escape_html(value)
+    )
+}
+
+/// Keeps a decision's notice for the page the redirect lands on. Each notice
+/// is keyed by its own token in that redirect, so tabs never see each
+/// other's notices.
+fn store_notice(config: &Config, notice: Notice) -> String {
+    let token = random_token(12);
+    let mut notices = config.notices.lock().unwrap();
+    notices.retain(|_, (stored, _)| stored.elapsed() < NOTICE_TTL);
+    while notices.len() >= MAX_NOTICES {
+        let Some(oldest) = notices
+            .iter()
+            .min_by_key(|(_, (stored, _))| *stored)
+            .map(|(token, _)| token.clone())
+        else {
+            break;
+        };
+        notices.remove(&oldest);
+    }
+    notices.insert(token.clone(), (Instant::now(), notice));
+    token
+}
+
+fn take_notice(config: &Config, query: &str) -> Option<Notice> {
+    let token = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("n="))
+        .filter(|token| {
+            token.len() == 16
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        })?;
+    let (stored, notice) = config.notices.lock().unwrap().remove(token)?;
+    (stored.elapsed() < NOTICE_TTL).then_some(notice)
+}
+
+fn flash_html(notice: Option<&Notice>) -> String {
+    notice
+        .map(|notice| {
+            let (class, icon) = if notice.error {
+                (" error", portal_ui::ICON_WARN)
+            } else {
+                ("", portal_ui::ICON_CHECK)
+            };
+            format!(
+                r#"<div class="flash{class}" role="status">{icon}<span>{}</span></div>"#,
+                escape_html(&notice.text)
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn app_page(config: &Config, nav: Nav, pending: usize, title: &str, main: &str) -> String {
+    portal_ui::document(
+        &escape_html(title),
+        "app",
+        &format!(
+            "{}{main}",
+            portal_ui::top_bar(
+                nav,
+                pending,
+                config.portal_port,
+                &escape_html(&config.csrf_token)
+            )
+        ),
+    )
+}
+
+fn render_lock(next: &str, notice: Option<&str>) -> String {
+    let (title, text) = if next.starts_with("/r/") {
+        (
+            "Unlock to review this request",
+            "Enter your portal PIN. You'll go straight to the request.",
+        )
+    } else {
+        (
+            "Sandbox Admin is locked",
+            "Enter your portal PIN to review pending requests and access.",
+        )
+    };
+    let notice = flash_html(notice.map(Notice::error).as_ref());
+    portal_ui::document(
+        "Unlock",
+        "",
+        &format!(
+            r#"<main class="lock"><div class="floating">{}</div><div class="card"><span class="mark">{}</span><h1>{title}</h1><p>{text}</p>{notice}<form method="post" action="/login">{}<input class="pin" name="pin" type="password" inputmode="numeric" autocomplete="current-password" pattern="[0-9]{{4,12}}" minlength="4" maxlength="12" required autofocus aria-label="Admin PIN" placeholder="PIN"><button class="btn primary">Unlock</button></form><p class="foot"><a class="link" href="/usage">Public usage dashboard ↗</a></p></div></main>"#,
+            portal_ui::theme_toggle(),
+            portal_ui::mark(),
+            hidden("next", next),
+        ),
+    )
+}
+
+fn render_inbox(config: &Config, selected: Option<&Page>, notice: Option<&Notice>) -> String {
+    let pending = pending_requests(config);
+    let keys: Vec<RequestKey> = pending.iter().map(Pending::key).collect();
+    let (mode, index) = match selected {
+        Some(Page::Request(Some(key))) => ("at-item", keys.iter().position(|item| item == key)),
+        Some(Page::Request(None)) => ("at-item", None),
+        _ => ("at-root", (!pending.is_empty()).then_some(0)),
+    };
+    let detail = match index {
+        Some(index) => render_detail(config, &pending[index], index, &keys),
+        None if mode == "at-item" => render_state(
+            portal_ui::ICON_INBOX,
+            true,
+            "This request is no longer pending",
+            "It was approved, dismissed or expired. Nothing is left to decide here.",
+            &format!(
+                r#"<a class="btn primary" href="/">Go to inbox ({} waiting)</a>"#,
+                pending.len()
+            ),
+        ),
+        None => render_state(
+            portal_ui::ICON_CHECK,
+            false,
+            "All clear",
+            "Nothing is waiting for you. Pushes, fetches and GitHub actions that need approval show up here, and the agent's message links straight to them.",
+            r#"<a class="btn" href="/access">Review standing access</a>"#,
+        ),
+    };
+    let flash = flash_html(notice);
+    let no_flash = if flash.is_empty() { " no-flash" } else { "" };
+    let main = format!(
+        r#"<main class="inbox {mode}{no_flash}">{flash}{}{detail}</main>"#,
+        render_list(&pending, index)
+    );
+    app_page(config, Nav::Inbox, pending.len(), "Inbox", &main)
+}
+
+fn render_state(icon: &str, muted: bool, title: &str, text: &str, action: &str) -> String {
+    let class = if muted { " gray" } else { "" };
+    format!(
+        r#"<section class="card detail"><div class="detail-body center"><div class="state"><div class="big{class}">{icon}</div><h2>{title}</h2><p>{text}</p>{action}</div></div></section>"#
+    )
+}
+
+fn render_list(pending: &[Pending], selected: Option<usize>) -> String {
+    let mut html = format!(
+        r#"<section class="card list"><div class="list-head"><h2>Inbox</h2><span>{}</span></div>"#,
+        if pending.is_empty() {
+            "nothing waiting".to_string()
+        } else {
+            format!("{} waiting · newest first", pending.len())
+        }
+    );
+    if pending.is_empty() {
+        html.push_str(r#"<div class="empty"><b>Nothing is waiting</b>A denied push, fetch or GitHub action appears here automatically.</div>"#);
+    }
+    let mut group = None;
+    for (index, request) in pending.iter().enumerate() {
+        let attention = request.needs_attention();
+        if group != Some(attention) {
+            group = Some(attention);
+            html.push_str(&format!(
+                r#"<div class="group">{}</div>"#,
+                if attention {
+                    "Needs attention"
+                } else {
+                    "Waiting"
+                }
+            ));
+        }
+        let (kind, icon, title, place, chips) = list_summary(request);
+        let on = if selected == Some(index) { " on" } else { "" };
+        html.push_str(&format!(
+            r#"<a class="item{on}" href="{}"><div class="ico {kind}">{icon}</div><div><div class="t">{title}</div><div class="s"><span>{place}</span>{chips}</div></div><div class="age">{}</div></a>"#,
+            request.key().path(),
+            short_age(request.requested_at())
+        ));
+    }
+    html.push_str("</section>");
+    html
+}
+
+fn list_summary(request: &Pending) -> (&'static str, &'static str, String, String, String) {
+    match request {
+        Pending::Push(_, candidate) => {
+            let repository = &candidate.repository;
+            let title = repository.branch.as_deref().map_or_else(
+                || "Push from a detached HEAD".to_string(),
+                |branch| format!("Push to <code>{}</code>", escape_html(branch)),
+            );
+            let chips = if candidate.previously_approved_origin.is_some() {
+                r#"<span class="chip red">Origin changed</span>"#.to_string()
+            } else {
+                String::new()
+            };
+            (
+                "push",
+                portal_ui::ICON_PUSH,
+                title,
+                escape_html(&repository.relative_path),
+                chips,
+            )
+        }
+        Pending::Fetch(_, candidate) => (
+            "fetch",
+            portal_ui::ICON_FETCH,
+            format!(
+                "Read <code>{}</code>",
+                escape_html(&candidate.source.repository)
+            ),
+            format!(
+                "{} · from {}",
+                escape_html(&candidate.source.host),
+                escape_html(&candidate.requested_from)
+            ),
+            r#"<span class="chip gray">Read only</span>"#.to_string(),
+        ),
+        Pending::Gh(_, candidate) => {
+            let action = &candidate.action;
+            let context = &candidate.context;
+            let title = match gh_display(action, context) {
+                Some(display) => {
+                    let quoted = display
+                        .values
+                        .iter()
+                        .find(|(flag, _)| *flag == "title")
+                        .and_then(|(_, value)| *value)
+                        .map(str::to_string)
+                        .or_else(|| context.item_title.clone())
+                        .map(|title| format!(" “{}”", escape_html(&visible_context(&title))))
+                        .unwrap_or_default();
+                    let operation = if action.args.get(1).map(String::as_str) == Some("create")
+                        && action.args.first().map(String::as_str) == Some("pr")
+                    {
+                        "Open pull request".to_string()
+                    } else {
+                        display.operation
+                    };
+                    format!("{}{quoted}", escape_html(&operation))
+                }
+                None => "GitHub action that cannot be displayed".to_string(),
+            };
+            let chips = if context.repository_visibility.eq_ignore_ascii_case("public") {
+                r#"<span class="chip gray">Public</span>"#.to_string()
+            } else {
+                String::new()
+            };
+            (
+                "gh",
+                portal_ui::ICON_GH,
+                title,
+                escape_html(&action.repository.selector()),
+                chips,
+            )
+        }
+    }
+}
+
+fn position_links(index: usize, keys: &[RequestKey]) -> String {
+    let link = |target: Option<&RequestKey>, icon: &str, label: &str| match target {
+        Some(key) => format!(
+            r#"<a class="pill-btn" href="{}" aria-label="{label}" title="{label}">{icon}</a>"#,
+            key.path()
+        ),
+        None => format!(r#"<span class="pill-btn off" aria-hidden="true">{icon}</span>"#),
+    };
+    format!(
+        r#"{}<span class="pos">{} of {}</span>{}"#,
+        link(
+            index.checked_sub(1).and_then(|previous| keys.get(previous)),
+            portal_ui::ICON_PREV,
+            "Previous request"
+        ),
+        index + 1,
+        keys.len(),
+        link(keys.get(index + 1), portal_ui::ICON_NEXT, "Next request")
+    )
+}
+
+struct Detail<'a> {
+    kind: RequestKind,
+    requested_at: u64,
+    requested_from: Option<&'a str>,
+    key: &'a RequestKey,
+    position: &'a str,
+    title: &'a str,
+    sub: &'a str,
+    body: &'a str,
+    actions: &'a str,
+}
+
+fn detail_frame(detail: &Detail<'_>) -> String {
+    let chip = match detail.kind {
+        RequestKind::Push => r#"<span class="chip push">Push</span>"#,
+        RequestKind::Fetch => r#"<span class="chip fetch">Fetch</span>"#,
+        RequestKind::Gh => r#"<span class="chip gh">GitHub</span>"#,
+    };
+    format!(
+        r#"<section class="card detail"><div class="detail-body"><a class="back" href="/">← Inbox</a><div class="crumbs"><div class="links">{chip}<span>{}</span></div><div class="links"><button type="button" class="pill-btn" data-copy="{}" title="Copy a link to this request">{}<span>Copy link</span></button>{}</div></div><h1>{}</h1><div class="sub">{}</div>{}</div><div class="actions">{}</div></section>"#,
+        detail.requested_from.map_or_else(
+            || requested_text(detail.requested_at),
+            |from| format!(
+                "{} from <code>{}</code>",
+                requested_text(detail.requested_at),
+                escape_html(&visible_context(from))
+            )
+        ),
+        detail.key.path(),
+        portal_ui::ICON_LINK,
+        detail.position,
+        detail.title,
+        detail.sub,
+        detail.body,
+        detail.actions
+    )
+}
+
+fn callout(class: &str, icon: &str, html: &str) -> String {
+    format!(r#"<div class="callout {class}">{icon}<div>{html}</div></div>"#)
+}
+
+fn fact(label: &str, value: &str, wide: bool) -> String {
+    let class = if wide { r#" class="wide""# } else { "" };
+    format!("<div{class}><span>{label}</span>{value}</div>")
+}
+
+fn render_detail(config: &Config, request: &Pending, index: usize, keys: &[RequestKey]) -> String {
+    let position = position_links(index, keys);
+    let csrf = &config.csrf_token;
+    match request {
+        Pending::Push(id, candidate) => render_push_detail(id, candidate, csrf, &position),
+        Pending::Fetch(id, candidate) => render_fetch_detail(id, candidate, csrf, &position),
+        Pending::Gh(handle, candidate) => render_gh_detail(
+            handle,
+            &candidate.action,
+            &candidate.context,
+            csrf,
+            &position,
+        ),
+    }
+}
+
+fn decision_actions(approve: &str, dismiss: &str, id: &str, csrf: &str) -> String {
+    format!(
+        r#"<form method="post" action="{approve}">{}{}<button class="btn primary" name="scope" value="once">{}Approve once</button></form><form method="post" action="{dismiss}">{}{}<button class="btn">Dismiss</button></form><form method="post" action="{approve}">{}{}<button class="btn ghost" name="scope" value="persistent">Always allow</button></form>"#,
+        hidden("csrf", csrf),
+        hidden("id", id),
+        portal_ui::ICON_CHECK,
+        hidden("csrf", csrf),
+        hidden("id", id),
+        hidden("csrf", csrf),
+        hidden("id", id),
+    )
+}
+
+fn render_push_detail(
+    id: &str,
+    candidate: &managed_push::Candidate,
+    csrf: &str,
+    position: &str,
+) -> String {
+    let repository = &candidate.repository;
+    let title = repository.branch.as_deref().map_or_else(
+        || "Push from a detached HEAD".to_string(),
+        |branch| format!("Push to <code>{}</code>", escape_html(branch)),
+    );
+    let mut body = String::new();
+    if let Some(previous) = &candidate.previously_approved_origin {
+        body.push_str(&callout(
+            "",
+            portal_ui::ICON_WARN,
+            &format!(
+                r#"<b>Origin changed since this repository was approved.</b> Check the new origin before approving.<div class="rows"><span>Previously approved</span><code>{}</code><span>Now</span><code>{}</code></div>"#,
+                escape_html(previous),
+                escape_html(&repository.origin)
+            ),
+        ));
+    }
+    body.push_str(&format!(
+        r#"<div class="facts">{}{}</div>"#,
+        fact(
+            "Branch",
+            &format!(
+                "<code>{}</code>",
+                escape_html(repository.branch.as_deref().unwrap_or("detached HEAD"))
+            ),
+            false
+        ),
+        fact(
+            "Origin",
+            &format!("<code>{}</code>", escape_html(&repository.origin)),
+            true
+        ),
+    ));
+    body.push_str(&callout(
+        "info",
+        portal_ui::ICON_INFO,
+        "<b>Approve once</b> lets the next push from this repository through. <b>Always allow</b> keeps allowing pushes while the origin stays the same; a changed origin suspends it and asks again.",
+    ));
+    detail_frame(&Detail {
+        kind: RequestKind::Push,
+        requested_at: candidate.requested_at,
+        requested_from: None,
+        key: &RequestKey::new(RequestKind::Push, id),
+        position,
+        title: &title,
+        sub: &format!("<code>{}</code>", escape_html(&repository.relative_path)),
+        body: &body,
+        actions: &decision_actions("/approve", "/dismiss", id, csrf),
+    })
+}
+
+fn render_fetch_detail(
+    id: &str,
+    candidate: &managed_fetch::Candidate,
+    csrf: &str,
+    position: &str,
+) -> String {
+    let source = escape_html(&candidate.source.display());
+    let body = format!(
+        r#"{}<div class="facts">{}{}{}</div>"#,
+        callout(
+            "info",
+            portal_ui::ICON_INFO,
+            "Approval grants this sandbox read access to the exact SSH repository. The requesting checkout is shown for context and is not an isolation boundary inside a shared container.",
+        ),
+        fact(
+            "Requested from",
+            &format!(
+                "<strong>{}</strong>",
+                escape_html(&candidate.requested_from)
+            ),
+            false
+        ),
+        fact("Access", "<strong>Read only</strong>", false),
+        fact("Source", &format!("<code>{source}</code>"), true),
+    );
+    detail_frame(&Detail {
+        kind: RequestKind::Fetch,
+        requested_at: candidate.requested_at,
+        requested_from: None,
+        key: &RequestKey::new(RequestKind::Fetch, id),
+        position,
+        title: "Read a private repository",
+        sub: &format!("<code>{source}</code>"),
+        body: &body,
+        actions: &decision_actions("/approve-fetch", "/dismiss-fetch", id, csrf),
+    })
+}
+
+fn gh_value_block(flag: &str, value: &str) -> String {
+    let label = match flag {
+        "title" => "Title",
+        "body" => "Body",
+        "comment" => "Comment",
+        "reason" => "Reason",
+        "head" => "Head",
+        "base" => "Base",
+        _ => "Value",
+    };
+    let lines: Vec<&str> = value.split('\n').collect();
+    let mut rendered = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trailing = line
+            .chars()
+            .rev()
+            .take_while(|character| *character == ' ')
+            .count();
+        let visible_end = line.len() - trailing;
+        let mut content = String::new();
+        for character in line[..visible_end].chars() {
+            if character == '\t' {
+                content.push_str("<span class=whitespace>→</span>\t");
+            } else {
+                content.push_str(&escape_html(&character.to_string()));
+            }
+        }
+        for _ in 0..trailing {
+            content.push_str("<span class=whitespace>·</span>");
+        }
+        rendered.push_str(&format!(
+            "<span><i>{}</i><em>{content}</em></span>",
+            index + 1
+        ));
+    }
+    format!(
+        r#"<div class="text"><div class="lbl"><b>{label}</b><span>{} · {}</span></div><pre>{rendered}</pre></div>"#,
+        plural(value.len(), "byte", "bytes"),
+        plural(lines.len(), "line", "lines"),
+    )
+}
+
+fn gh_bare_flag(flag: &str) -> String {
+    let label = match flag {
+        "draft" => "Draft",
+        "undo" => "Undo",
+        _ => "Flag",
+    };
+    format!(r#"<div class="flag"><b>{label}</b><span>enabled</span></div>"#)
+}
+
+fn gh_values(display: &GhDisplay<'_>) -> String {
+    display
+        .values
+        .iter()
+        .map(|(flag, value)| {
+            value.map_or_else(|| gh_bare_flag(flag), |value| gh_value_block(flag, value))
+        })
+        .collect()
+}
+
+fn render_gh_grant_controls(
+    handle: &str,
+    action: &managed_gh::Action,
+    context: &managed_gh::Context,
+    csrf: &str,
+) -> String {
+    let Some(kind) = managed_gh::command_kind(action) else {
+        return String::new();
+    };
+    let repository = escape_html(&action.repository.selector());
+    let public_warning = if context.repository_visibility.eq_ignore_ascii_case("public") {
+        " This repository is public."
+    } else {
+        ""
+    };
+    format!(
+        r#"<details class="allow"><summary class="btn ghost">Always allow… {}</summary><div class="allow-pop"><p>Future matching commands from this sandbox to {repository} will run without review. The agent chooses the text that is published under your account.{public_warning}</p><form method="post" action="/grant-gh">{}{}<button class="btn" name="scope" value="command">Always allow {} in {repository}</button><button class="btn" name="scope" value="repository">Always allow all issue and pull request actions in {repository}</button></form></div></details>"#,
+        portal_ui::ICON_CHEVRON,
+        hidden("csrf", csrf),
+        hidden("handle", handle),
+        escape_html(kind.phrase),
+    )
+}
+
+fn gh_facts(action: &managed_gh::Action, context: &managed_gh::Context) -> String {
+    let public = context.repository_visibility.eq_ignore_ascii_case("public");
+    let mut facts = String::from(r#"<div class="facts">"#);
+    facts.push_str(&fact(
+        "Visibility",
+        &format!(
+            r#"<strong class="{}">{}</strong>"#,
+            if public { "public" } else { "" },
+            escape_html(&context.repository_visibility)
+        ),
+        false,
+    ));
+    if let Some(commits) = context.commits {
+        facts.push_str(&fact(
+            "Commits",
+            &format!("<strong>{commits}</strong>"),
+            false,
+        ));
+    }
+    if let Some(files) = context.changed_files {
+        facts.push_str(&fact(
+            "Changed files",
+            &format!("<strong>{files}</strong>"),
+            false,
+        ));
+    }
+    if let Some(item) = &action.item {
+        facts.push_str(&fact(
+            "Item",
+            &format!(
+                "<strong>#{} · {} · {}</strong>",
+                item.number,
+                escape_html(context.item_state.as_deref().unwrap_or("unknown")),
+                escape_html(&visible_context(
+                    context.item_title.as_deref().unwrap_or("untitled")
+                ))
+            ),
+            true,
+        ));
+    }
+    if let Some(head_sha) = &action.head_sha {
+        facts.push_str(&fact(
+            "Head commit when requested",
+            &format!("<code>{}</code>", escape_html(head_sha)),
+            true,
+        ));
+    }
+    facts.push_str("</div>");
+    facts
+}
+
+fn gh_branch_notice(action: &managed_gh::Action, display: &GhDisplay<'_>) -> String {
+    if action.args.first().map(String::as_str) != Some("pr")
+        || action.args.get(1).map(String::as_str) != Some("create")
+    {
+        return String::new();
+    }
+    let head = display
+        .values
+        .iter()
+        .find(|(flag, _)| *flag == "head")
+        .and_then(|(_, value)| *value)
+        .expect("displayable pr create has a head");
+    callout(
+        "warn",
+        portal_ui::ICON_INFO,
+        &format!(
+            "The pull request follows branch {}; commits pushed to it later, including between approval and creation, become part of it.",
+            escape_html(head)
+        ),
+    )
+}
+
+fn render_gh_detail(
+    handle: &str,
+    action: &managed_gh::Action,
+    context: &managed_gh::Context,
+    csrf: &str,
+    position: &str,
+) -> String {
+    let key = RequestKey::new(RequestKind::Gh, handle);
+    let repository = escape_html(&action.repository.selector());
+    let dismiss = format!(
+        r#"<form method="post" action="/dismiss-gh">{}{}<button class="btn">Dismiss</button></form>"#,
+        hidden("csrf", csrf),
+        hidden("handle", handle)
+    );
+    let Some(display) = gh_display(action, context) else {
+        return detail_frame(&Detail {
+            kind: RequestKind::Gh,
+            requested_at: context.requested_at,
+            requested_from: Some(&context.requested_from),
+            key: &key,
+            position,
+            title: "Cannot be displayed",
+            sub: &format!("<code>{repository}</code>"),
+            body: &callout(
+                "warn",
+                portal_ui::ICON_WARN,
+                "This GitHub action uses arguments the portal cannot show in full, so it cannot be approved here. Dismiss it and ask the agent to retry with supported options.",
+            ),
+            actions: &dismiss,
+        });
+    };
+    let body = gh_review(action, context, &display);
+    let actions = format!(
+        r#"<form method="post" action="/approve-gh">{}{}<button class="btn primary">{}Approve once</button></form>{dismiss}{}"#,
+        hidden("csrf", csrf),
+        hidden("handle", handle),
+        portal_ui::ICON_CHECK,
+        render_gh_grant_controls(handle, action, context, csrf)
+    );
+    detail_frame(&Detail {
+        kind: RequestKind::Gh,
+        requested_at: context.requested_at,
+        requested_from: Some(&context.requested_from),
+        key: &key,
+        position,
+        title: &escape_html(&display.operation),
+        sub: &format!("<code>{repository}</code>"),
+        body: &body,
+        actions: &actions,
+    })
+}
+
+/// Everything needed to judge a GitHub action: warnings, identities and the
+/// exact text, shared by pending requests and unused approvals.
+fn gh_review(
+    action: &managed_gh::Action,
+    context: &managed_gh::Context,
+    display: &GhDisplay<'_>,
+) -> String {
+    let mut body = String::new();
+    if context.repository_visibility.eq_ignore_ascii_case("public") {
+        body.push_str(&callout(
+            "",
+            portal_ui::ICON_WARN,
+            "<b>Public repository.</b> This acts under your GitHub account, and anything published below is visible to everyone exactly as written.",
+        ));
+    }
+    body.push_str(&gh_facts(action, context));
+    body.push_str(&gh_branch_notice(action, display));
+    if !display.values.is_empty() {
+        body.push_str(r#"<div class="sec">What will be published <small>Tabs (→) and trailing spaces (·) are marked</small></div>"#);
+        body.push_str(&gh_values(display));
+    }
+    body
+}
+
+fn revoke_button(action: &str, field: &str, value: &str, csrf: &str) -> String {
+    format!(
+        r#"<form method="post" action="{action}">{}{}<button class="btn sm danger">Revoke</button></form>"#,
+        hidden("csrf", csrf),
+        hidden(field, value)
+    )
+}
+
+fn access_block(icon_class: &str, icon: &str, title: &str, summary: &str, rows: &str) -> String {
+    format!(
+        r#"<section class="card block"><div class="block-h"><div class="ico {icon_class}">{icon}</div><h3>{title}</h3><span>{summary}</span></div>{rows}</section>"#
+    )
+}
+
+fn render_access(config: &Config, notice: Option<&Notice>) -> String {
+    let csrf = &config.csrf_token;
+    let mut push_rows = String::new();
+    let push = managed_push::list_approvals(&config.state_dir).unwrap_or_default();
+    for (id, approval) in &push {
+        let current_origin = managed_push::resolve_relative_repository(
+            &config.workspace_root,
+            &approval.repository.relative_path,
+        )
+        .ok()
+        .map(|(_, repository)| repository.origin);
+        let scope = match approval.scope {
+            ApprovalScope::Once => r#"<span class="chip gray">Next push only</span>"#,
+            ApprovalScope::Persistent => r#"<span class="chip green">Always</span>"#,
+        };
+        let origin = escape_html(&approval.repository.origin);
+        let status = match current_origin {
+            Some(current) if current == approval.repository.origin => {
+                format!("{scope} <code>{origin}</code>")
+            }
+            Some(current) => format!(
+                r#"<span class="chip red">Suspended</span> <span>approved for <code>{origin}</code>, origin is now <code>{}</code></span>"#,
+                escape_html(&current)
+            ),
+            None => format!(
+                r#"<span class="chip red">Suspended</span> <span>repository unavailable; approved for <code>{origin}</code></span>"#
+            ),
+        };
+        push_rows.push_str(&format!(
+            r#"<div class="row"><div><code>{}</code></div><div class="muted">{status}</div><div class="when">{}</div>{}</div>"#,
+            escape_html(&approval.repository.relative_path),
+            date_text(approval.approved_at),
+            revoke_button("/revoke", "id", id, csrf)
+        ));
+    }
+    if push.is_empty() {
+        push_rows.push_str(r#"<div class="none">No repositories are approved.</div>"#);
+    }
+
+    let mut fetch_rows = String::new();
+    let fetch = managed_fetch::list_approvals(&config.fetch_state_dir).unwrap_or_default();
+    for (id, approval) in &fetch {
+        let scope = match approval.scope {
+            ApprovalScope::Once => r#"<span class="chip gray">Next fetch only</span>"#,
+            ApprovalScope::Persistent => r#"<span class="chip green">Always</span>"#,
+        };
+        fetch_rows.push_str(&format!(
+            r#"<div class="row"><div><code>{}</code></div><div class="muted">{scope} read only</div><div class="when">{}</div>{}</div>"#,
+            escape_html(&approval.source.display()),
+            date_text(approval.approved_at),
+            revoke_button("/revoke-fetch", "id", id, csrf)
+        ));
+    }
+    if fetch.is_empty() {
+        fetch_rows.push_str(
+            r#"<div class="none">No private SSH repositories are approved for reading.</div>"#,
+        );
+    }
+
+    let mut grant_rows = String::new();
+    let grants = managed_gh::list_grants(&config.gh_state_dir).unwrap_or_default();
+    for (handle, grant) in &grants {
+        let scope = match &grant.scope {
+            managed_gh::GrantScope::All => "All issue and pull request actions".to_string(),
+            managed_gh::GrantScope::Commands(commands) => commands
+                .iter()
+                .map(|command| {
+                    managed_gh::COMMAND_KINDS
+                        .iter()
+                        .find(|kind| kind.command == command)
+                        .map_or(command.as_str(), |kind| kind.phrase)
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let visibility = if grant.visibility.eq_ignore_ascii_case("public") {
+            "red"
+        } else {
+            "gray"
+        };
+        grant_rows.push_str(&format!(
+            r#"<div class="row"><div><code>{}</code> <span class="chip {visibility}">{}</span></div><div class="muted">{}</div><div class="when">{}</div>{}</div>"#,
+            escape_html(&grant.repository.selector()),
+            escape_html(&grant.visibility),
+            escape_html(&scope),
+            date_text(grant.granted_at),
+            revoke_button("/revoke-gh-grant", "handle", handle, csrf)
+        ));
+    }
+    if grants.is_empty() {
+        grant_rows
+            .push_str(r#"<div class="none">No GitHub repositories are always allowed.</div>"#);
+    }
+
+    let mut approval_rows = String::new();
+    let approvals = managed_gh::list_approvals(&config.gh_state_dir).unwrap_or_default();
+    for (handle, approval) in &approvals {
+        let display = gh_display(&approval.action, &approval.context);
+        let mut operation = display.as_ref().map_or_else(
+            || "Cannot be displayed".to_string(),
+            |display| escape_html(&display.operation),
+        );
+        if let Some(head_sha) = &approval.action.head_sha {
+            operation.push_str(&format!(
+                " <code>{}</code>",
+                escape_html(head_sha.get(..12).unwrap_or(head_sha))
+            ));
+        }
+        let values = display.as_ref().map_or_else(String::new, |display| {
+            format!(
+                r#"<details><summary>Show what was approved</summary><p class="note">Requested from <code>{}</code>, approved {}</p>{}</details>"#,
+                escape_html(&visible_context(&approval.context.requested_from)),
+                ago_text(approval.approved_at),
+                gh_review(&approval.action, &approval.context, display)
+            )
+        });
+        approval_rows.push_str(&format!(
+            r#"<div class="row"><div><code>{}</code></div><div class="muted">{operation}</div><div class="when"><span class="chip amber">{} left</span></div>{}{values}</div>"#,
+            escape_html(&approval.action.repository.selector()),
+            duration_text(managed_gh::remaining_seconds(approval)),
+            revoke_button("/revoke-gh", "handle", handle, csrf)
+        ));
+    }
+    if approvals.is_empty() {
+        approval_rows.push_str(r#"<div class="none">No unused GitHub action approvals.</div>"#);
+    }
+
+    let main = format!(
+        r#"<main class="page">{}<div class="page-h"><h1>Access</h1><p>Everything the sandbox may do without asking you again. Revoking takes effect on its next attempt.</p></div>{}{}{}{}</main>"#,
+        flash_html(notice),
+        access_block(
+            "push",
+            portal_ui::ICON_PUSH,
+            "Git push",
+            &plural(push.len(), "repository", "repositories"),
+            &push_rows
+        ),
+        access_block(
+            "fetch",
+            portal_ui::ICON_FETCH,
+            "Private fetch sources",
+            &format!("{} · read only", plural(fetch.len(), "source", "sources")),
+            &fetch_rows
+        ),
+        access_block(
+            "gh",
+            portal_ui::ICON_GH,
+            "Always-allowed GitHub repositories",
+            &plural(grants.len(), "repository", "repositories"),
+            &grant_rows
+        ),
+        access_block(
+            "gh",
+            portal_ui::ICON_GH,
+            "Unused one-time GitHub approvals",
+            &format!(
+                "expire {} minutes after approval",
+                managed_gh::APPROVAL_TTL / 60
+            ),
+            &approval_rows
+        ),
+    );
+    app_page(
+        config,
+        Nav::Access,
+        pending_requests(config).len(),
+        "Access",
+        &main,
+    )
+}
+
+fn render_pairing_controls(csrf_token: &str, pair_url: Option<&str>) -> String {
+    let result = pair_url
+        .map(|url| {
+            let url = escape_html(url);
+            format!(
+                r#"<label class="field">Pair another client<input class="pair-url" type="url" value="{url}" readonly><small>Copy this link to the client you want to pair. Creating or copying it does not pair this browser. The link must use an address that client can reach.</small></label><a class="btn" href="{url}">Pair this browser ↗</a>"#
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"<p>Create a five-minute, single-use client credential.</p><form method="post" action="/pair">{}<button class="btn primary">Create pairing link</button></form>{result}"#,
+        hidden("csrf", csrf_token)
+    )
+}
+
+fn render_restart_controls(csrf_token: &str) -> String {
+    format!(
+        r#"<p>Stop the current T3 container. When this launcher is supervised with a restart policy, the service starts a fresh sandbox. Pending requests and approvals are kept on the host; you unlock the portal again afterwards.</p><details class="danger-zone"><summary>Restart sandbox…</summary><p>Everything running in the container stops.</p><form method="post" action="/restart">{}<button class="btn danger">Confirm restart</button></form></details>"#,
+        hidden("csrf", csrf_token)
+    )
+}
+
+fn render_system(config: &Config, pair_url: Option<&str>, notice: Option<&Notice>) -> String {
+    let main = format!(
+        r#"<main class="page">{}<div class="page-h"><h1>System</h1><p>Client pairing, the live display and the sandbox itself.</p></div><section class="card block"><div class="block-h"><h3>Client pairing</h3></div><div class="block-b">{}</div></section><section class="card block"><div class="block-h"><h3>Live display and usage</h3></div><a class="linkrow" href="/display" target="_blank" rel="noopener"><b>Display ↗</b><span>View and control the sandbox's virtual X display in this browser.</span></a><a class="linkrow" href="/usage" target="_blank" rel="noopener"><b>Usage ↗</b><span>Public plan usage dashboard.</span></a></section><section class="card block"><div class="block-h"><h3>Sandbox lifecycle</h3></div><div class="block-b">{}</div></section></main>"#,
+        flash_html(notice),
+        render_pairing_controls(&config.csrf_token, pair_url),
+        render_restart_controls(&config.csrf_token),
+    );
+    app_page(
+        config,
+        Nav::System,
+        pending_requests(config).len(),
+        "System",
+        &main,
+    )
 }
 
 const DISPLAY_PAGE: &str = r#"<!doctype html>
@@ -1027,125 +2226,6 @@ fn send_novnc_asset(stream: &mut TcpStream, path: &str) {
     );
     let _ = stream.write_all(headers.as_bytes());
     let _ = stream.write_all(contents);
-}
-
-fn render_pairing_controls(csrf_token: &str, pair_url: Option<&str>) -> String {
-    let result = pair_url
-        .map(|url| {
-            let url = escape_html(url);
-            format!(
-                r#"<div class="pair-result"><label>Pair another client<input class="pair-url" type="url" value="{url}" readonly></label><small>Copy this link to the client you want to pair. Creating or copying it does not pair this browser. The link must use an address that client can reach.</small><p><a class="pair" href="{url}">Pair this browser ↗</a></p></div>"#
-            )
-        })
-        .unwrap_or_default();
-    format!(
-        r#"<section><h2>Client pairing</h2><p>Create a five-minute, single-use client credential.</p><form method="post" action="/pair"><input type="hidden" name="csrf" value="{}"><button>Create pairing link</button></form>{result}</section>"#,
-        escape_html(csrf_token)
-    )
-}
-
-fn render_restart_controls(csrf_token: &str) -> String {
-    format!(
-        r#"<section><h2>Sandbox lifecycle</h2><p>Stop the current T3 container. When this launcher is supervised with a restart policy, the service starts a fresh sandbox.</p><details><summary>Restart sandbox</summary><form method="post" action="/restart"><input type="hidden" name="csrf" value="{}"><button class="danger">Confirm restart</button></form></details></section>"#,
-        escape_html(csrf_token)
-    )
-}
-
-fn render_push_controls(config: &Config) -> String {
-    let candidates = managed_push::list_candidates(&config.state_dir).unwrap_or_default();
-    let approvals = managed_push::list_approvals(&config.state_dir).unwrap_or_default();
-    let mut html = String::from("<section><h2>Pending push approvals</h2>");
-    if candidates.is_empty() {
-        html.push_str(
-            "<p>No repositories are waiting. A denied push will appear here automatically.</p>",
-        );
-    }
-    for (id, candidate) in candidates.into_iter().take(100) {
-        let repository = candidate.repository;
-        let changed = candidate
-            .previously_approved_origin
-            .as_ref()
-            .map(|previous| {
-                format!(
-                    "<div class=\"changed\">Previously approved: <code>{}</code></div>",
-                    escape_html(previous)
-                )
-            })
-            .unwrap_or_default();
-        html.push_str(&format!(
-            r#"<div class="repo"><div class="meta"><span>Repository</span><strong>{}</strong><span>Origin</span><code>{}</code><span>Branch</span><code>{}</code></div>{}<form method="post" action="/approve"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button name="scope" value="once">Approve once</button><button name="scope" value="persistent">Always allow</button></form><form method="post" action="/dismiss"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button class="secondary">Dismiss</button></form></div>"#,
-            escape_html(&repository.relative_path), escape_html(&repository.origin), escape_html(repository.branch.as_deref().unwrap_or("detached HEAD")), changed, config.csrf_token, id, config.csrf_token, id
-        ));
-    }
-    html.push_str("</section><section><h2>Approved repositories</h2>");
-    if approvals.is_empty() {
-        html.push_str("<p>No repositories are approved.</p>");
-    }
-    for (id, approval) in approvals {
-        let scope = match approval.scope {
-            ApprovalScope::Once => "next push only",
-            ApprovalScope::Persistent => "persistent",
-        };
-        let current_origin = managed_push::resolve_relative_repository(
-            &config.workspace_root,
-            &approval.repository.relative_path,
-        )
-        .ok()
-        .map(|(_, repository)| repository.origin);
-        let status = match current_origin {
-            Some(current) if current == approval.repository.origin => scope.to_string(),
-            Some(current) => format!("suspended — origin is now {}", escape_html(&current)),
-            None => "suspended — repository unavailable".to_string(),
-        };
-        html.push_str(&format!(
-            r#"<div class="repo"><div class="meta"><span>Repository</span><strong>{}</strong><span>Origin</span><code>{}</code><span>Status</span><span>{}</span></div><form method="post" action="/revoke"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button class="danger">Revoke</button></form></div>"#,
-            escape_html(&approval.repository.relative_path), escape_html(&approval.repository.origin), status, config.csrf_token, id
-        ));
-    }
-    html.push_str("</section>");
-    html
-}
-
-fn render_fetch_controls(config: &Config) -> String {
-    let candidates = managed_fetch::list_candidates(&config.fetch_state_dir).unwrap_or_default();
-    let approvals = managed_fetch::list_approvals(&config.fetch_state_dir).unwrap_or_default();
-    let mut html = String::from("<section><h2>Pending fetch approvals</h2>");
-    html.push_str("<p>Approval grants this sandbox read access to the exact SSH repository. The requesting checkout is shown for context and is not an isolation boundary inside a shared container.</p>");
-    if candidates.is_empty() {
-        html.push_str(
-            "<p>No repositories are waiting. A denied authenticated SSH fetch will appear here automatically.</p>",
-        );
-    }
-    for (id, candidate) in candidates {
-        html.push_str(&format!(
-            r#"<div class="repo"><div class="meta"><span>Source</span><code>{}</code><span>Requested from</span><strong>{}</strong></div><form method="post" action="/approve-fetch"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button name="scope" value="once">Approve once</button><button name="scope" value="persistent">Always allow</button></form><form method="post" action="/dismiss-fetch"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button class="secondary">Dismiss</button></form></div>"#,
-            escape_html(&candidate.source.display()),
-            escape_html(&candidate.requested_from),
-            config.csrf_token,
-            id,
-            config.csrf_token,
-            id
-        ));
-    }
-    html.push_str("</section><section><h2>Approved fetch sources</h2>");
-    if approvals.is_empty() {
-        html.push_str("<p>No private SSH repositories are approved for reading.</p>");
-    }
-    for (id, approval) in approvals {
-        let scope = match approval.scope {
-            ApprovalScope::Once => "next fetch only",
-            ApprovalScope::Persistent => "persistent",
-        };
-        html.push_str(&format!(
-            r#"<div class="repo"><div class="meta"><span>Source</span><code>{}</code><span>Status</span><span>{}</span><span>Capability</span><span>read only</span></div><form method="post" action="/revoke-fetch"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><button class="danger">Revoke</button></form></div>"#,
-            escape_html(&approval.source.display()),
-            scope,
-            config.csrf_token,
-            id
-        ));
-    }
-    html.push_str("</section>");
-    html
 }
 
 fn visible_context(value: &str) -> String {
@@ -1285,289 +2365,6 @@ fn gh_display<'a>(
     Some(GhDisplay { operation, values })
 }
 
-fn gh_value_block(flag: &str, value: &str) -> String {
-    let label = match flag {
-        "title" => "Title",
-        "body" => "Body",
-        "comment" => "Comment",
-        "reason" => "Reason",
-        "head" => "Head",
-        "base" => "Base",
-        _ => "Value",
-    };
-    let lines: Vec<&str> = value.split('\n').collect();
-    let mut rendered = String::new();
-    for (index, line) in lines.iter().enumerate() {
-        let trailing = line
-            .chars()
-            .rev()
-            .take_while(|character| *character == ' ')
-            .count();
-        let visible_end = line.len() - trailing;
-        let mut content = String::new();
-        for character in line[..visible_end].chars() {
-            if character == '\t' {
-                content.push_str("<span class=whitespace>→</span>\t");
-            } else {
-                content.push_str(&escape_html(&character.to_string()));
-            }
-        }
-        for _ in 0..trailing {
-            content.push_str("<span class=whitespace>·</span>");
-        }
-        rendered.push_str(&format!("<span><b>{}</b>{}</span>", index + 1, content));
-    }
-    format!(
-        r#"<div class="gh-value"><strong>{}</strong><small>{} bytes · {} lines</small><pre>{}</pre></div>"#,
-        label,
-        value.len(),
-        lines.len(),
-        rendered
-    )
-}
-
-fn gh_bare_flag(flag: &str) -> String {
-    let label = match flag {
-        "draft" => "Draft",
-        "undo" => "Undo",
-        _ => "Flag",
-    };
-    format!(r#"<div class="gh-value"><strong>{label}</strong><small>enabled</small></div>"#)
-}
-
-fn render_gh_grant_controls(
-    handle: &str,
-    action: &managed_gh::Action,
-    context: &managed_gh::Context,
-    csrf: &str,
-) -> String {
-    let Some(kind) = managed_gh::command_kind(action) else {
-        return String::new();
-    };
-    let repository = action.repository.selector();
-    let public_warning = if context.repository_visibility.eq_ignore_ascii_case("public") {
-        " This repository is public."
-    } else {
-        ""
-    };
-    format!(
-        r#"<details><summary>Always allow…</summary><p>Future matching commands from this sandbox to {} will run without review. The agent chooses the text that is published under your account.{}</p><form method="post" action="/grant-gh"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="handle" value="{}"><button name="scope" value="command">Always allow {} in {}</button><button name="scope" value="repository">Always allow all issue and pull request actions in {}</button></form></details>"#,
-        escape_html(&repository),
-        public_warning,
-        escape_html(csrf),
-        escape_html(handle),
-        escape_html(kind.phrase),
-        escape_html(&repository),
-        escape_html(&repository)
-    )
-}
-
-fn render_gh_action(
-    handle: &str,
-    action: &managed_gh::Action,
-    context: &managed_gh::Context,
-    csrf: &str,
-    approved: bool,
-    remaining: u64,
-) -> String {
-    let repository = action.repository.selector();
-    let Some(display) = gh_display(action, context) else {
-        let action = if approved {
-            "/revoke-gh"
-        } else {
-            "/dismiss-gh"
-        };
-        let label = if approved { "Revoke" } else { "Dismiss" };
-        return format!(
-            r#"<div class="repo gh-action"><strong>Cannot be displayed</strong><form method="post" action="{action}"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="handle" value="{}"><button class="secondary">{label}</button></form></div>"#,
-            escape_html(csrf),
-            escape_html(handle)
-        );
-    };
-    let operation = display.operation;
-    let public = context.repository_visibility.eq_ignore_ascii_case("public");
-    let visibility_class = if public { "public" } else { "" };
-    let mut meta = format!(
-        r#"<div class="meta"><span>Repository</span><strong>{}</strong><span>Visibility</span><strong class="{}">{}</strong><span>Action</span><strong>{}</strong>"#,
-        escape_html(&repository),
-        visibility_class,
-        escape_html(&context.repository_visibility),
-        escape_html(&operation)
-    );
-    if let Some(item) = &action.item {
-        meta.push_str(&format!(
-            "<span>Item</span><span>#{} · {} · {}</span>",
-            item.number,
-            escape_html(context.item_state.as_deref().unwrap_or("unknown")),
-            escape_html(&visible_context(
-                context.item_title.as_deref().unwrap_or("untitled")
-            ))
-        ));
-    }
-    if let Some(head_sha) = &action.head_sha {
-        meta.push_str(&format!(
-            "<span>Head commit when requested</span><code>{}</code>",
-            escape_html(head_sha)
-        ));
-    }
-    if let Some(commits) = context.commits {
-        meta.push_str(&format!("<span>Commits</span><span>{commits}</span>"));
-    }
-    if let Some(files) = context.changed_files {
-        meta.push_str(&format!("<span>Changed files</span><span>{files}</span>"));
-    }
-    meta.push_str(&format!(
-        "<span>Requested from</span><code>{}</code>",
-        escape_html(&visible_context(&context.requested_from))
-    ));
-    if approved {
-        meta.push_str(&format!(
-            "<span>Remaining</span><span>{}m {}s</span>",
-            remaining / 60,
-            remaining % 60
-        ));
-    } else {
-        let age = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .saturating_sub(context.requested_at);
-        meta.push_str(&format!(
-            "<span>Age</span><span>{}m {}s</span>",
-            age / 60,
-            age % 60
-        ));
-    }
-    meta.push_str("</div>");
-    let branch_notice = if action.args.first().map(String::as_str) == Some("pr")
-        && action.args.get(1).map(String::as_str) == Some("create")
-    {
-        let head = display
-            .values
-            .iter()
-            .find(|(flag, _)| *flag == "head")
-            .and_then(|(_, value)| *value)
-            .expect("displayable pr create has a head");
-        format!(
-            "<p>The pull request follows branch {}; commits pushed to it later, including between approval and creation, become part of it.</p>",
-            escape_html(head)
-        )
-    } else {
-        String::new()
-    };
-    let values = display
-        .values
-        .into_iter()
-        .map(|(flag, value)| {
-            value.map_or_else(|| gh_bare_flag(flag), |value| gh_value_block(flag, value))
-        })
-        .collect::<String>();
-    let footer = if approved {
-        format!(
-            r#"<div class="gh-action-footer"><strong>{} · {}</strong><form method="post" action="/revoke-gh"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="handle" value="{}"><button class="danger">Revoke</button></form></div>"#,
-            escape_html(&repository),
-            escape_html(&operation),
-            escape_html(csrf),
-            escape_html(handle)
-        )
-    } else {
-        format!(
-            r#"<div class="gh-action-footer"><strong>{} · {}</strong><form method="post" action="/approve-gh"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="handle" value="{}"><button>Approve once</button></form><form method="post" action="/dismiss-gh"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="handle" value="{}"><button class="secondary">Dismiss</button></form></div>"#,
-            escape_html(&repository),
-            escape_html(&operation),
-            escape_html(csrf),
-            escape_html(handle),
-            escape_html(csrf),
-            escape_html(handle)
-        )
-    };
-    let grant_controls = if approved {
-        String::new()
-    } else {
-        render_gh_grant_controls(handle, action, context, csrf)
-    };
-    format!(
-        r#"<div class="repo gh-action">{meta}{branch_notice}{values}{footer}{grant_controls}</div>"#
-    )
-}
-
-fn render_gh_grants(config: &Config) -> String {
-    let grants = managed_gh::list_grants(&config.gh_state_dir).unwrap_or_default();
-    let mut html = String::from("<section><h2>Always-allowed GitHub repositories</h2>");
-    if grants.is_empty() {
-        html.push_str("<p>No GitHub repositories are always allowed.</p>");
-    }
-    for (handle, grant) in grants {
-        let scope = match &grant.scope {
-            managed_gh::GrantScope::All => "All issue and pull request actions".to_string(),
-            managed_gh::GrantScope::Commands(commands) => commands
-                .iter()
-                .map(|command| {
-                    managed_gh::COMMAND_KINDS
-                        .iter()
-                        .find(|kind| kind.command == command)
-                        .map_or(command.as_str(), |kind| kind.phrase)
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-        };
-        html.push_str(&format!(
-            r#"<div class="repo"><div class="meta"><span>Repository</span><strong>{}</strong><span>Visibility</span><strong>{}</strong><span>Scope</span><span>{}</span><span>Granted</span><span>{}</span></div><form method="post" action="/revoke-gh-grant"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="handle" value="{}"><button class="danger">Revoke</button></form></div>"#,
-            escape_html(&grant.repository.selector()),
-            escape_html(&grant.visibility),
-            escape_html(&scope),
-            escape_html(&usage_api::format_epoch(
-                i64::try_from(grant.granted_at).unwrap_or(i64::MAX)
-            )),
-            escape_html(&config.csrf_token),
-            escape_html(&handle)
-        ));
-    }
-    html.push_str("</section>");
-    html
-}
-
-fn render_gh_controls(config: &Config) -> String {
-    let candidates = {
-        let _guard = config.gh_grant_lock.lock().unwrap();
-        managed_gh::remove_covered_candidates(&config.gh_state_dir)
-            .and_then(|()| managed_gh::list_candidates(&config.gh_state_dir))
-            .unwrap_or_default()
-    };
-    let approvals = managed_gh::list_approvals(&config.gh_state_dir).unwrap_or_default();
-    let mut html = String::from("<section><h2>Pending GitHub actions</h2>");
-    if candidates.is_empty() {
-        html.push_str("<p>No cross-repository GitHub actions are waiting.</p>");
-    }
-    for (handle, candidate) in candidates {
-        html.push_str(&render_gh_action(
-            &handle,
-            &candidate.action,
-            &candidate.context,
-            &config.csrf_token,
-            false,
-            0,
-        ));
-    }
-    html.push_str("</section><section><h2>Approved GitHub actions</h2>");
-    if approvals.is_empty() {
-        html.push_str("<p>No unused GitHub action approvals.</p>");
-    }
-    for (handle, approval) in approvals {
-        html.push_str(&render_gh_action(
-            &handle,
-            &approval.action,
-            &approval.context,
-            &config.csrf_token,
-            true,
-            managed_gh::remaining_seconds(&approval),
-        ));
-    }
-    html.push_str("</section>");
-    html.push_str(&render_gh_grants(config));
-    html
-}
-
 fn render_error(title: &str, message: &str) -> String {
     format!(
         "<!doctype html><meta charset=utf-8><title>{}</title><h1>{}</h1><p>{}</p>",
@@ -1622,9 +2419,11 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
     reader
         .read_exact(&mut body)
         .map_err(|error| error.to_string())?;
+    let (path, query) = path.split_once('?').unwrap_or((&path, ""));
     Ok(Request {
         method,
-        path: path.split('?').next().unwrap_or(&path).to_string(),
+        query: query.to_string(),
+        path: path.to_string(),
         headers,
         body,
         peer,
@@ -1695,7 +2494,7 @@ fn send_html(stream: &mut TcpStream, status: u16, body: &str, extra_headers: &[(
         _ => "Error",
     };
     let mut headers = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
         body.len()
     );
     for (name, value) in extra_headers {
@@ -1728,6 +2527,16 @@ fn send_usage_dashboard(stream: &mut TcpStream) {
     let body = usage_dashboard::PAGE;
     let headers = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+}
+
+fn send_portal_script(stream: &mut TcpStream) {
+    let body = portal_ui::SCRIPT;
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(headers.as_bytes());
@@ -1847,6 +2656,202 @@ mod tests {
     }
 
     #[test]
+    fn login_only_continues_to_portal_pages() {
+        assert_eq!(
+            login_target(Some("/r/gh-0123456789abcdef")),
+            "/r/gh-0123456789abcdef"
+        );
+        assert_eq!(login_target(Some("/access")), "/access");
+        for rejected in [
+            None,
+            Some("//evil.test/r/gh-0123456789abcdef"),
+            Some("https://evil.test/"),
+            Some("/r/gh-0123"),
+            Some("/r/gh-0123456789ABCDEF"),
+            Some("/r/ssh-0123456789abcdef"),
+            Some("/r/gh-0123456789abcdef/extra"),
+            Some("/display"),
+        ] {
+            assert_eq!(login_target(rejected), "/", "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn locked_deep_link_unlocks_straight_to_the_request() {
+        let workspace = temporary_workspace("deep-link");
+        fs::create_dir_all(&workspace).unwrap();
+        let config = test_config(&workspace);
+
+        let locked = make_request(
+            &config,
+            "GET /r/gh-0123456789abcdef HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(locked.starts_with("HTTP/1.1 200 OK"));
+        assert!(locked.contains("Unlock to review this request"));
+        assert!(locked.contains(r#"name="next" value="/r/gh-0123456789abcdef""#));
+        assert!(locked.contains("script-src 'self'"));
+
+        let login = |next: &str| {
+            let body = format!("pin=1234&next={next}");
+            make_request(
+                &config,
+                &format!(
+                    "POST /login HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        let unlocked = login("%2Fr%2Fgh-0123456789abcdef");
+        assert!(unlocked.contains("Location: /r/gh-0123456789abcdef\r\n"));
+        assert!(unlocked.contains("SameSite=Lax"));
+        assert!(login("%2F%2Fevil.test").contains("Location: /\r\n"));
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn decisions_continue_with_the_next_request_and_keep_notices_per_redirect() {
+        let workspace = temporary_workspace("decision-flow");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut config = test_config(&workspace);
+        config.fetch_state_dir = managed_fetch::prepare_state_dir(&config.fetch_state_dir).unwrap();
+        for repository in ["org/first.git", "org/second.git"] {
+            let source = managed_fetch::Source {
+                host: "github.com".to_string(),
+                repository: repository.to_string(),
+            };
+            managed_fetch::record_candidate(&config.fetch_state_dir, &source, "app").unwrap();
+        }
+        let order: Vec<RequestKey> = pending_requests(&config).iter().map(Pending::key).collect();
+        let approve = |key: &RequestKey| {
+            let body = format!("csrf=csrf&scope=once&id={}", key.id);
+            let response = make_request(
+                &config,
+                &format!(
+                    "POST /approve-fetch HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            );
+            assert!(response.starts_with("HTTP/1.1 303 See Other"));
+            response
+                .lines()
+                .find_map(|line| line.strip_prefix("Location: "))
+                .unwrap()
+                .to_string()
+        };
+        let page = |path: &str| {
+            make_request(
+                &config,
+                &format!(
+                    "GET {path} HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n"
+                ),
+            )
+        };
+        let notice = |key: &RequestKey| {
+            let source = managed_fetch::list_candidates(&config.fetch_state_dir)
+                .unwrap()
+                .into_iter()
+                .find(|(id, _)| *id == key.id)
+                .unwrap()
+                .1
+                .source
+                .display();
+            format!("Approved one fetch from {source}.")
+        };
+        let (first_notice, second_notice) = (notice(&order[0]), notice(&order[1]));
+
+        let first = approve(&order[0]);
+        assert!(first.starts_with(&format!("{}?n=", order[1].path())));
+        let second = approve(&order[1]);
+        assert!(second.starts_with("/?n="));
+
+        let second_page = page(&second);
+        assert!(second_page.contains(&second_notice));
+        assert!(!second_page.contains(&first_notice));
+        let first_page = page(&first);
+        assert!(first_page.contains(&first_notice));
+        assert!(first_page.contains("This request is no longer pending"));
+        assert!(!page(&first).contains(&first_notice));
+        assert!(!page("/?n=../../etc/passwd").contains(r#"class="flash"#));
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn lock_requires_the_csrf_token() {
+        let workspace = temporary_workspace("lock-csrf");
+        fs::create_dir_all(&workspace).unwrap();
+        let config = test_config(&workspace);
+        let lock = |body: &str| {
+            make_request(
+                &config,
+                &format!(
+                    "POST /lock HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        let rejected = lock("csrf=wrong");
+        assert!(rejected.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(!rejected.contains("Set-Cookie"));
+        let locked = lock("csrf=csrf");
+        assert!(locked.starts_with("HTTP/1.1 303 See Other"));
+        assert!(
+            locked.contains(
+                "Set-Cookie: t3_admin_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+            )
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn unused_gh_approvals_keep_their_review_context() {
+        let workspace = temporary_workspace("gh-approval-context");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut config = test_config(&workspace);
+        config.gh_state_dir = managed_gh::prepare_state_dir(&config.gh_state_dir).unwrap();
+        let mut context = gh_context();
+        context.commits = Some(2);
+        context.changed_files = Some(3);
+        for head_sha in [
+            "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222",
+        ] {
+            let action = managed_gh::Action {
+                repository: managed_gh::Repository {
+                    host: "github.com".to_string(),
+                    owner: "other".to_string(),
+                    name: "project".to_string(),
+                },
+                repository_id: 42,
+                item: None,
+                head_sha: Some(head_sha.to_string()),
+                args: vec![
+                    "pr".to_string(),
+                    "create".to_string(),
+                    "--title=Same".to_string(),
+                    "--body=Same".to_string(),
+                    "--head=topic".to_string(),
+                    "--base=main".to_string(),
+                ],
+            };
+            let handle =
+                managed_gh::record_candidate(&config.gh_state_dir, &action, &context).unwrap();
+            managed_gh::approve(&config.gh_state_dir, &handle).unwrap();
+        }
+        let html = render_access(&config, None);
+        assert!(html.contains("<code>1111111111111111111111111111111111111111</code>"));
+        assert!(html.contains("<code>2222222222222222222222222222222222222222</code>"));
+        assert_eq!(
+            html.matches("The pull request follows branch topic")
+                .count(),
+            2
+        );
+        assert_eq!(html.matches("<b>Public repository.</b>").count(), 2);
+        assert!(html.contains("<span>Changed files</span><strong>3</strong>"));
+        assert!(html.contains("Requested from <code>services/&lt;api&gt;</code>"));
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn manages_fetch_approvals() {
         let workspace = temporary_workspace("fetch-approval");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -1859,8 +2864,8 @@ mod tests {
         let id = managed_fetch::record_candidate(&config.fetch_state_dir, &source, "services/api")
             .unwrap();
 
-        let html = render_page(&config, false, None, None);
-        assert!(html.contains("Pending fetch approvals"));
+        let html = render_inbox(&config, None, None);
+        assert!(html.contains("Read a private repository"));
         assert!(html.contains("git@github.com:org/private.git"));
         assert!(html.contains("services/api"));
 
@@ -1869,8 +2874,8 @@ mod tests {
             ("scope".to_string(), "persistent".to_string()),
         ]);
         approve_fetch_candidate(&config, &form).unwrap();
-        let html = render_page(&config, false, None, None);
-        assert!(html.contains("Capability"));
+        let html = render_access(&config, None);
+        assert!(html.contains("Private fetch sources"));
         assert!(html.contains("read only"));
         assert!(
             managed_fetch::read_approval(&config.fetch_state_dir, &source)
@@ -1997,7 +3002,7 @@ mod tests {
             &gh_context(),
         )
         .unwrap();
-        let html = render_page(&config, false, None, None);
+        let html = render_inbox(&config, None, None);
         assert!(!html.contains("<script>alert('x')</script>"));
         assert!(html.contains("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&amp;"));
         assert!(html.contains("Hostile &lt;title&gt;"));
@@ -2015,7 +3020,7 @@ mod tests {
         action.args.push("--unaccounted".to_string());
         let handle =
             managed_gh::record_candidate(&config.gh_state_dir, &action, &gh_context()).unwrap();
-        let html = render_gh_action(&handle, &action, &gh_context(), "csrf", false, 0);
+        let html = render_gh_detail(&handle, &action, &gh_context(), "csrf", "");
         assert!(html.contains("Cannot be displayed"));
         assert!(!html.contains("Approve once"));
         assert!(html.contains("Dismiss"));
@@ -2056,7 +3061,7 @@ mod tests {
         action.repository.host = "github.com<script>".to_string();
         action.repository.owner = "other&owner".to_string();
         action.repository.name = "project\"name".to_string();
-        let html = render_gh_action("0123456789abcdef", &action, &gh_context(), "csrf", false, 0);
+        let html = render_gh_detail("0123456789abcdef", &action, &gh_context(), "csrf", "");
         let escaped = "github.com&lt;script&gt;/other&amp;owner/project&quot;name";
         assert!(html.contains(&format!(
             "Future matching commands from this sandbox to {escaped} will run without review."
@@ -2087,7 +3092,7 @@ mod tests {
         )
         .unwrap();
 
-        let html = render_page(&config, false, None, None);
+        let html = render_access(&config, None);
         assert!(html.contains("Always-allowed GitHub repositories"));
         assert!(html.contains("github.com/other/project"));
         assert!(html.contains("issue comments"));
@@ -2134,7 +3139,7 @@ mod tests {
             &gh_context(),
         )
         .unwrap();
-        let html = render_gh_controls(&config);
+        let html = render_inbox(&config, None, None);
         assert!(!html.contains("covered-render-leftover"));
         assert!(
             managed_gh::list_candidates(&config.gh_state_dir)
@@ -2201,13 +3206,13 @@ mod tests {
         let mut context = gh_context();
         context.commits = Some(2);
         context.changed_files = Some(3);
-        let html = render_gh_action("0123456789abcdef", &action, &context, "csrf", false, 0);
+        let html = render_gh_detail("0123456789abcdef", &action, &context, "csrf", "");
         assert!(html.contains("Open pull request from topic into main as draft"));
         assert!(html.contains("Head commit when requested"));
         assert!(html.contains(
             "The pull request follows branch topic; commits pushed to it later, including between approval and creation, become part of it."
         ));
-        assert!(html.contains("<strong>Draft</strong><small>enabled</small>"));
+        assert!(html.contains("<b>Draft</b><span>enabled</span>"));
         assert!(html.contains("class=whitespace>→"));
         assert!(html.contains("class=whitespace>·"));
     }
@@ -2489,8 +3494,8 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         let (config, restart_rx) = test_config_with_restart(&workspace);
 
-        let locked = render_page(&config, true, None, None);
-        let unlocked = render_page(&config, false, None, None);
+        let locked = render_lock("/", None);
+        let unlocked = render_system(&config, None, None);
         assert!(!locked.contains("action=\"/restart\""));
         assert!(unlocked.contains("action=\"/restart\""));
         assert!(unlocked.contains("Confirm restart"));
@@ -2578,6 +3583,7 @@ mod tests {
             restart_queued: AtomicBool::new(false),
             gh_grant_lock: Mutex::new(()),
             failed_logins: Mutex::new(HashMap::new()),
+            notices: Mutex::new(HashMap::new()),
             display_command: echo_display_command,
         };
         (config, restart_rx)

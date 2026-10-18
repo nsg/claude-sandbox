@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_PENDING_CANDIDATES: usize = 100;
 const PENDING_TTL: u64 = 24 * 60 * 60;
-const APPROVAL_TTL: u64 = 15 * 60;
+pub const APPROVAL_TTL: u64 = 15 * 60;
 const CLAIM_TTL: u64 = 60;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
