@@ -483,7 +483,12 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
     }
 
     if request.method == "GET" && request.path == "/assets/portal.js" {
-        send_portal_script(&mut stream);
+        send_script(&mut stream, portal_ui::SCRIPT);
+        return;
+    }
+
+    if request.method == "GET" && request.path == "/assets/usage.js" {
+        send_script(&mut stream, usage_dashboard::SCRIPT);
         return;
     }
 
@@ -505,7 +510,16 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
         if !is_authorized(&request, config) {
             redirect(&mut stream, "/");
         } else {
-            send_display_page(&mut stream);
+            send_display_page(&mut stream, config);
+        }
+        return;
+    }
+
+    if request.method == "GET" && request.path == "/display/app.js" {
+        if !is_authorized(&request, config) {
+            redirect(&mut stream, "/");
+        } else {
+            send_script(&mut stream, DISPLAY_SCRIPT);
         }
         return;
     }
@@ -2145,39 +2159,47 @@ fn render_system(config: &Config, pair_url: Option<&str>, notice: Option<&Notice
     )
 }
 
-const DISPLAY_PAGE: &str = r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>T3 Code · Display</title><style>
-:root{--ink:#f4f1e8;--muted:#a4a49b;--line:#353630;--acid:#d8ff4f;--danger:#ff8c7e;--bg:#11120f}*{box-sizing:border-box}body{margin:0;min-height:100vh;color:var(--ink);background:radial-gradient(circle at 85% 10%,#293315 0,transparent 30%),var(--bg);font:14px/1.55 "IBM Plex Mono","Courier New",monospace}main{width:min(1400px,calc(100% - 32px));margin:auto;padding:24px 0}header{border-top:1px solid var(--acid);padding-top:16px;margin-bottom:20px;display:flex;align-items:baseline;justify-content:space-between;gap:20px}h1{font:400 clamp(32px,6vw,56px)/.95 Georgia,serif;letter-spacing:-.05em;margin:12px 0}a{color:var(--ink);text-underline-offset:4px}.toolbar{display:flex;align-items:center;gap:18px;flex-wrap:wrap;border:1px solid var(--line);padding:12px 14px;background:#11120fd9}.toolbar label{display:flex;align-items:center;gap:7px}.status{color:var(--muted);margin-right:auto}.status[data-connected="true"]{color:var(--acid)}button{border:0;background:var(--acid);color:#15170d;padding:10px 13px;font:700 11px/1 monospace;text-transform:uppercase;cursor:pointer}#screen{width:100%;height:calc(100vh - 190px);min-height:360px;margin-top:14px;border:1px solid var(--line);background:var(--bg);overflow:hidden}#screen canvas{outline:none}
-</style></head><body><main><header><div><small>Private control plane</small><h1>Live display.</h1></div><a href="/">← Admin</a></header><div class="toolbar"><span id="status" class="status">Disconnected</span><label><input id="view-only" type="checkbox"> View only</label><label><input id="fit" type="checkbox" checked> Fit to window</label><button id="reconnect" type="button">Reconnect</button></div><div id="screen"></div></main><script type="module">
-import RFB from '/display/novnc/core/rfb.js';
+const DISPLAY_SCRIPT: &str = r#"import RFB from '/display/novnc/core/rfb.js';
 const screen = document.querySelector('#screen');
 const status = document.querySelector('#status');
+const note = document.querySelector('#screen-note');
 const viewOnly = document.querySelector('#view-only');
 const fit = document.querySelector('#fit');
 const socketUrl = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/display/socket';
 let rfb;
 let reconnectRequested = false;
-function updateStatus(message, connected = false) {
-  status.textContent = message;
-  status.dataset.connected = String(connected);
+function updateStatus(state, message, detail) {
+  status.dataset.state = state;
+  status.firstChild.textContent = message;
+  if (state === 'connected') {
+    note.hidden = true;
+  } else {
+    note.hidden = false;
+    note.querySelector('b').textContent = message;
+    note.querySelector('span').textContent = detail;
+  }
 }
 function connect() {
-  updateStatus('Connecting…');
+  updateStatus('connecting', 'Connecting…', 'Starting a view of the sandbox display.');
   const connection = new RFB(screen, socketUrl);
   rfb = connection;
   connection.viewOnly = viewOnly.checked;
   connection.scaleViewport = fit.checked;
   connection.focusOnClick = true;
   connection.resizeSession = false;
-  connection.background = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  connection.background = getComputedStyle(document.documentElement).getPropertyValue('--screen-bg').trim();
   connection.addEventListener('connect', () => {
-    updateStatus('Connected', true);
+    updateStatus('connected', 'Connected', '');
     connection.focus({ preventScroll: true });
   });
   connection.addEventListener('disconnect', event => {
     if (rfb !== connection) return;
     rfb = null;
-    updateStatus(event.detail.clean ? 'Disconnected' : 'Connection lost');
+    if (event.detail.clean) {
+      updateStatus('idle', 'Disconnected', 'Press Reconnect to view the display again.');
+    } else {
+      updateStatus('lost', 'Connection lost', 'The sandbox display is not reachable. Press Reconnect to try again.');
+    }
     if (reconnectRequested) {
       reconnectRequested = false;
       connect();
@@ -2192,19 +2214,48 @@ document.querySelector('#reconnect').addEventListener('click', () => {
     return;
   }
   reconnectRequested = true;
-  updateStatus('Reconnecting…');
+  updateStatus('connecting', 'Reconnecting…', 'Starting a new view of the sandbox display.');
   rfb.disconnect();
 });
 connect();
-</script></body></html>"#;
+"#;
 
-fn send_display_page(stream: &mut TcpStream) {
+fn render_display(config: &Config) -> String {
+    let main = r#"<main class="display"><section class="card toolbar" aria-label="Display controls"><span id="status" class="conn" data-state="idle" role="status">Not connected<small> · sandbox display :99</small></span><label class="switch"><input id="view-only" type="checkbox"> View only</label><label class="switch"><input id="fit" type="checkbox" checked> Fit to window</label><button id="reconnect" type="button" class="btn sm">Reconnect</button></section><section class="card screen-wrap"><div id="screen"></div><div id="screen-note" class="screen-note"><b>Not connected</b><span>Starting a view of the sandbox display.</span></div></section></main>"#;
+    portal_ui::page(
+        "Display · Sandbox Admin",
+        "app display-app",
+        "",
+        r#"<script type="module" src="/display/app.js"></script>"#,
+        &format!(
+            "{}{main}",
+            portal_ui::top_bar(
+                Nav::Display,
+                pending_requests(config).len(),
+                config.portal_port,
+                &escape_html(&config.csrf_token)
+            )
+        ),
+    )
+}
+
+fn send_display_page(stream: &mut TcpStream, config: &Config) {
+    let body = render_display(config);
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src data:; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-        DISPLAY_PAGE.len()
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self' ws: wss:; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
     );
     let _ = stream.write_all(headers.as_bytes());
-    let _ = stream.write_all(DISPLAY_PAGE.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+}
+
+fn send_script(stream: &mut TcpStream, body: &str) {
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
 }
 
 fn send_novnc_asset(stream: &mut TcpStream, path: &str) {
@@ -2366,11 +2417,16 @@ fn gh_display<'a>(
 }
 
 fn render_error(title: &str, message: &str) -> String {
-    format!(
-        "<!doctype html><meta charset=utf-8><title>{}</title><h1>{}</h1><p>{}</p>",
-        escape_html(title),
-        escape_html(title),
-        escape_html(message)
+    portal_ui::document(
+        &escape_html(title),
+        "",
+        &format!(
+            r#"<main class="error-page"><div class="floating">{}</div><div class="card"><span class="mark">{}</span><h1>{}</h1><p>{}</p><a class="btn" href="/">Back to the portal</a></div></main>"#,
+            portal_ui::theme_toggle(),
+            portal_ui::mark(),
+            escape_html(title),
+            escape_html(message)
+        ),
     )
 }
 
@@ -2524,19 +2580,9 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &impl serde::Serialize) 
 }
 
 fn send_usage_dashboard(stream: &mut TcpStream) {
-    let body = usage_dashboard::PAGE;
+    let body = usage_dashboard::page();
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(headers.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
-}
-
-fn send_portal_script(stream: &mut TcpStream) {
-    let body = portal_ui::SCRIPT;
-    let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(headers.as_bytes());
@@ -3260,10 +3306,19 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("Content-Type: text/html; charset=utf-8\r\n"));
         assert!(response.contains("connect-src 'self'"));
+        assert!(response.contains("script-src 'self';"));
+        assert!(!response.contains("'unsafe-inline'; connect-src"));
         assert!(response.contains("Plan usage · Claude Sandbox"));
         assert!(response.contains("href=\"/api/usage\""));
-        assert!(response.contains("fetch(\"/api/usage\""));
+        assert!(response.contains("src=\"/assets/usage.js\""));
         assert!(!response.contains("Set-Cookie"));
+        let script = make_request(
+            &config,
+            "GET /assets/usage.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(script.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(script.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
+        assert!(script.contains("fetch(\"/api/usage\""));
         assert!(admin.contains("href=\"/usage\""));
     }
 
@@ -3282,10 +3337,23 @@ mod tests {
             "GET /display HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
         );
         assert!(page.starts_with("HTTP/1.1 200 OK\r\n"));
-        assert!(page.contains("/display/novnc/core/rfb.js"));
-        assert!(page.contains("/display/socket"));
+        assert!(page.contains(r#"<script type="module" src="/display/app.js"></script>"#));
+        assert!(page.contains("script-src 'self';"));
         assert!(page.contains("connect-src 'self' ws: wss:"));
         assert!(page.contains("img-src data:"));
+        assert!(page.contains(r#"<a class="on" href="/display">Display</a>"#));
+
+        let app = make_request(
+            &config,
+            "GET /display/app.js HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
+        );
+        assert!(app.contains("import RFB from '/display/novnc/core/rfb.js';"));
+        assert!(app.contains("/display/socket"));
+        let app_unauthorized = make_request(
+            &config,
+            "GET /display/app.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(app_unauthorized.starts_with("HTTP/1.1 303 See Other\r\n"));
 
         let asset = make_request(
             &config,

@@ -260,6 +260,33 @@ a.pill-btn:hover,button.pill-btn:hover{background:var(--hover);color:var(--text)
 .lock .foot{font-size:12.5px;color:var(--faint)}
 .lock .floating{position:fixed;top:14px;right:14px}
 
+.display-app{height:100vh;height:100dvh}
+.display{flex:1;min-height:0;display:flex;flex-direction:column;gap:14px;padding:18px 24px 24px}
+.toolbar{display:flex;align-items:center;gap:10px 18px;flex-wrap:wrap;padding:10px 12px 10px 16px}
+.conn{display:inline-flex;align-items:center;gap:8px;font-weight:650;margin-right:auto}
+.conn::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--faint)}
+.conn[data-state=connecting]::before{background:var(--warn)}
+.conn[data-state=connected]::before{background:var(--ok)}
+.conn[data-state=lost]::before{background:var(--danger)}
+.conn small{color:var(--faint);font-weight:500}
+.switch{display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-weight:550;cursor:pointer;user-select:none}
+.switch input{width:16px;height:16px;margin:0;accent-color:var(--accent)}
+.screen-wrap{position:relative;flex:1;min-height:240px;overflow:hidden;padding:0;background:var(--screen-bg)}
+:root{--screen-bg:#e9e9e4}[data-theme=dark]{--screen-bg:#0a0b0c}
+#screen{position:absolute;inset:0}
+#screen canvas{outline:none}
+.screen-note{position:absolute;inset:0;display:grid;place-items:center;align-content:center;gap:6px;padding:24px;text-align:center;color:var(--muted);pointer-events:none}
+.screen-note b{color:var(--text);font-size:15px}
+.screen-note[hidden]{display:none}
+.error-page{flex:1;display:grid;place-items:center;padding:24px}
+.error-page .card{width:100%;max-width:440px;padding:30px 26px;display:grid;gap:10px;justify-items:center;text-align:center}
+.error-page p{color:var(--muted);overflow-wrap:anywhere}
+.error-page .btn{margin-top:8px}
+.error-page .mark{width:44px;height:44px;border-radius:12px;margin-bottom:6px}
+.error-page .mark svg{width:20px;height:20px}
+.error-page h1{font-size:21px}
+.error-page .floating{position:fixed;top:14px;right:14px}
+
 @media (max-width:900px){
   .top{flex-wrap:wrap;gap:0 12px;padding:10px 14px 0;min-height:0}
   .brand{flex:1;min-height:40px}
@@ -286,6 +313,10 @@ a.pill-btn:hover,button.pill-btn:hover{background:var(--hover);color:var(--text)
   .facts div{flex-basis:130px}
   .facts div.wide{flex-basis:100%}
   .app{height:auto}
+  .display-app{height:100vh;height:100dvh}
+  .display{padding:12px 14px 14px;gap:10px}
+  .toolbar{padding:10px 12px}
+  .conn{width:100%}
 }
 "#;
 
@@ -309,6 +340,7 @@ const ICON_LOCK: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentC
 pub enum Nav {
     Inbox,
     Access,
+    Display,
     System,
 }
 
@@ -323,8 +355,28 @@ pub fn theme_toggle() -> String {
 }
 
 pub fn document(title: &str, body_class: &str, body: &str) -> String {
+    page(
+        &format!("{title} · Sandbox Admin"),
+        body_class,
+        "",
+        "",
+        body,
+    )
+}
+
+/// A complete page: the shared stylesheet plus page-specific CSS, the theme
+/// script and any further same-origin scripts. `title` is already escaped.
+pub fn page(title: &str, body_class: &str, extra_css: &str, scripts: &str, body: &str) -> String {
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>{title} · Sandbox Admin</title><script src="/assets/portal.js"></script><style>{STYLE}</style></head><body class="{body_class}">{body}</body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>{title}</title><script src="/assets/portal.js"></script>{scripts}<style>{STYLE}{extra_css}</style></head><body class="{body_class}">{body}</body></html>"#
+    )
+}
+
+/// The top bar of the public usage page: no admin navigation or counts.
+pub fn public_bar() -> String {
+    format!(
+        r#"<header class="top"><a class="brand" href="/usage"><span class="mark">{ICON_MARK}</span><span>Plan usage<small>claude-sandbox · public</small></span></a><div class="spacer"></div><div class="tools">{}<a class="btn sm" href="/">Admin portal →</a></div></header>"#,
+        theme_toggle()
     )
 }
 
@@ -339,9 +391,10 @@ pub fn top_bar(active: Nav, pending: usize, port: u16, csrf: &str) -> String {
         String::new()
     };
     format!(
-        r#"<header class="top"><a class="brand" href="/"><span class="mark">{ICON_MARK}</span><span>Sandbox Admin<small>claude-sandbox · port {port}</small></span></a><nav class="nav">{}{}<a href="/display" target="_blank" rel="noopener">Display<span class="ext">↗</span></a><a href="/usage" target="_blank" rel="noopener">Usage<span class="ext">↗</span></a>{}</nav><div class="spacer"></div><div class="tools">{}<form method="post" action="/lock"><input type="hidden" name="csrf" value="{csrf}"><button class="iconbtn" title="Lock the portal in this browser" aria-label="Lock">{ICON_LOCK}</button></form></div></header>"#,
+        r#"<header class="top"><a class="brand" href="/"><span class="mark">{ICON_MARK}</span><span>Sandbox Admin<small>claude-sandbox · port {port}</small></span></a><nav class="nav">{}{}{}<a href="/usage" target="_blank" rel="noopener">Usage<span class="ext">↗</span></a>{}</nav><div class="spacer"></div><div class="tools">{}<form method="post" action="/lock"><input type="hidden" name="csrf" value="{csrf}"><button class="iconbtn" title="Lock the portal in this browser" aria-label="Lock">{ICON_LOCK}</button></form></div></header>"#,
         tab(Nav::Inbox, "/", "Inbox", &badge),
         tab(Nav::Access, "/access", "Access", ""),
+        tab(Nav::Display, "/display", "Display", ""),
         tab(Nav::System, "/system", "System", ""),
         theme_toggle(),
     )
