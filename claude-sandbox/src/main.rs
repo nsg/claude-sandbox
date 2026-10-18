@@ -118,6 +118,10 @@ struct Cli {
     #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
     portal_port: Option<u16>,
 
+    /// Address your browser reaches the admin portal at, used in the approval links the agent is given (needs --portal; default: http://localhost:<portal port>)
+    #[arg(long, value_name = "URL", value_parser = parse_portal_url)]
+    portal_url: Option<String>,
+
     /// Run the command in a named tmux session so keys can be injected
     #[arg(long, global = true)]
     wrap: bool,
@@ -154,6 +158,9 @@ enum Commands {
         /// Host-only portal GitHub action state directory
         #[arg(long)]
         portal_state_dir: Option<PathBuf>,
+        /// Admin portal base URL for approval links
+        #[arg(long)]
+        portal_url: Option<String>,
     },
     /// Start the git push proxy (internal, spawned automatically)
     #[command(hide = true)]
@@ -173,6 +180,9 @@ enum Commands {
         /// Host-only portal push approval state directory
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Admin portal base URL for approval links
+        #[arg(long)]
+        portal_url: Option<String>,
     },
     /// Start the host-side admin portal (internal)
     #[command(hide = true)]
@@ -233,6 +243,9 @@ enum Commands {
         /// Host-only portal fetch approval state
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Admin portal base URL for approval links
+        #[arg(long)]
+        portal_url: Option<String>,
     },
     /// Run a command inside the container
     Run {
@@ -608,7 +621,60 @@ fn validate_port_flags(cli: &Cli, t3code: bool) -> Result<(), String> {
     if cli.portal_port.is_some() && !cli.portal {
         return Err("--portal-port needs --portal".to_string());
     }
+    if cli.portal_url.is_some() && !cli.portal {
+        return Err("--portal-url needs --portal".to_string());
+    }
     Ok(())
+}
+
+/// An http(s) origin with no path, query, fragment or credentials; approval
+/// links append `/r/<request>` to it.
+fn parse_portal_url(value: &str) -> Result<String, String> {
+    let invalid = || {
+        "the portal URL must be an origin such as https://host.example:3774, without a path"
+            .to_string()
+    };
+    let trimmed = value.strip_suffix('/').unwrap_or(value);
+    let authority = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .ok_or("the portal URL must start with http:// or https://")?;
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (address, rest) = rest.split_once(']').ok_or_else(invalid)?;
+        address
+            .parse::<std::net::Ipv6Addr>()
+            .map_err(|_| invalid())?;
+        let port = match rest {
+            "" => None,
+            rest => Some(rest.strip_prefix(':').ok_or_else(invalid)?),
+        };
+        (None, port)
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (Some(host), Some(port)),
+            None => (Some(authority), None),
+        }
+    };
+    if let Some(host) = host {
+        let label_ok = |label: &str| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        };
+        if host.parse::<std::net::Ipv4Addr>().is_err() && !host.split('.').all(label_ok) {
+            return Err(invalid());
+        }
+    }
+    if let Some(number) = port
+        && (!number.bytes().all(|byte| byte.is_ascii_digit())
+            || !matches!(number.parse::<u16>(), Ok(1..)))
+    {
+        return Err(invalid());
+    }
+    Ok(trimmed.to_string())
 }
 
 /// The portal PIN matters only to t3code; other commands ignore it entirely.
@@ -683,9 +749,15 @@ struct PortalState {
     fetch: PathBuf,
     gh: PathBuf,
     usage: PathBuf,
+    url: String,
 }
 
-fn prepare_portal_state(home: &Path, instance: &str, cwd: &Path) -> Result<PortalState, String> {
+fn prepare_portal_state(
+    home: &Path,
+    instance: &str,
+    cwd: &Path,
+    url: String,
+) -> Result<PortalState, String> {
     let workspace = fs::canonicalize(cwd)
         .map_err(|error| format!("could not resolve the workspace: {error}"))?;
     let outside = |name: &str, prepared: Result<PathBuf, String>| {
@@ -711,6 +783,7 @@ fn prepare_portal_state(home: &Path, instance: &str, cwd: &Path) -> Result<Porta
             managed_gh::prepare_state_dir(&managed_gh::state_dir(home, instance)),
         )?,
         usage: outside("usage", prepare_usage_state_dir(&usage_state_dir(), cwd))?,
+        url,
     })
 }
 
@@ -1026,7 +1099,7 @@ fn ensure_gh_proxy(
     workspace_root: &Path,
     allow_merge: bool,
     agent_disclosure: Option<&str>,
-    portal_state_dir: Option<&Path>,
+    portal: Option<(&Path, &str)>,
 ) -> Result<(), String> {
     let socket_path = runtime_dir.join(GH_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -1044,8 +1117,12 @@ fn ensure_gh_proxy(
     if let Some(text) = agent_disclosure {
         command.arg(format!("--agent-disclosure={text}"));
     }
-    if let Some(state) = portal_state_dir {
-        command.arg("--portal-state-dir").arg(state);
+    if let Some((state, url)) = portal {
+        command
+            .arg("--portal-state-dir")
+            .arg(state)
+            .arg("--portal-url")
+            .arg(url);
     }
     start_proxy("gh-proxy", &socket_path, command)
 }
@@ -1073,7 +1150,7 @@ fn ensure_git_proxy(
     runtime_dir: &Path,
     workspace_root: &Path,
     pre_approved_origin: Option<&str>,
-    portal_state_dir: Option<&Path>,
+    portal: Option<(&Path, &str)>,
 ) -> Result<(), String> {
     let socket_path = runtime_dir.join(GIT_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -1088,8 +1165,12 @@ fn ensure_git_proxy(
     if let Some(origin) = pre_approved_origin {
         command.arg("--pre-approved-origin").arg(origin);
     }
-    if let Some(state_dir) = portal_state_dir {
-        command.arg("--state-dir").arg(state_dir);
+    if let Some((state_dir, url)) = portal {
+        command
+            .arg("--state-dir")
+            .arg(state_dir)
+            .arg("--portal-url")
+            .arg(url);
     }
     start_proxy("git-proxy", &socket_path, command)
 }
@@ -1097,7 +1178,7 @@ fn ensure_git_proxy(
 fn ensure_ssh_proxy(
     runtime_dir: &Path,
     launch_origin: Option<&str>,
-    portal: Option<(&Path, &Path)>,
+    portal: Option<(&Path, &Path, &str)>,
 ) -> Result<(), String> {
     let socket_path = runtime_dir.join(SSH_PROXY_SOCKET_NAME);
     let mut command = Command::new(env::current_exe().expect("Could not get executable path"));
@@ -1110,12 +1191,14 @@ fn ensure_ssh_proxy(
     if let Some(origin) = launch_origin {
         command.arg("--launch-origin").arg(origin);
     }
-    if let Some((workspace_root, state_dir)) = portal {
+    if let Some((workspace_root, state_dir, url)) = portal {
         command
             .arg("--workspace-root")
             .arg(workspace_root)
             .arg("--state-dir")
-            .arg(state_dir);
+            .arg(state_dir)
+            .arg("--portal-url")
+            .arg(url);
     }
     start_proxy("ssh-proxy", &socket_path, command)
 }
@@ -1249,7 +1332,7 @@ fn run_container(
         &cwd,
         allow_merge,
         agent_disclosure,
-        portal.map(|state| state.gh.as_path()),
+        portal.map(|state| (state.gh.as_path(), state.url.as_str())),
     ));
 
     if vm_enabled {
@@ -1271,7 +1354,7 @@ fn run_container(
             &proxy_runtime_dir,
             &cwd,
             pre_approved_origin,
-            portal.map(|state| state.push.as_path()),
+            portal.map(|state| (state.push.as_path(), state.url.as_str())),
         ));
     }
 
@@ -1280,7 +1363,7 @@ fn run_container(
         require_proxy(ensure_ssh_proxy(
             &proxy_runtime_dir,
             fetch_origin.as_deref(),
-            portal.map(|state| (cwd.as_path(), state.fetch.as_path())),
+            portal.map(|state| (cwd.as_path(), state.fetch.as_path(), state.url.as_str())),
         ));
     }
 
@@ -1411,6 +1494,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             allow_merge,
             agent_disclosure,
             portal_state_dir,
+            portal_url,
         }) => {
             gh_proxy::run(
                 socket,
@@ -1419,6 +1503,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 *allow_merge,
                 agent_disclosure.as_deref(),
                 portal_state_dir.as_deref(),
+                portal_url.as_deref(),
             );
         }
         Some(Commands::GitProxy {
@@ -1427,6 +1512,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             workspace_root,
             pre_approved_origin,
             state_dir,
+            portal_url,
         }) => {
             if pre_approved_origin.is_none() && state_dir.is_none() {
                 eprintln!("git-proxy requires --pre-approved-origin or --state-dir");
@@ -1439,6 +1525,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                     workspace_root: workspace_root.clone(),
                     pre_approved_origin: pre_approved_origin.clone(),
                     portal_state_dir: state_dir.clone(),
+                    portal_url: portal_url.clone(),
                 },
             );
         }
@@ -1480,6 +1567,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             launch_origin,
             workspace_root,
             state_dir,
+            portal_url,
         }) => {
             let launch_origin = launch_origin
                 .as_deref()
@@ -1494,14 +1582,23 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                         std::process::exit(2);
                     }
                 });
-            let portal = match (workspace_root.as_ref(), state_dir.as_ref()) {
-                (Some(workspace_root), Some(state_dir)) => Some(ssh_proxy::PortalFetch {
-                    workspace_root: workspace_root.clone(),
-                    state_dir: state_dir.clone(),
-                }),
-                (None, None) => None,
+            let portal = match (
+                workspace_root.as_ref(),
+                state_dir.as_ref(),
+                portal_url.as_ref(),
+            ) {
+                (Some(workspace_root), Some(state_dir), Some(url)) => {
+                    Some(ssh_proxy::PortalFetch {
+                        workspace_root: workspace_root.clone(),
+                        state_dir: state_dir.clone(),
+                        url: url.clone(),
+                    })
+                }
+                (None, None, None) => None,
                 _ => {
-                    eprintln!("ssh-proxy requires both --workspace-root and --state-dir");
+                    eprintln!(
+                        "ssh-proxy requires --workspace-root, --state-dir and --portal-url together"
+                    );
                     std::process::exit(2);
                 }
             };
@@ -1757,11 +1854,17 @@ fn main() {
             let cwd = env::current_dir().expect("Could not get current directory");
             let instance_name = project_instance_name(&cwd);
             let instance_dir = format!("/root/.t3/instances/{}", instance_name);
-            let portal = portal_port.map(|_| {
-                prepare_portal_state(&home_dir(), &instance_name, &cwd).unwrap_or_else(|error| {
-                    eprintln!("Error: {error}");
-                    std::process::exit(1);
-                })
+            let portal = portal_port.map(|portal_port| {
+                let url = cli
+                    .portal_url
+                    .clone()
+                    .unwrap_or_else(|| format!("http://localhost:{portal_port}"));
+                prepare_portal_state(&home_dir(), &instance_name, &cwd, url).unwrap_or_else(
+                    |error| {
+                        eprintln!("Error: {error}");
+                        std::process::exit(1);
+                    },
+                )
             });
             let container_name = format!("{}-t3-{}", wrap_container_name(&cwd), std::process::id());
 
@@ -1779,7 +1882,7 @@ fn main() {
             }
             eprintln!("t3code available at http://localhost:{}", port);
             if let (Some(portal_port), Some(state)) = (portal_port, portal.as_ref()) {
-                eprintln!("admin portal available at http://localhost:{portal_port}");
+                eprintln!("admin portal available at {}", state.url);
                 ensure_t3_admin(&T3AdminConfig {
                     portal_port,
                     t3_port: port,
@@ -2085,6 +2188,43 @@ mod tests {
         let parse = |args: &[&str]| Cli::try_parse_from([&["claude-sandbox"], args].concat());
         assert!(parse(&["--t3-port", "0", "t3code"]).is_err());
         assert!(parse(&["--portal-port", "nope", "t3code"]).is_err());
+    }
+
+    #[test]
+    fn portal_url_must_be_a_bare_http_origin() {
+        assert_eq!(
+            parse_portal_url("https://host.example:3774/").unwrap(),
+            "https://host.example:3774"
+        );
+        assert_eq!(
+            parse_portal_url("http://[::1]:3774").unwrap(),
+            "http://[::1]:3774"
+        );
+        assert_eq!(
+            parse_portal_url("http://192.168.1.20").unwrap(),
+            "http://192.168.1.20"
+        );
+        for rejected in [
+            "host.example:3774",
+            "ftp://host.example",
+            "http://",
+            "http://host.example/admin",
+            "http://user@host.example",
+            "http://host.example?x",
+            "http://host.example#x",
+            "http://:3774",
+            "http://[]",
+            "http://[::1",
+            "http://[::1]x",
+            "https://host.example:99999",
+            "https://host.example:0",
+            "https://host.example:",
+            "http://host..example",
+            "http://-host.example",
+            "http://host.example:80:80",
+        ] {
+            assert!(parse_portal_url(rejected).is_err(), "{rejected}");
+        }
     }
 
     #[test]

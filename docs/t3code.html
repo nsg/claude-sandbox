@@ -78,8 +78,11 @@ port and every <code>-p</code> port. Inside the container the portal is reachabl
 <p>For a long-running <a href="service.html">service</a>, pin both ports so the addresses stay stable:</p>
 <pre><code class="language-bash">CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal --t3-port 3773 --portal-port 3774 t3code
 </code></pre>
-<p>Open the exact URL printed at startup and enter the PIN in its sign-in page. It
-creates five-minute, single-use pairing links on demand and automatically uses
+<p>Open the exact URL printed at startup and enter the PIN in its sign-in page.
+The portal opens on its <strong>Inbox</strong> of pending requests; <strong>Access</strong> lists
+standing approvals and <strong>System</strong> holds pairing and restart. A sun/moon button
+in the top bar switches between light and dark mode, and the browser remembers
+the choice. The <strong>System</strong> page creates five-minute, single-use pairing links on demand and automatically uses
 the running server&#39;s instance database. Open a generated link in the current
 browser, or copy it from the read-only field to another client such as the
 mobile app. Creating or copying the link does not consume it. For another
@@ -90,13 +93,13 @@ by claude-sandbox during normal launches, and must be provided again each time.
 With <code>--install-service</code>, it is stored in the mode-0600 unit file along with
 the other recorded environment variables.</p>
 <h2 id="restart-sandbox"><a class="anchor" href="#restart-sandbox" aria-hidden="true">#</a>Restart sandbox</h2>
-<p>After unlocking the portal, expand <strong>Restart sandbox</strong> and confirm the action
+<p>After unlocking the portal, open <strong>System</strong>, expand <strong>Restart sandbox</strong> and confirm the action
 to stop the exact named T3 container. The launcher runs attached to that
 container, so its exit returns control to the service supervisor. This button
 is intended for a systemd service configured with <code>Restart=always</code> (or an
 equivalent restart policy); a manually launched sandbox remains stopped.</p>
 <h2 id="live-display"><a class="anchor" href="#live-display" aria-hidden="true">#</a>Live display</h2>
-<p>The unlocked portal also links to <strong>Open live display</strong>, served at <code>/display</code>.
+<p>The unlocked portal also links to <strong>Display</strong>, served at <code>/display</code>.
 It shows the sandbox&#39;s virtual X display in the browser with keyboard and mouse
 input enabled by default; tick <strong>View only</strong> to watch without interfering with
 an agent that is driving the display. The page uses the vendored noVNC client
@@ -107,11 +110,20 @@ sessions. The display route requires the same PIN session as the rest of the
 portal and, like the portal, is served over plain HTTP.</p>
 <p>The portal also serves <a href="plan-usage.html">plan-limit usage</a>.</p>
 <h2 id="portal-approvals"><a class="anchor" href="#portal-approvals" aria-hidden="true">#</a>Portal approvals</h2>
-<p>With <code>--portal</code>, the portal approves requests for all three host bridges and
-always shows all three approval sections. A request that needs approval is denied
-and added to the portal as a pending candidate, and the agent is told to open the
-admin portal, approve it, and retry. Choose <strong>Approve once</strong>, <strong>Always allow</strong>, or
-<strong>Dismiss</strong>.</p>
+<p>With <code>--portal</code>, the portal approves requests for all three host bridges. A
+request that needs approval is denied and added to the <strong>Inbox</strong>, and the agent
+is given a link straight to that request, such as
+<code>http://localhost:3774/r/gh-0123456789abcdef</code>, to hand to you before it
+retries. Opening the link while the portal is locked asks for the PIN and then
+continues to the request; a link to a request that was already decided says so.
+Requests whose push origin changed are listed first. Choose <strong>Approve once</strong>,
+<strong>Always allow</strong>, or <strong>Dismiss</strong>; the portal then moves on to the next pending
+request. <strong>Access</strong> lists everything already approved, with a <strong>Revoke</strong>
+button for each.</p>
+<p>The links use <code>http://localhost:&lt;portal port&gt;</code>. When you open the portal
+from another device, pass the address that device uses with <code>--portal-url</code>, for
+example <code>--portal-url https://sandbox.example:3774</code>. It takes an http or https
+origin without a path and needs <code>--portal</code>; the address is shown to the agent.</p>
 <ul>
 <li><strong>Push</strong>: any repository beneath the workspace can become a candidate. With
 <code>--portal</code> the <a href="git-push.html">push bridge</a> always runs, even without
@@ -151,6 +163,10 @@ expose it to the internet; use it over an encrypted trusted path such as a VPN
 or SSH tunnel. <a href="plan-usage.html"><code>GET /api/usage</code></a> is intentionally unauthenticated, so anyone who
 can reach the admin port can observe usage percentages, reset schedules, and
 the associated provider limit or model labels.</p>
+<p>The portal session cookie is <code>SameSite=Lax</code> so that an approval link opened from
+a chat arrives signed in. Opening a page never changes anything: approving,
+dismissing, granting and revoking are form posts that also carry a per-run CSRF
+token.</p>
 
         <nav class="pager" aria-label="Pages">
           <a class="prev" href="skills.html"><span>Previous</span>Skills</a>

@@ -169,9 +169,10 @@ When asked, note how the sandbox bridges pushes to the host:
 - If a push fails with a hint about `--allow-push`, pushing is disabled for this
   session: ask the user to relaunch with `claude-sandbox --allow-push` from the
   repository root.
-- If a push is reported as pending approval, the admin portal is in use: ask
-  the user to approve the repository in the admin portal, then retry the same
-  `git push`.
+- If a push is reported as pending approval, the admin portal is in use: give
+  the user the approval link from the message as a clickable link, naming the
+  repository and branch it approves, then retry the same `git push` once they
+  confirm.
 
 ## Critical Rules
 

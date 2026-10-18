@@ -67,6 +67,7 @@ struct ProxyConfig {
     disclosure: Option<String>,
     managed_gh_state: Option<PathBuf>,
     managed_gh_lock: Mutex<()>,
+    portal_url: Option<String>,
 }
 
 struct CommandDef {
@@ -3630,6 +3631,18 @@ fn reject_reason(args: &[String]) -> Option<String> {
 
 use crate::logging::log_line;
 
+fn pending_reason(portal_url: Option<&str>, handle: &str) -> String {
+    match portal_url {
+        Some(base) => format!(
+            "pending approval {handle}\nApprove it in the admin portal: {}\nGive the user this link, then retry the same command once they have approved it.",
+            crate::t3_admin::request_url(base, crate::t3_admin::RequestKind::Gh, handle)
+        ),
+        None => format!(
+            "pending approval {handle}; open the admin portal, approve it, and retry the same command"
+        ),
+    }
+}
+
 fn denied_response(reason: String) -> Response {
     Response {
         exit_code: 1,
@@ -3917,9 +3930,7 @@ fn handle_request_with_executors(
             (execution.args.clone(), true, Some(execution))
         }
         ManagedRoute::Pending(handle) => {
-            let reason = format!(
-                "pending approval {handle}; open the admin portal, approve it, and retry the same command"
-            );
+            let reason = pending_reason(config.portal_url.as_deref(), &handle);
             log_line(
                 log,
                 &format!("PENDING gh {cmd_str} ({})", loggable_text(&reason)),
@@ -4021,6 +4032,7 @@ pub fn run(
     allow_merge: bool,
     disclosure: Option<&str>,
     managed_gh_state: Option<&Path>,
+    portal_url: Option<&str>,
 ) {
     let path = Path::new(socket_path);
     let log_file = proxy_log::open(log_path).unwrap_or_else(|e| {
@@ -4054,6 +4066,7 @@ pub fn run(
         disclosure: disclosure.map(str::to_string),
         managed_gh_state: managed_gh_state.map(Path::to_path_buf),
         managed_gh_lock: Mutex::new(()),
+        portal_url: portal_url.map(str::to_string),
     });
 
     let bound = proxy_socket::bind(path).unwrap_or_else(|e| {
@@ -4640,6 +4653,7 @@ mod tests {
             disclosure: None,
             managed_gh_state: None,
             managed_gh_lock: Mutex::new(()),
+            portal_url: None,
             grants: vec![RepositoryGrant {
                 root,
                 handle,
@@ -4716,6 +4730,14 @@ mod tests {
             stdout,
             stderr: String::new(),
         }
+    }
+
+    #[test]
+    fn pending_reason_links_the_request_in_the_portal() {
+        assert_eq!(
+            pending_reason(Some("http://portal.test:3774"), "0123456789abcdef"),
+            "pending approval 0123456789abcdef\nApprove it in the admin portal: http://portal.test:3774/r/gh-0123456789abcdef\nGive the user this link, then retry the same command once they have approved it."
+        );
     }
 
     #[test]
@@ -6003,6 +6025,7 @@ mod tests {
             disclosure: None,
             managed_gh_state: None,
             managed_gh_lock: Mutex::new(()),
+            portal_url: None,
         };
         assert_eq!(
             resolve_grant(&config, Some("/workspace/one"))

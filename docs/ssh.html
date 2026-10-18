@@ -74,7 +74,7 @@
 <p>With <a href="t3code.html#portal-approvals"><code>--portal</code></a>, any other <code>git@host</code> source becomes a pending candidate in the admin portal instead of being refused:</p>
 <pre><code class="language-bash">CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --portal t3code
 </code></pre>
-<p>The fetch fails with a message telling the agent to open the admin portal, approve it, and retry. Approve it once or persistently; a one-time approval is consumed atomically before SSH starts. Fetch approval is read-only: it never grants a push or GitHub CLI write access. The request must come from a working directory beneath the mounted workspace, which the portal shows as context.</p>
+<p>The fetch fails with a message that links the agent straight to the request in the admin portal, to pass on to you before it retries. Approve it once or persistently; a one-time approval is consumed atomically before SSH starts. Fetch approval is read-only: it never grants a push or GitHub CLI write access. The request must come from a working directory beneath the mounted workspace, which the portal shows as context.</p>
 <p>That workspace path is not an isolation boundary. Every process in one container can read data returned to that container, so use separate sandbox instances when repositories require separate confidentiality boundaries. The bridge controls use of your host credentials; it does not prevent downloading public code over the container&#39;s ordinary network. Private HTTPS remotes and Git LFS authentication are not bridged.</p>
 <h2 id="always-refused"><a class="anchor" href="#always-refused" aria-hidden="true">#</a>Always refused</h2>
 <ul>

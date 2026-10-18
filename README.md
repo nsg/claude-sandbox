@@ -21,7 +21,7 @@ When an agent does need the outside world, it goes through narrow host-side brid
 
 - **One command** — `claude-sandbox` pulls the image, mounts the project, and opens a shell; `claude-sandbox run <command>` runs a single command; `claude-sandbox --portal t3code` starts T3 Code with its admin portal; the launcher, skills, and image update themselves
 - **Credentials stay on the host** — GitHub, SSH, and Git push access are proxied through audited allowlists
-- **Long-running agents** — install T3 Code as a systemd service with `--install-service`, with a PIN-protected portal for pairing, approvals, plan-limit usage, and a live view of the agent's display
+- **Long-running agents** — install T3 Code as a systemd service with `--install-service`, with a PIN-protected portal for pairing, approvals the agent links you straight to, plan-limit usage, and a live view of the agent's display
 - **Full workstation inside** — Playwright with Chromium, a headless X display, Buildah, Rust, Node.js, and ready-made skills
 
 **Why the name?** claude-sandbox started as a sandbox around Claude Code alone. It has since grown to run Codex, opencode, and T3 Code too, but the name stayed for historical reasons. These days I mostly use it through T3 Code, which runs the different harnesses for me from a web browser or its mobile app.

@@ -60,8 +60,11 @@ only when they matter.
 - SSH is a git-fetch bridge only: it fetches the launch repository's SSH
   `origin`, plus sources approved in the admin portal. Plain `ssh user@host`
   commands and pushes over SSH are refused; pushes go through plain `git push`.
-- When a fetch, push, or `gh` action is reported as pending approval, ask the
-  user to approve it in the admin portal, then retry the same command.
+- When a fetch, push, or `gh` action is reported as pending approval, the
+  message includes a link to that request in the admin portal. Give the user
+  the link as a clickable Markdown link, say in one line what it approves (the
+  repository and action), and retry the same command once they confirm. The
+  link opens the request directly; never alter it or guess one.
 
 ## Skills
 

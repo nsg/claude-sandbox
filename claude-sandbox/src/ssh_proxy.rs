@@ -37,6 +37,8 @@ struct ParsedRequest {
 pub struct PortalFetch {
     pub workspace_root: PathBuf,
     pub state_dir: PathBuf,
+    /// Admin portal base URL the pending-approval reply links to.
+    pub url: String,
 }
 
 /// What the SSH bridge may fetch: the launch repository's origin, snapshotted
@@ -339,8 +341,9 @@ fn authorize(request: &Request, policy: &Policy) -> Result<Vec<String>, String> 
                 }
             })?;
             Err(format!(
-                "fetch pending approval for {} (candidate {id}); open the admin portal, approve it, and retry",
-                source.display()
+                "fetch pending approval for {}\nApprove it in the admin portal: {}\nGive the user this link, then retry the same fetch once they have approved it.",
+                source.display(),
+                crate::t3_admin::request_url(&portal.url, crate::t3_admin::RequestKind::Fetch, &id)
             ))
         }
     }
@@ -684,6 +687,7 @@ mod tests {
             portal: Some(PortalFetch {
                 workspace_root: workspace,
                 state_dir,
+                url: "http://portal.test:3774".to_string(),
             }),
             ..launch_policy()
         };
@@ -834,9 +838,15 @@ mod tests {
 
         let denied = authorize(&request, &policy).unwrap_err();
         assert!(denied.contains("pending approval"), "{denied}");
-        assert!(denied.contains("admin portal"), "{denied}");
         let candidates = managed_fetch::list_candidates(&portal.state_dir).unwrap();
         assert_eq!(candidates.len(), 1);
+        assert!(
+            denied.contains(&format!(
+                "Approve it in the admin portal: http://portal.test:3774/r/fetch-{}\nGive the user this link",
+                candidates[0].0
+            )),
+            "{denied}"
+        );
         let pending = candidates[0].1.source.clone();
         assert_eq!(pending, source("github.com", "org/dependency.git"));
         assert_eq!(candidates[0].1.requested_from, "project");

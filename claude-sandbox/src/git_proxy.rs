@@ -51,6 +51,8 @@ pub struct Policy {
     pub workspace_root: PathBuf,
     pub pre_approved_origin: Option<String>,
     pub portal_state_dir: Option<PathBuf>,
+    /// Admin portal base URL the pending-approval reply links to.
+    pub portal_url: Option<String>,
 }
 
 struct PinnedDirectory {
@@ -995,8 +997,17 @@ fn authorize_push(
             } else {
                 ""
             };
+            let next = policy.portal_url.as_deref().map_or_else(
+                || "Open the admin portal, approve the repository, and retry.".to_string(),
+                |base| {
+                    format!(
+                        "Approve it in the admin portal: {}\nGive the user this link, then retry the same push once they have approved it.",
+                        crate::t3_admin::request_url(base, crate::t3_admin::RequestKind::Push, &id)
+                    )
+                },
+            );
             Err(deny(format!(
-                "git-proxy: push pending approval for '{}'{changed}\nOpen the admin portal, approve the repository, and retry.",
+                "git-proxy: push pending approval for '{}'{changed}\n{next}",
                 repository.relative_path
             )))
         }
@@ -1320,6 +1331,7 @@ mod tests {
             workspace_root: repository.to_path_buf(),
             pre_approved_origin: Some(remote.to_str().unwrap().to_string()),
             portal_state_dir: None,
+            portal_url: None,
         }
     }
 
@@ -1413,6 +1425,7 @@ mod tests {
             workspace_root: workspace.clone(),
             pre_approved_origin: None,
             portal_state_dir: Some(state.clone()),
+            portal_url: None,
         };
         let request = || Request {
             args: strs(&["push"]),
@@ -1523,17 +1536,21 @@ mod tests {
         let state = managed_push::prepare_state_dir(&root.join("state")).unwrap();
         let portal = Policy {
             portal_state_dir: Some(state.clone()),
+            portal_url: Some("http://portal.test:3774".to_string()),
             ..policy.clone()
         };
         let pending = handle_request(push_from("/workspace/nested"), &portal, &log);
-        assert!(
-            pending.stderr.contains("admin portal"),
-            "{}",
-            pending.stderr
-        );
         let candidates = managed_push::list_candidates(&state).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].1.repository.relative_path, "nested");
+        assert!(
+            pending.stderr.contains(&format!(
+                "Approve it in the admin portal: http://portal.test:3774/r/push-{}\nGive the user this link",
+                candidates[0].0
+            )),
+            "{}",
+            pending.stderr
+        );
         let pushed = handle_request(push_from("/workspace"), &portal, &log);
         assert_eq!(pushed.exit_code, 0, "{}", pushed.stderr);
         assert_eq!(managed_push::list_candidates(&state).unwrap().len(), 1);
@@ -2086,6 +2103,7 @@ mod tests {
         let policy = launch_policy(&launch, &launch_remote);
         let portal = Policy {
             portal_state_dir: Some(state.clone()),
+            portal_url: None,
             ..policy.clone()
         };
         for policy in [&policy, &portal] {
@@ -2127,6 +2145,7 @@ mod tests {
         let policy = launch_policy(&launch, &approved);
         let portal = Policy {
             portal_state_dir: Some(state.clone()),
+            portal_url: None,
             ..policy.clone()
         };
         let push_from = |cwd: &str| Request {
@@ -2235,6 +2254,7 @@ mod tests {
         let state = managed_push::prepare_state_dir(&root.join("state")).unwrap();
         let portal = Policy {
             portal_state_dir: Some(state.clone()),
+            portal_url: None,
             ..launch_policy(&launch, &launch_remote)
         };
         let denied = handle_request(push_request(false), &portal, &test_log(&root));
