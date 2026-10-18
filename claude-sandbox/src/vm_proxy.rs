@@ -48,6 +48,7 @@ Usage:\n\
   vm stop NAME [--force]\n\
   vm restart NAME [--force]\n\
   vm delete NAME\n\
+  vm eject NAME           detach the installer ISO, even while the VM runs\n\
   vm screen NAME          print the VM's spice+unix:// display address\n\
   vm view NAME            open that display full-screen on the sandbox X display\n\
   vm exec NAME [--timeout SECS] -- CMD [ARG...]\n\
@@ -196,6 +197,9 @@ enum VmCommand {
         force: bool,
     },
     Delete {
+        name: String,
+    },
+    Eject {
         name: String,
     },
     Screen {
@@ -615,6 +619,7 @@ impl IncusBridge {
             VmCommand::Stop { name, force } => self.instance_action("stop", &name, force),
             VmCommand::Restart { name, force } => self.instance_action("restart", &name, force),
             VmCommand::Delete { name } => self.instance_action("delete", &name, true),
+            VmCommand::Eject { name } => self.eject(&name),
             VmCommand::Screen { name } => self.screen(&name),
             VmCommand::Exec {
                 name,
@@ -805,6 +810,39 @@ impl IncusBridge {
                         DEFAULT_TIMEOUT.as_secs()
                     ))
                 }
+            }
+            Ok(output) => command_response(output),
+            Err(error) => Response::error(error),
+        }
+    }
+
+    fn eject(&self, name: &str) -> Response {
+        let args = vec![
+            "config".to_string(),
+            "device".to_string(),
+            "remove".to_string(),
+            "--project".to_string(),
+            self.project.to_string(),
+            format!("{}:{name}", self.remote),
+            "iso".to_string(),
+        ];
+        match self.run_command(
+            &args,
+            CommandInput::Null,
+            DEFAULT_TIMEOUT,
+            COMMAND_OUTPUT_LIMIT,
+        ) {
+            Ok(output) if output.timed_out => Response::error(format!(
+                "Incus eject timed out after {}s",
+                DEFAULT_TIMEOUT.as_secs()
+            )),
+            Ok(output) if output.status.success() => {
+                Response::ok(format!("ejected the ISO from {name}\n"))
+            }
+            Ok(output)
+                if String::from_utf8_lossy(&output.stderr).contains("Device doesn't exist") =>
+            {
+                Response::error(format!("{name} has no ISO attached"))
             }
             Ok(output) => command_response(output),
             Err(error) => Response::error(error),
@@ -1612,6 +1650,7 @@ fn parse_args(args: &[String]) -> Result<VmCommand, String> {
             parse_action(&args[1..], true).map(|(name, force)| VmCommand::Restart { name, force })
         }
         "delete" => parse_single_name(&args[1..]).map(|name| VmCommand::Delete { name }),
+        "eject" => parse_single_name(&args[1..]).map(|name| VmCommand::Eject { name }),
         "screen" => parse_single_name(&args[1..]).map(|name| VmCommand::Screen { name }),
         "console-log" => parse_single_name(&args[1..]).map(|name| VmCommand::ConsoleLog { name }),
         "exec" => parse_exec(&args[1..]),
@@ -2381,6 +2420,11 @@ mod tests {
             Ok(VmCommand::Stop { force: true, .. })
         ));
         assert!(parse_args(&strings(&["stop", "--project"])).is_err());
+        assert!(matches!(
+            parse_args(&strings(&["eject", "test"])),
+            Ok(VmCommand::Eject { .. })
+        ));
+        assert!(parse_args(&strings(&["eject", "test", "root"])).is_err());
         assert!(parse_args(&strings(&["exec", "test", "id"])).is_err());
         assert!(parse_args(&strings(&["exec", "test", "--", "--project"])).is_ok());
         assert!(parse_args(&strings(&["launch", "test", "--image", "--project"])).is_err());
@@ -2732,6 +2776,39 @@ raise SystemExit(0)
         assert_eq!(stdin["ephemeral"], true);
         assert_eq!(stdin["config"]["limits.cpu"], "2");
         assert_eq!(stdin["devices"]["root"]["size"], "20GiB");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn eject_removes_only_the_iso_device() {
+        if !Path::new("/usr/bin/python3").exists() {
+            return;
+        }
+        let root = temp_dir("eject");
+        let fake = root.join("incus");
+        executable(
+            &fake,
+            r#"#!/usr/bin/python3
+import pathlib, sys
+with pathlib.Path(__file__).with_name("calls").open("a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+if sys.argv[-2] == "claude-sandbox:bare":
+    print("Error: Device doesn't exist", file=sys.stderr)
+    raise SystemExit(1)
+"#,
+        );
+        let bridge = test_bridge(&root, &fake);
+        let response = bridge.eject("inst");
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.stdout, "ejected the ISO from inst\n");
+        let response = bridge.eject("bare");
+        assert_ne!(response.exit_code, 0);
+        assert_eq!(response.stderr, "vm: bare has no ISO attached\n");
+        assert_eq!(
+            fs::read_to_string(root.join("calls")).unwrap(),
+            "config device remove --project claude-sandbox claude-sandbox:inst iso\n\
+             config device remove --project claude-sandbox claude-sandbox:bare iso\n"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

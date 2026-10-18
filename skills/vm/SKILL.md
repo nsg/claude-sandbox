@@ -148,8 +148,13 @@ client is needed; `vm view` is that plus `remote-viewer` in kiosk mode.
 2. `vm view NAME` and screenshot. Catch the boot menu early: many installers
    auto-select after a few seconds.
 3. Drive the installer with keys; prefer keyboard navigation over the pointer.
-4. When the installer asks to reboot, let the guest reboot itself. Do **not**
-   `vm stop` it — that deletes the freshly installed disk.
+4. When the installer asks to reboot, run `vm eject NAME` first. It
+   hot-unplugs the ISO while the guest keeps running, so the reboot starts
+   the installed system rather than the installer again.
+5. Then let the guest reboot itself. Do **not** `vm stop` it — that deletes
+   the freshly installed disk. Installers that power off instead of
+   rebooting (or are told to) delete the VM the same way, so make sure the
+   last step is a reboot.
 
 An installed system lives only as long as the VM does. If the user needs it to
 outlast the session, say so before starting: that is outside what the bridge
