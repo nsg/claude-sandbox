@@ -38,6 +38,13 @@ vm status
   client connects, so keep a single viewer per VM.
 - VMs sit on the host's Incus bridge network with normal outbound access.
   `vm info NAME` shows the guest's addresses once it has booted.
+- **VMs cannot reach the sandbox.** The sandbox runs in its own network
+  namespace behind Podman's outbound mapping, so connections only go one way:
+  the sandbox can reach the VMs and the network, and the VMs can reach the
+  host and the network, but nothing in a VM can connect to a server running
+  inside the sandbox. When a guest needs a service — a web server, a
+  package mirror, files to download — run it on a small separate VM and point
+  the guest at that VM's address.
 - CPU, memory, disk and VM count are capped by the user's Incus project; a
   "limit" error means ask the user, not retry.
 
