@@ -4,10 +4,6 @@ const STYLE: &str = r#"
 [hidden]{display:none!important}
 .usage{max-width:1120px}
 .usage-h{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}
-.kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
-.kpi{padding:16px 18px}
-.kpi span{display:block;color:var(--faint);font-size:12px;font-weight:600}
-.kpi strong{display:block;margin-top:4px;font-size:19px;font-weight:700;letter-spacing:-.01em;overflow-wrap:anywhere}
 .sec-h{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-top:6px}
 .sec-h h2{font-size:15px}
 .sec-h span{color:var(--faint);font-size:12.5px}
@@ -26,17 +22,11 @@ const STYLE: &str = r#"
 .bucket-row{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px}
 .bucket-row .name{font-weight:600;min-width:0;overflow-wrap:anywhere}
 .bucket-row .pct{display:inline-flex;align-items:center;gap:6px;font-weight:700;white-space:nowrap}
-.meter{--fill:var(--accent);height:8px;margin:7px 0 5px;border-radius:4px;overflow:hidden;background:color-mix(in srgb,var(--fill) 16%,var(--surface))}
-.meter i{display:block;height:100%;min-width:0;border-radius:4px;background:var(--fill);transition:width .5s ease}
-.meter[data-level=warning]{--fill:#fab219}
-.meter[data-level=critical]{--fill:#d03b3b}
-[data-theme=dark] .meter[data-level=critical]{--fill:#e5524f}
 .bucket-meta{display:flex;justify-content:space-between;gap:8px;color:var(--faint);font-size:12px}
 .provider-empty{padding:26px 16px;border:1px dashed var(--border-strong);border-radius:12px;color:var(--muted);text-align:center}
 .provider-foot{padding-top:12px;border-top:1px solid var(--border);color:var(--faint);font-size:12px}
 .usage-foot{display:flex;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;color:var(--faint);font-size:12.5px}
 @media (max-width:900px){.providers{grid-template-columns:1fr}}
-@media (max-width:600px){.kpis{grid-template-columns:1fr}.kpi{display:flex;justify-content:space-between;align-items:baseline;gap:12px}.kpi strong{margin:0;font-size:16px;text-align:right}}
 "#;
 
 pub(crate) const SCRIPT: &str = r#"(function () {
@@ -186,10 +176,12 @@ pub(crate) const SCRIPT: &str = r#"(function () {
 })();
 "#;
 
-pub(crate) fn page() -> String {
+/// The usage dashboard under `bar`: the admin top bar for an unlocked
+/// browser, the public bar otherwise.
+pub(crate) fn page(bar: &str) -> String {
     let body = format!(
-        r#"{}<main class="page usage"><div class="usage-h"><div class="page-h"><h1>Plan usage</h1><p>Live plan-limit pressure across the model providers available to this sandbox.</p></div><a class="pill-btn" href="/api/usage">JSON API ↗</a></div><section class="kpis" aria-label="Usage summary"><div class="card kpi"><span>Reporting</span><strong id="reporting">Loading…</strong></div><div class="card kpi"><span>Highest pressure</span><strong id="pressure">—</strong></div><div class="card kpi"><span>Next reset</span><strong id="next-reset">—</strong></div></section><div class="sec-h"><h2>Provider limits</h2><span>Used of each plan allowance</span></div><section class="providers" id="providers" aria-live="polite"></section><div class="flash error" id="error" role="alert" hidden>{}<span></span></div><footer class="usage-foot"><span>Advisory telemetry · no authentication</span><span id="refreshed">Refreshes every 60 seconds</span></footer></main>"#,
-        portal_ui::public_bar(),
+        r#"{}<main class="page usage"><div class="usage-h"><div class="page-h"><h1>Plan usage</h1><p>Live plan-limit pressure across the model providers available to this sandbox.</p></div><a class="pill-btn" href="/api/usage">JSON API ↗</a></div><section class="kpis" aria-label="Usage summary"><div class="card kpi"><span>Reporting</span><strong id="reporting">Loading…</strong></div><div class="card kpi"><span>Highest pressure</span><strong id="pressure">—</strong></div><div class="card kpi"><span>Next reset</span><strong id="next-reset">—</strong></div></section><div class="sec-h"><h2>Provider limits</h2><span>Used of each plan allowance</span></div><section class="providers" id="providers" aria-live="polite"></section><div class="flash error" id="error" role="alert" hidden>{}<span></span></div><footer class="usage-foot"><span>Advisory telemetry · public, no login needed</span><span id="refreshed">Refreshes every 60 seconds</span></footer></main>"#,
+        bar,
         portal_ui::ICON_WARN
     );
     portal_ui::page(
@@ -210,7 +202,7 @@ mod tests {
         assert!(SCRIPT.contains("fetch(\"/api/usage\""));
         assert!(SCRIPT.contains("textContent = text"));
         assert!(!SCRIPT.contains("innerHTML"));
-        let page = page();
+        let page = page(&portal_ui::public_bar());
         assert!(page.contains(r#"<script src="/assets/usage.js" defer></script>"#));
         assert!(!page.contains("<script>"));
         assert!(!page.contains(r#"class="nav""#));

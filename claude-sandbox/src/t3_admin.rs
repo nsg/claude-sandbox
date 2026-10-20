@@ -478,7 +478,7 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
     }
 
     if request.method == "GET" && request.path == "/usage" {
-        send_usage_dashboard(&mut stream);
+        send_usage_dashboard(&mut stream, &request, config);
         return;
     }
 
@@ -1311,19 +1311,20 @@ fn flash_html(notice: Option<&Notice>) -> String {
         .unwrap_or_default()
 }
 
+fn top_bar(config: &Config, nav: Nav, pending: usize) -> String {
+    portal_ui::top_bar(
+        nav,
+        pending,
+        config.portal_port,
+        &escape_html(&config.csrf_token),
+    )
+}
+
 fn app_page(config: &Config, nav: Nav, pending: usize, title: &str, main: &str) -> String {
     portal_ui::document(
         &escape_html(title),
         "app",
-        &format!(
-            "{}{main}",
-            portal_ui::top_bar(
-                nav,
-                pending,
-                config.portal_port,
-                &escape_html(&config.csrf_token)
-            )
-        ),
+        &format!("{}{main}", top_bar(config, nav, pending)),
     )
 }
 
@@ -1344,7 +1345,7 @@ fn render_lock(next: &str, notice: Option<&str>) -> String {
         "Unlock",
         "",
         &format!(
-            r#"<main class="lock"><div class="floating">{}</div><div class="card"><span class="mark">{}</span><h1>{title}</h1><p>{text}</p>{notice}<form method="post" action="/login">{}<input class="pin" name="pin" type="password" inputmode="numeric" autocomplete="current-password" pattern="[0-9]{{4,12}}" minlength="4" maxlength="12" required autofocus aria-label="Admin PIN" placeholder="PIN"><button class="btn primary">Unlock</button></form><p class="foot"><a class="link" href="/usage">Public usage dashboard ↗</a></p></div></main>"#,
+            r#"<main class="lock"><div class="floating">{}</div><div class="card"><span class="mark">{}</span><h1>{title}</h1><p>{text}</p>{notice}<form method="post" action="/login">{}<input class="pin" name="pin" type="password" inputmode="numeric" autocomplete="current-password" pattern="[0-9]{{4,12}}" minlength="4" maxlength="12" required autofocus aria-label="Admin PIN" placeholder="PIN"><button class="btn primary">Unlock</button></form><p class="foot"><a class="link" href="/usage">Public usage dashboard</a></p></div></main>"#,
             portal_ui::theme_toggle(),
             portal_ui::mark(),
             hidden("next", next),
@@ -2145,7 +2146,7 @@ fn render_restart_controls(csrf_token: &str) -> String {
 
 fn render_system(config: &Config, pair_url: Option<&str>, notice: Option<&Notice>) -> String {
     let main = format!(
-        r#"<main class="page">{}<div class="page-h"><h1>System</h1><p>Client pairing, the live display and the sandbox itself.</p></div><section class="card block"><div class="block-h"><h3>Client pairing</h3></div><div class="block-b">{}</div></section><section class="card block"><div class="block-h"><h3>Live display and usage</h3></div><a class="linkrow" href="/display" target="_blank" rel="noopener"><b>Display ↗</b><span>View and control the sandbox's virtual X display in this browser.</span></a><a class="linkrow" href="/usage" target="_blank" rel="noopener"><b>Usage ↗</b><span>Public plan usage dashboard.</span></a></section><section class="card block"><div class="block-h"><h3>Sandbox lifecycle</h3></div><div class="block-b">{}</div></section></main>"#,
+        r#"<main class="page">{}<div class="page-h"><h1>System</h1><p>Client pairing and the sandbox itself.</p></div><section class="card block"><div class="block-h"><h3>Client pairing</h3></div><div class="block-b">{}</div></section><section class="card block"><div class="block-h"><h3>Sandbox lifecycle</h3></div><div class="block-b">{}</div></section></main>"#,
         flash_html(notice),
         render_pairing_controls(&config.csrf_token, pair_url),
         render_restart_controls(&config.csrf_token),
@@ -2229,12 +2230,7 @@ fn render_display(config: &Config) -> String {
         r#"<script type="module" src="/display/app.js"></script>"#,
         &format!(
             "{}{main}",
-            portal_ui::top_bar(
-                Nav::Display,
-                pending_requests(config).len(),
-                config.portal_port,
-                &escape_html(&config.csrf_token)
-            )
+            top_bar(config, Nav::Display, pending_requests(config).len())
         ),
     )
 }
@@ -2579,10 +2575,15 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &impl serde::Serialize) 
     let _ = stream.write_all(&body);
 }
 
-fn send_usage_dashboard(stream: &mut TcpStream) {
-    let body = usage_dashboard::page();
+fn send_usage_dashboard(stream: &mut TcpStream, request: &Request, config: &Config) {
+    let bar = if is_authorized(request, config) {
+        top_bar(config, Nav::Usage, pending_requests(config).len())
+    } else {
+        portal_ui::public_bar()
+    };
+    let body = usage_dashboard::page(&bar);
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(headers.as_bytes());
@@ -3320,6 +3321,23 @@ mod tests {
         assert!(script.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
         assert!(script.contains("fetch(\"/api/usage\""));
         assert!(admin.contains("href=\"/usage\""));
+    }
+
+    #[test]
+    fn usage_keeps_the_admin_bar_for_an_unlocked_browser() {
+        let workspace = temporary_workspace("usage-bar");
+        std::fs::create_dir(&workspace).unwrap();
+        let config = test_config(&workspace);
+        let public = make_request(&config, "GET /usage HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let unlocked = make_request(
+            &config,
+            "GET /usage HTTP/1.1\r\nHost: localhost\r\nCookie: t3_admin_session=session\r\n\r\n",
+        );
+        std::fs::remove_dir(&workspace).unwrap();
+
+        assert!(!public.contains(r#"class="nav""#));
+        assert!(unlocked.contains(r#"<a class="on" href="/usage">Usage</a>"#));
+        assert!(!unlocked.contains("target=\"_blank\""));
     }
 
     #[test]

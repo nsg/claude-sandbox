@@ -105,7 +105,6 @@ p{margin:0}
 .nav a.on{background:var(--accent-soft);color:var(--accent-ink)}
 .count{min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--accent);color:#fff;font-size:11.5px;font-weight:700;display:inline-grid;place-items:center}
 [data-theme=dark] .count{color:#0e0f11}
-.ext{color:var(--faint);font-size:11px}
 .spacer{flex:1}
 .tools{display:flex;gap:8px;align-items:center}
 .iconbtn{width:36px;height:36px;border-radius:9px;border:1px solid var(--border);background:var(--surface);color:var(--muted);display:grid;place-items:center;flex:none}
@@ -218,6 +217,15 @@ a.pill-btn:hover,button.pill-btn:hover{background:var(--hover);color:var(--text)
 
 .page{width:100%;max-width:1040px;margin:0 auto;padding:32px 24px 48px;display:grid;gap:18px;align-content:start}
 .page-h p{margin-top:6px;color:var(--muted)}
+.kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.kpi{padding:16px 18px}
+.kpi span{display:block;color:var(--faint);font-size:12px;font-weight:600}
+.kpi strong{display:block;margin-top:4px;font-size:19px;font-weight:700;letter-spacing:-.01em;overflow-wrap:anywhere}
+.meter{--fill:var(--accent);height:8px;margin:7px 0 5px;border-radius:4px;overflow:hidden;background:color-mix(in srgb,var(--fill) 16%,var(--surface))}
+.meter i{display:block;height:100%;min-width:0;border-radius:4px;background:var(--fill);transition:width .5s ease}
+.meter[data-level=warning]{--fill:#fab219}
+.meter[data-level=critical]{--fill:#d03b3b}
+[data-theme=dark] .meter[data-level=critical]{--fill:#e5524f}
 .block{overflow:hidden}
 .block-h{padding:14px 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--border)}
 .block-h h3{font-size:14.5px}
@@ -318,6 +326,7 @@ a.pill-btn:hover,button.pill-btn:hover{background:var(--hover);color:var(--text)
   .toolbar{padding:10px 12px}
   .conn{width:100%}
 }
+@media (max-width:600px){.kpis{grid-template-columns:1fr}.kpi{display:flex;justify-content:space-between;align-items:baseline;gap:12px}.kpi strong{margin:0;font-size:16px;text-align:right}}
 "#;
 
 pub const ICON_GH: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V10a3 3 0 0 0-3-3h-4"/><path d="M13 5l-2 2 2 2"/></svg>"#;
@@ -341,6 +350,7 @@ pub enum Nav {
     Inbox,
     Access,
     Display,
+    Usage,
     System,
 }
 
@@ -391,10 +401,11 @@ pub fn top_bar(active: Nav, pending: usize, port: u16, csrf: &str) -> String {
         String::new()
     };
     format!(
-        r#"<header class="top"><a class="brand" href="/"><span class="mark">{ICON_MARK}</span><span>Sandbox Admin<small>claude-sandbox · port {port}</small></span></a><nav class="nav">{}{}{}<a href="/usage" target="_blank" rel="noopener">Usage<span class="ext">↗</span></a>{}</nav><div class="spacer"></div><div class="tools">{}<form method="post" action="/lock"><input type="hidden" name="csrf" value="{csrf}"><button class="iconbtn" title="Lock the portal in this browser" aria-label="Lock">{ICON_LOCK}</button></form></div></header>"#,
+        r#"<header class="top"><a class="brand" href="/"><span class="mark">{ICON_MARK}</span><span>Sandbox Admin<small>claude-sandbox · port {port}</small></span></a><nav class="nav">{}{}{}{}{}</nav><div class="spacer"></div><div class="tools">{}<form method="post" action="/lock"><input type="hidden" name="csrf" value="{csrf}"><button class="iconbtn" title="Lock the portal in this browser" aria-label="Lock">{ICON_LOCK}</button></form></div></header>"#,
         tab(Nav::Inbox, "/", "Inbox", &badge),
         tab(Nav::Access, "/access", "Access", ""),
         tab(Nav::Display, "/display", "Display", ""),
+        tab(Nav::Usage, "/usage", "Usage", ""),
         tab(Nav::System, "/system", "System", ""),
         theme_toggle(),
     )

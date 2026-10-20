@@ -65,6 +65,8 @@ exposes account-level plan-limit usage without authentication. Append
 freshness, and reset timing, open <code>/usage</code> on the same server:</p>
 <pre><code class="language-text">http://localhost:3774/usage
 </code></pre>
+<p>The page needs no PIN. In a browser that has unlocked the portal it is the
+portal&#39;s <strong>Usage</strong> page, with the portal&#39;s navigation.</p>
 <h2 id="response-format"><a class="anchor" href="#response-format" aria-hidden="true">#</a>Response format</h2>
 <p>The response reports each provider&#39;s data freshness, RFC 3339 UTC <code>updated_at</code>
 time, and available usage buckets under the fixed <code>anthropic</code>, <code>openai</code>, and

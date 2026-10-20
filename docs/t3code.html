@@ -80,7 +80,9 @@ port and every <code>-p</code> port. Inside the container the portal is reachabl
 </code></pre>
 <p>Open the exact URL printed at startup and enter the PIN in its sign-in page.
 The portal opens on its <strong>Inbox</strong> of pending requests; <strong>Access</strong> lists
-standing approvals and <strong>System</strong> holds pairing and restart. A sun/moon button
+standing approvals, <strong>Display</strong> shows the <a href="#live-display">live display</a>,
+<strong>Usage</strong> shows <a href="plan-usage.html#dashboard">plan usage</a>,
+and <strong>System</strong> holds pairing and restart. A sun/moon button
 in the top bar switches between light and dark mode, and the browser remembers
 the choice. The <strong>System</strong> page creates five-minute, single-use pairing links on demand and automatically uses
 the running server&#39;s instance database. Open a generated link in the current
@@ -99,8 +101,8 @@ container, so its exit returns control to the service supervisor. This button
 is intended for a systemd service configured with <code>Restart=always</code> (or an
 equivalent restart policy); a manually launched sandbox remains stopped.</p>
 <h2 id="live-display"><a class="anchor" href="#live-display" aria-hidden="true">#</a>Live display</h2>
-<p>The unlocked portal also links to <strong>Display</strong>, served at <code>/display</code>.
-It shows the sandbox&#39;s virtual X display in the browser with keyboard and mouse
+<p>The unlocked portal's <strong>Display</strong> page, served at <code>/display</code>, shows the live display.
+It renders the sandbox&#39;s virtual X display in the browser with keyboard and mouse
 input enabled by default; tick <strong>View only</strong> to watch without interfering with
 an agent that is driving the display. The page uses the vendored noVNC client
 and a WebSocket on the same admin port, which the host relays to an <code>x11vnc</code>
