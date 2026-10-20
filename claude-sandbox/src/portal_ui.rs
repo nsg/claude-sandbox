@@ -351,6 +351,7 @@ pub enum Nav {
     Access,
     Display,
     Usage,
+    Vms,
     System,
 }
 
@@ -390,7 +391,7 @@ pub fn public_bar() -> String {
     )
 }
 
-pub fn top_bar(active: Nav, pending: usize, port: u16, csrf: &str) -> String {
+pub fn top_bar(active: Nav, pending: usize, port: u16, csrf: &str, vms: bool) -> String {
     let tab = |nav: Nav, href: &str, label: &str, extra: &str| {
         let class = if nav == active { " class=\"on\"" } else { "" };
         format!(r#"<a{class} href="{href}">{label}{extra}</a>"#)
@@ -400,8 +401,13 @@ pub fn top_bar(active: Nav, pending: usize, port: u16, csrf: &str) -> String {
     } else {
         String::new()
     };
+    let vms = if vms {
+        tab(Nav::Vms, "/vms", "VMs", "")
+    } else {
+        String::new()
+    };
     format!(
-        r#"<header class="top"><a class="brand" href="/"><span class="mark">{ICON_MARK}</span><span>Sandbox Admin<small>claude-sandbox · port {port}</small></span></a><nav class="nav">{}{}{}{}{}</nav><div class="spacer"></div><div class="tools">{}<form method="post" action="/lock"><input type="hidden" name="csrf" value="{csrf}"><button class="iconbtn" title="Lock the portal in this browser" aria-label="Lock">{ICON_LOCK}</button></form></div></header>"#,
+        r#"<header class="top"><a class="brand" href="/"><span class="mark">{ICON_MARK}</span><span>Sandbox Admin<small>claude-sandbox · port {port}</small></span></a><nav class="nav">{}{}{}{}{vms}{}</nav><div class="spacer"></div><div class="tools">{}<form method="post" action="/lock"><input type="hidden" name="csrf" value="{csrf}"><button class="iconbtn" title="Lock the portal in this browser" aria-label="Lock">{ICON_LOCK}</button></form></div></header>"#,
         tab(Nav::Inbox, "/", "Inbox", &badge),
         tab(Nav::Access, "/access", "Access", ""),
         tab(Nav::Display, "/display", "Display", ""),

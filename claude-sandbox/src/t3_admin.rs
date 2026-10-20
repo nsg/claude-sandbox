@@ -19,6 +19,8 @@ use crate::portal_ui::{self, Nav};
 use crate::usage_api;
 use crate::usage_collector;
 use crate::usage_dashboard;
+use crate::vm_dashboard;
+use crate::vm_proxy;
 
 const MAX_REQUEST_BYTES: usize = 16_384;
 const MAX_BODY_BYTES: usize = 8_192;
@@ -46,6 +48,7 @@ struct Config {
     failed_logins: Mutex<HashMap<String, LoginFailures>>,
     notices: Mutex<HashMap<String, (Instant, Notice)>>,
     display_command: fn(&str) -> Command,
+    vm_instances: Option<fn() -> Result<serde_json::Value, String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +82,7 @@ pub struct RunOptions<'a> {
     pub fetch_state_dir: &'a Path,
     pub gh_state_dir: &'a Path,
     pub usage_state_dir: &'a Path,
+    pub vm_enabled: bool,
 }
 
 pub fn run(options: RunOptions<'_>) {
@@ -107,6 +111,9 @@ pub fn run(options: RunOptions<'_>) {
         failed_logins: Mutex::new(HashMap::new()),
         notices: Mutex::new(HashMap::new()),
         display_command,
+        vm_instances: options
+            .vm_enabled
+            .then_some(vm_proxy::portal_instances as fn() -> _),
     });
 
     usage_collector::start(
@@ -492,6 +499,16 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
         return;
     }
 
+    if request.method == "GET" && request.path == "/assets/vms.js" {
+        send_script(&mut stream, vm_dashboard::SCRIPT);
+        return;
+    }
+
+    if request.method == "GET" && request.path == "/api/vms" {
+        send_vms(&mut stream, &request, config);
+        return;
+    }
+
     if request.method == "POST" && request.path == "/login" {
         handle_login(&mut stream, &request, config);
         return;
@@ -543,6 +560,7 @@ fn handle_connection(mut stream: TcpStream, config: &Config) {
             match page {
                 Page::Access => render_access(config, notice.as_ref()),
                 Page::System => render_system(config, None, notice.as_ref()),
+                Page::Vms => render_vms(config),
                 page => render_inbox(config, Some(&page), notice.as_ref()),
             }
         };
@@ -1101,6 +1119,7 @@ enum Page {
     Inbox,
     Request(Option<RequestKey>),
     Access,
+    Vms,
     System,
 }
 
@@ -1109,6 +1128,7 @@ fn parse_page(path: &str) -> Option<Page> {
         "/" => Some(Page::Inbox),
         "/access" => Some(Page::Access),
         "/system" => Some(Page::System),
+        "/vms" => Some(Page::Vms),
         _ => path
             .strip_prefix("/r/")
             .map(|key| Page::Request(RequestKey::parse(key))),
@@ -1121,6 +1141,7 @@ fn login_target(next: Option<&str>) -> String {
     match next.and_then(parse_page) {
         Some(Page::Access) => "/access".to_string(),
         Some(Page::System) => "/system".to_string(),
+        Some(Page::Vms) => "/vms".to_string(),
         Some(Page::Request(Some(key))) => key.path(),
         _ => "/".to_string(),
     }
@@ -1317,6 +1338,7 @@ fn top_bar(config: &Config, nav: Nav, pending: usize) -> String {
         pending,
         config.portal_port,
         &escape_html(&config.csrf_token),
+        config.vm_instances.is_some(),
     )
 }
 
@@ -2235,6 +2257,47 @@ fn render_display(config: &Config) -> String {
     )
 }
 
+fn render_vms(config: &Config) -> String {
+    let pending = pending_requests(config).len();
+    if config.vm_instances.is_none() {
+        return app_page(
+            config,
+            Nav::Vms,
+            pending,
+            "VMs",
+            &vm_dashboard::disabled_main(),
+        );
+    }
+    portal_ui::page(
+        "VMs · Sandbox Admin",
+        "app",
+        vm_dashboard::STYLE,
+        r#"<script src="/assets/vms.js" defer></script>"#,
+        &format!(
+            "{}{}",
+            top_bar(config, Nav::Vms, pending),
+            vm_dashboard::main()
+        ),
+    )
+}
+
+fn send_vms(stream: &mut TcpStream, request: &Request, config: &Config) {
+    let (status, body) = if !is_authorized(request, config) {
+        (401, serde_json::json!({"error": "The portal is locked."}))
+    } else if let Some(instances) = config.vm_instances {
+        match instances() {
+            Ok(vms) => (200, serde_json::json!({ "vms": vms })),
+            Err(error) => (503, serde_json::json!({ "error": error.trim() })),
+        }
+    } else {
+        (
+            404,
+            serde_json::json!({"error": "The Virtual Machine Bridge is off."}),
+        )
+    };
+    send_json(stream, status, &body);
+}
+
 fn send_display_page(stream: &mut TcpStream, config: &Config) {
     let body = render_display(config);
     let headers = format!(
@@ -2546,7 +2609,7 @@ fn send_html(stream: &mut TcpStream, status: u16, body: &str, extra_headers: &[(
         _ => "Error",
     };
     let mut headers = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
         body.len()
     );
     for (name, value) in extra_headers {
@@ -2564,6 +2627,8 @@ fn send_json(stream: &mut TcpStream, status: u16, body: &impl serde::Serialize) 
     let body = serde_json::to_vec(body).unwrap_or_else(|_| b"{\"schema_version\":1}".to_vec());
     let reason = match status {
         200 => "OK",
+        401 => "Unauthorized",
+        404 => "Not Found",
         503 => "Service Unavailable",
         _ => "Error",
     };
@@ -3338,6 +3403,49 @@ mod tests {
         assert!(!public.contains(r#"class="nav""#));
         assert!(unlocked.contains(r#"<a class="on" href="/usage">Usage</a>"#));
         assert!(!unlocked.contains("target=\"_blank\""));
+        assert!(!unlocked.contains("href=\"/vms\""));
+    }
+
+    #[test]
+    fn vm_page_and_api_follow_the_bridge_and_the_session() {
+        fn instances() -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!([{"name": "web", "status": "Running"}]))
+        }
+        let workspace = temporary_workspace("vms");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut config = test_config(&workspace);
+        let session = "Cookie: t3_admin_session=session\r\n";
+
+        let off = make_request(
+            &config,
+            &format!("GET /api/vms HTTP/1.1\r\nHost: localhost\r\n{session}\r\n"),
+        );
+        assert!(off.starts_with("HTTP/1.1 404"));
+
+        config.vm_instances = Some(instances);
+        let locked = make_request(&config, "GET /api/vms HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let api = make_request(
+            &config,
+            &format!("GET /api/vms HTTP/1.1\r\nHost: localhost\r\n{session}\r\n"),
+        );
+        let page = make_request(
+            &config,
+            &format!("GET /vms HTTP/1.1\r\nHost: localhost\r\n{session}\r\n"),
+        );
+        let system = make_request(
+            &config,
+            &format!("GET /system HTTP/1.1\r\nHost: localhost\r\n{session}\r\n"),
+        );
+        std::fs::remove_dir(&workspace).unwrap();
+
+        assert!(locked.starts_with("HTTP/1.1 401"));
+        assert!(!locked.contains("\"web\""));
+        assert!(api.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(api.contains("\"name\":\"web\""));
+        assert!(page.contains(r#"<a class="on" href="/vms">VMs</a>"#));
+        assert!(page.contains(r#"<script src="/assets/vms.js" defer></script>"#));
+        assert!(page.contains("connect-src 'self'"));
+        assert!(system.contains(r#"href="/vms""#));
     }
 
     #[test]
@@ -3671,6 +3779,7 @@ mod tests {
             failed_logins: Mutex::new(HashMap::new()),
             notices: Mutex::new(HashMap::new()),
             display_command: echo_display_command,
+            vm_instances: None,
         };
         (config, restart_rx)
     }

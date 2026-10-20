@@ -660,6 +660,21 @@ impl IncusBridge {
         Response::ok(output)
     }
 
+    fn portal_instances(&self) -> Result<Value, String> {
+        let instances = self.query(
+            "/1.0/instances?recursion=2&project=claude-sandbox",
+            Duration::from_secs(10),
+        )?;
+        Ok(Value::Array(
+            instances
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(portal_instance)
+                .collect(),
+        ))
+    }
+
     fn info(&self, name: &str, as_json: bool) -> Response {
         let instances = match self.query(
             "/1.0/instances?recursion=2&project=claude-sandbox",
@@ -1501,6 +1516,14 @@ pub fn preflight_is_healthy(report: &str) -> bool {
     !report.lines().any(|line| line.starts_with("FAIL "))
 }
 
+/// Read-only resource figures for the admin portal's VM page.
+pub fn portal_instances() -> Result<Value, String> {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/root"));
+    IncusBridge::new(&home, Path::new("/"), Path::new("/")).portal_instances()
+}
+
 pub fn run(
     socket_path: &str,
     log_path: &Path,
@@ -2215,6 +2238,108 @@ fn summarize_instance(instance: &Value) -> Value {
     })
 }
 
+fn portal_instance(instance: &Value) -> Value {
+    let summary = summarize_instance(instance);
+    let config = instance
+        .get("expanded_config")
+        .or_else(|| instance.get("config"));
+    let setting = |key: &str| {
+        config
+            .and_then(|config| config.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
+    let state = instance.get("state");
+    let figure = |path: &[&str]| {
+        path.iter()
+            .try_fold(state?, |value, key| value.get(*key))
+            .and_then(Value::as_i64)
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0)
+    };
+    let (root_name, root_size) = instance
+        .get("expanded_devices")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .find(|(_, device)| {
+            device.get("type").and_then(Value::as_str) == Some("disk")
+                && device.get("path").and_then(Value::as_str) == Some("/")
+        })
+        .map(|(name, device)| {
+            (
+                name.as_str(),
+                device
+                    .get("size")
+                    .and_then(Value::as_str)
+                    .and_then(size_bytes),
+            )
+        })
+        .unwrap_or(("root", None));
+    let (mut received, mut sent) = (0_u64, 0_u64);
+    for (name, interface) in state
+        .and_then(|state| state.get("network"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        if name == "lo" {
+            continue;
+        }
+        let counter = |key: &str| {
+            interface
+                .get("counters")
+                .and_then(|counters| counters.get(key))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        received = received.saturating_add(counter("bytes_received"));
+        sent = sent.saturating_add(counter("bytes_sent"));
+    }
+    let memory_limit = size_bytes(setting("limits.memory"));
+    json!({
+        "name": summary["name"],
+        "status": summary["status"],
+        "ipv4": summary["ipv4"],
+        "image": setting("image.description"),
+        "created_at": instance.get("created_at").and_then(Value::as_str).unwrap_or(""),
+        "started_at": instance.get("last_used_at").and_then(Value::as_str).unwrap_or(""),
+        "cpus": setting("limits.cpu").parse::<u64>().ok(),
+        "cpu_usage_ns": figure(&["cpu", "usage"]),
+        "memory_usage": figure(&["memory", "usage"]),
+        "memory_total": figure(&["memory", "total"]).or(memory_limit),
+        "memory_limit": memory_limit,
+        "disk_usage": figure(&["disk", root_name, "usage"]),
+        "disk_total": figure(&["disk", root_name, "total"]).or(root_size),
+        "rx_bytes": received,
+        "tx_bytes": sent,
+        "processes": figure(&["processes"]),
+    })
+}
+
+/// Incus sizes as bytes: a plain number, or one with a decimal or binary unit.
+fn size_bytes(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let split = value
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (number, unit) = value.split_at(split);
+    let number = number.parse::<u64>().ok()?;
+    let scale: u64 = match unit.trim() {
+        "" | "B" => 1,
+        "kB" | "KB" => 1000,
+        "MB" => 1000_u64.pow(2),
+        "GB" => 1000_u64.pow(3),
+        "TB" => 1000_u64.pow(4),
+        "KiB" => 1 << 10,
+        "MiB" => 1 << 20,
+        "GiB" => 1 << 30,
+        "TiB" => 1 << 40,
+        _ => return None,
+    };
+    number.checked_mul(scale)
+}
+
 fn string_field<'a>(value: &'a Value, field: &str) -> &'a str {
     value.get(field).and_then(Value::as_str).unwrap_or("")
 }
@@ -2398,6 +2523,54 @@ mod tests {
         assert!(validate_public_alias("other:ubuntu").is_err());
         assert!(validate_public_alias("images:Ubuntu").is_err());
         assert!(validate_public_alias("images:foo:bar").is_err());
+    }
+
+    #[test]
+    fn portal_summary_reads_limits_and_usage() {
+        let instance = json!({
+            "name": "web",
+            "status": "Running",
+            "created_at": "2026-10-20T08:00:00Z",
+            "config": {"limits.cpu": "2"},
+            "expanded_config": {
+                "limits.cpu": "2",
+                "limits.memory": "4GiB",
+                "image.description": "Ubuntu noble amd64"
+            },
+            "expanded_devices": {
+                "root": {"type": "disk", "path": "/", "pool": "default", "size": "20GiB"},
+                "iso": {"type": "disk", "pool": "default", "source": "installer"}
+            },
+            "state": {
+                "cpu": {"usage": 5_000_000_000_u64},
+                "memory": {"usage": 1_073_741_824_u64, "total": 0},
+                "disk": {"root": {"usage": 3_221_225_472_u64}},
+                "network": {
+                    "lo": {"counters": {"bytes_received": 999, "bytes_sent": 999}},
+                    "enp5s0": {
+                        "addresses": [{"family": "inet", "address": "10.0.0.5"}],
+                        "counters": {"bytes_received": 100, "bytes_sent": 40}
+                    }
+                },
+                "processes": -1
+            }
+        });
+        let summary = portal_instance(&instance);
+        assert_eq!(summary["image"], "Ubuntu noble amd64");
+        assert_eq!(summary["cpus"], 2);
+        assert_eq!(summary["cpu_usage_ns"], 5_000_000_000_u64);
+        assert_eq!(summary["memory_total"], 4_u64 << 30);
+        assert_eq!(summary["disk_usage"], 3_u64 << 30);
+        assert_eq!(summary["disk_total"], 20_u64 << 30);
+        assert_eq!(summary["rx_bytes"], 100);
+        assert_eq!(summary["tx_bytes"], 40);
+        assert_eq!(summary["ipv4"], json!(["10.0.0.5"]));
+        assert!(summary["processes"].is_null());
+        assert!(
+            portal_instance(&json!({"name": "new", "status": "Stopped"}))["memory_usage"].is_null()
+        );
+        assert_eq!(size_bytes("512MB"), Some(512_000_000));
+        assert_eq!(size_bytes("1.5GiB"), None);
     }
 
     #[test]

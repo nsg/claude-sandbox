@@ -16,6 +16,7 @@ mod t3_admin;
 mod usage_api;
 mod usage_collector;
 mod usage_dashboard;
+mod vm_dashboard;
 mod vm_proxy;
 mod websocket;
 
@@ -205,6 +206,9 @@ enum Commands {
         gh_state_dir: PathBuf,
         #[arg(long)]
         usage_state_dir: PathBuf,
+        /// Show the Virtual Machine Bridge's VMs in the portal
+        #[arg(long)]
+        vm: bool,
     },
     /// Start the virtual machine proxy (internal, spawned automatically)
     #[command(hide = true)]
@@ -544,6 +548,7 @@ struct T3AdminConfig<'a> {
     fetch_state_dir: &'a Path,
     gh_state_dir: &'a Path,
     usage_state_dir: &'a Path,
+    vm_enabled: bool,
 }
 
 fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
@@ -568,7 +573,11 @@ fn ensure_t3_admin(config: &T3AdminConfig<'_>) {
         .arg("--gh-state-dir")
         .arg(config.gh_state_dir)
         .arg("--usage-state-dir")
-        .arg(config.usage_state_dir)
+        .arg(config.usage_state_dir);
+    if config.vm_enabled {
+        command.arg("--vm");
+    }
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1539,6 +1548,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
             fetch_state_dir,
             gh_state_dir,
             usage_state_dir,
+            vm,
         }) => {
             t3_admin::run(t3_admin::RunOptions {
                 portal_port: *port,
@@ -1550,6 +1560,7 @@ fn run_internal_command(command: Option<&Commands>) -> bool {
                 fetch_state_dir,
                 gh_state_dir,
                 usage_state_dir,
+                vm_enabled: *vm,
             });
         }
         Some(Commands::VmProxy {
@@ -1893,6 +1904,7 @@ fn main() {
                     fetch_state_dir: &state.fetch,
                     gh_state_dir: &state.gh,
                     usage_state_dir: &state.usage,
+                    vm_enabled: cli.vm,
                 });
             }
 

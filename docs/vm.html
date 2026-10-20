@@ -203,6 +203,14 @@ bound in those cases. Newer Incus releases check staging against the quota.</p>
 second viewer drops the first. The bridge opens the display through the Incus
 API itself, so SPICE viewers installed on the host, such as <code>remote-viewer</code> or
 <code>spicy</code>, do not affect it. The <a href="skills.html"><code>/vm</code> skill</a> describes the workflow.</p>
+<h2 id="portal"><a class="anchor" href="#portal" aria-hidden="true">#</a>Admin portal</h2>
+<p>When the sandbox runs with <code>--vm</code> and the <a href="t3code.html#admin-portal">admin portal</a>,
+the portal gains a <strong>VMs</strong> page. It lists every instance in the
+<code>claude-sandbox</code> Incus project with its status, image and address; CPU,
+memory and disk use against the VM&#39;s limits; network traffic; uptime; and the
+process count when the Incus agent runs in the guest. It refreshes every five
+seconds from <code>/api/vms</code>, which needs the same PIN session as the rest of the
+portal. The page only reads: VMs are still started and stopped with <code>vm</code>.</p>
 
         <nav class="pager" aria-label="Pages">
           <a class="prev" href="git-push.html"><span>Previous</span>Git push bridge</a>
