@@ -113,6 +113,9 @@ button and a crashed server both bring it back. Units for other commands use
 <p>The service updates the launcher and skills only when <code>--auto-update</code> is part
 of the installed command. Without that flag a service start never prompts, and
 while an update is pending it is skipped along with the container image pull.</p>
+<p>A service that starts before the network is up, for example right after boot,
+waits for about two minutes for the network before it checks for updates and pulls the image.
+If the network is still down after that, it starts with the local image.</p>
 <p>When upgrading from an older release, re-install units that set the portal PIN or
 ports through other environment variables or flags: run the updated command, such as
 the one above, with <code>--install-service</code> from the same directory to regenerate the unit.</p>

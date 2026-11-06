@@ -802,13 +802,43 @@ fn cache_dir() -> PathBuf {
         .unwrap_or_else(|_| home_dir().join(".cache"))
 }
 
-fn get_last_modified(client: &Client, url: &str) -> Option<String> {
-    let response = client.head(url).send().ok()?;
+fn last_modified(response: &reqwest::blocking::Response) -> Option<String> {
     response
         .headers()
         .get("last-modified")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
+}
+
+fn get_last_modified(client: &Client, url: &str) -> Option<String> {
+    last_modified(&client.head(url).send().ok()?)
+}
+
+// A service can start before the network is up, e.g. right after boot.
+// Interactive launches give up quickly so working offline stays usable.
+fn network_retry_delays(interactive: bool) -> &'static [u64] {
+    const DELAYS: [u64; 8] = [1, 2, 4, 8, 15, 30, 30, 30];
+    if interactive { &DELAYS[..2] } else { &DELAYS }
+}
+
+fn head_with_retry(client: &Client, url: &str, quiet: bool) -> Option<reqwest::blocking::Response> {
+    let interactive = std::io::stdin().is_terminal();
+    let mut delays = network_retry_delays(interactive).iter();
+    loop {
+        match client.head(url).send() {
+            Ok(response) => return Some(response),
+            Err(error) => {
+                let Some(&delay) = delays.next() else {
+                    eprintln!("Warning: network unavailable ({error}), skipping updates");
+                    return None;
+                };
+                if !quiet {
+                    eprintln!("Network unavailable, retrying in {delay}s");
+                }
+                thread::sleep(Duration::from_secs(delay));
+            }
+        }
+    }
 }
 
 fn read_cache_file(path: &PathBuf) -> Option<String> {
@@ -825,31 +855,38 @@ fn write_cache_file(path: &PathBuf, content: &str) {
 }
 
 struct UpdateStatus {
+    online: bool,
     binary_available: Option<String>,
     skills_available: Option<String>,
 }
 
-fn check_available_updates(client: &Client) -> UpdateStatus {
+fn check_available_updates(client: &Client, quiet: bool) -> UpdateStatus {
     let binary_cache = cache_dir().join("claude-sandbox-lastmod");
     let skills_cache = cache_dir().join("claude-sandbox-skills-lastmod");
 
-    let binary_available = get_last_modified(client, SCRIPT_URL).and_then(|remote| {
-        let local = read_cache_file(&binary_cache);
-        if local.is_none() {
-            write_cache_file(&binary_cache, &remote);
-            return None;
-        }
-        if local.as_ref() != Some(&remote) {
-            Some(remote)
-        } else {
-            None
-        }
-    });
+    let response = head_with_retry(client, SCRIPT_URL, quiet);
+    let online = response.is_some();
+    let binary_available = response
+        .as_ref()
+        .and_then(last_modified)
+        .and_then(|remote| {
+            let local = read_cache_file(&binary_cache);
+            if local.is_none() {
+                write_cache_file(&binary_cache, &remote);
+                return None;
+            }
+            if local.as_ref() != Some(&remote) {
+                Some(remote)
+            } else {
+                None
+            }
+        });
 
     let skills_available = read_cache_file(&skills_cache)
         .and_then(|local| get_last_modified(client, SKILLS_URL).filter(|remote| local != *remote));
 
     UpdateStatus {
+        online,
         binary_available,
         skills_available,
     }
@@ -1811,8 +1848,9 @@ fn main() {
     }
     let client = Client::new();
 
-    let update_status = check_available_updates(&client);
-    let should_pull = perform_updates(&client, &update_status, cli.auto_update, cli.quiet);
+    let update_status = check_available_updates(&client, cli.quiet);
+    let should_pull = perform_updates(&client, &update_status, cli.auto_update, cli.quiet)
+        && update_status.online;
     refresh_extension(cli.quiet);
 
     match cli.command {

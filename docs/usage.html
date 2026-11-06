@@ -108,6 +108,7 @@ CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --install-service --portal --t3-
 <pre><code class="language-bash">claude-sandbox --auto-update
 </code></pre>
 <p>When a new container image is pulled successfully, older images of this project are removed automatically. If the pull fails, the previous image is kept and used.</p>
+<p>If the network is unreachable, the update check retries with a growing delay before giving up: for about two minutes when not started from a terminal, such as a service starting at boot, and for a few seconds in an interactive shell. When it gives up, it skips the launcher, skills and image updates for that launch and starts with the local image.</p>
 <h2 id="quiet-mode"><a class="anchor" href="#quiet-mode" aria-hidden="true">#</a>Quiet mode</h2>
 <p>Suppress informational output, only show errors:</p>
 <pre><code class="language-bash">claude-sandbox --quiet
