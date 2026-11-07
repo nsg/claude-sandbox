@@ -146,8 +146,8 @@ unrelated workloads out of the <code>claude-sandbox</code> project.</p>
 <td>Show one VM, including its addresses</td>
 </tr>
 <tr>
-<td><code>vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--persistent]</code></td>
-<td>Create and start a VM, ephemeral unless <code>--persistent</code>; defaults are 2 CPUs, 4 GiB memory, and a 20 GiB disk</td>
+<td><code>vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--no-tpm] [--persistent]</code></td>
+<td>Create and start a VM, ephemeral unless <code>--persistent</code>; defaults are 2 CPUs, 4 GiB memory, a 20 GiB disk, and a virtual TPM</td>
 </tr>
 <tr>
 <td><code>vm start NAME</code></td>
@@ -210,6 +210,15 @@ but import accounting varies by Incus version. Incus 6.0 stages an ISO upload
 on the host before checking its quota, and retained images are not counted
 against later image imports, so the bridge&#39;s own import caps are the effective
 bound in those cases. Newer Incus releases check staging against the quota.</p>
+<p>Every VM gets a virtual TPM 2.0, which Windows 11 needs and which measured
+boot and TPM-sealed disk encryption use. Incus emulates it with <code>swtpm</code>, so the
+host needs the <code>swtpm</code> package; on a host without it, launch with <code>--no-tpm</code>.
+Restricted projects allow TPM devices without extra configuration. Each TPM
+adds a host process that parses commands from the guest, so keep the host&#39;s
+<code>swtpm</code> and <code>libtpms</code> packages patched. Its state is stored unencrypted on the
+host, so it protects guest secrets from the guest&#39;s own users, not from the
+host. A persistent VM keeps its TPM state across stops; the state is deleted
+with the VM.</p>
 <p>With <code>vm view</code>, the guest fills the virtual display, so the agent reads it with
 <code>scrot</code> and sends keys and clicks with <code>xdotool</code>, and you can watch through the
 <a href="t3code.html#live-display">live display</a> in the admin portal. SPICE serves one viewer at a time: a

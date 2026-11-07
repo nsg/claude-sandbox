@@ -45,7 +45,7 @@ Usage:\n\
   vm status\n\
   vm list [--json]\n\
   vm info NAME [--json]\n\
-  vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--persistent]\n\
+  vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--no-tpm] [--persistent]\n\
   vm start NAME           boot a stopped persistent VM\n\
   vm stop NAME [--force]\n\
   vm restart NAME [--force]\n\
@@ -62,6 +62,7 @@ Usage:\n\
 VMs are ephemeral by default: stopping one deletes it and its disk.\n\
 --persistent VMs keep their disk when stopped, are stopped when the sandbox exits,\n\
 and remain until `vm delete`.\n\
+VMs get a virtual TPM 2.0 unless launched with --no-tpm.\n\
 exec needs the Incus agent, which images: VMs have and ISO installs do not.\n\
 console-log requires an Incus server newer than 6.0.0 for VMs.\n";
 
@@ -194,6 +195,7 @@ struct LaunchOptions {
     disk: String,
     no_secureboot: bool,
     persistent: bool,
+    no_tpm: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -804,6 +806,7 @@ impl IncusBridge {
             response
                 .stderr
                 .push_str("vm: deleted any half-created VM\n");
+            push_tpm_hint(&mut response, options);
             return response;
         }
         let start_args = vec![
@@ -832,6 +835,7 @@ impl IncusBridge {
                     response
                         .stderr
                         .push_str("vm: deleted the half-created VM\n");
+                    push_tpm_hint(&mut response, options);
                     response
                 }
             }
@@ -1855,6 +1859,7 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
     let mut disk = "20GiB".to_string();
     let mut no_secureboot = false;
     let mut persistent = false;
+    let mut no_tpm = false;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -1899,6 +1904,7 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
             }
             "--no-secureboot" => no_secureboot = true,
             "--persistent" => persistent = true,
+            "--no-tpm" => no_tpm = true,
             flag => return Err(format!("unknown launch option: {flag}")),
         }
         index += 1;
@@ -1912,6 +1918,7 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
         disk,
         no_secureboot,
         persistent,
+        no_tpm,
     })
 }
 
@@ -2058,6 +2065,9 @@ fn build_launch(
             "iso".to_string(),
             json!({"type": "disk", "pool": pool, "source": name, "boot.priority": "10"}),
         );
+    }
+    if !options.no_tpm {
+        devices.insert("tpm".to_string(), json!({"type": "tpm"}));
     }
     let body = serde_json::to_string(&json!({
         "ephemeral": !options.persistent,
@@ -2284,6 +2294,14 @@ fn command_response(output: CommandOutput) -> Response {
         exit_code: output.status.code().unwrap_or(1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+fn push_tpm_hint(response: &mut Response, options: &LaunchOptions) {
+    if !options.no_tpm && response.stderr.to_ascii_lowercase().contains("tpm") {
+        response
+            .stderr
+            .push_str("vm: the host may lack swtpm; retry with --no-tpm\n");
     }
 }
 
@@ -2755,6 +2773,7 @@ mod tests {
             disk: "40GiB".to_string(),
             no_secureboot: true,
             persistent: false,
+            no_tpm: false,
         };
         let (public_args, public_body) = build_launch(&base, "pool", "system", REMOTE, PROJECT);
         assert_eq!(
@@ -2775,10 +2794,12 @@ mod tests {
         assert_eq!(body["config"]["security.secureboot"], "false");
         assert_eq!(body["devices"]["system"]["pool"], "pool");
         assert!(body["devices"].get("root").is_none());
+        assert_eq!(body["devices"]["tpm"], json!({"type": "tpm"}));
 
         let mut local = base.clone();
         local.source = LaunchSource::LocalImage("installer".to_string());
         local.no_secureboot = false;
+        local.no_tpm = true;
         let (local_args, local_body) = build_launch(&local, "pool", "system", REMOTE, PROJECT);
         assert_eq!(
             local_args,
@@ -2794,6 +2815,7 @@ mod tests {
         );
         let body: Value = serde_json::from_str(&local_body).unwrap();
         assert!(body["config"].get("security.secureboot").is_none());
+        assert!(body["devices"].get("tpm").is_none());
 
         let mut iso = base;
         iso.source = LaunchSource::Iso("ubuntu-iso".to_string());
@@ -3081,6 +3103,7 @@ raise SystemExit(0)
             disk: "20GiB".to_string(),
             no_secureboot: false,
             persistent: false,
+            no_tpm: false,
         });
         assert_ne!(response.exit_code, 0);
         let calls = fs::read_to_string(root.join("calls")).unwrap();
@@ -3114,6 +3137,7 @@ raise SystemExit(0)
             disk: "20GiB".to_string(),
             no_secureboot: false,
             persistent: false,
+            no_tpm: false,
         });
         assert!(response.stderr.contains("'kept' already exists"));
         bridge.launching.lock().unwrap().insert("busy".to_string());
@@ -3125,6 +3149,7 @@ raise SystemExit(0)
             disk: "20GiB".to_string(),
             no_secureboot: false,
             persistent: true,
+            no_tpm: false,
         });
         assert!(response.stderr.contains("already being launched"));
         let calls = fs::read_to_string(root.join("calls")).unwrap();

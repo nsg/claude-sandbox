@@ -96,6 +96,10 @@ Use `--no-secureboot` for installers and systems that are not signed for UEFI
 Secure Boot (most non-mainstream ISOs). If a VM sits at the firmware screen or
 drops to the UEFI shell, that flag is the first thing to try.
 
+VMs get a virtual TPM 2.0 (`/dev/tpm0` in a Linux guest) by default, which
+Windows 11 installers require. Pass `--no-tpm` only when launch fails because
+the host lacks `swtpm`.
+
 ## Run commands in the guest
 
 ```bash
