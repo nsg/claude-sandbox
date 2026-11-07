@@ -38,8 +38,9 @@ vm status
   wants it kept; it holds disk quota while stopped, so delete it once it is no
   longer wanted.
 - **Unused VMs are cleaned up.** Any `vm` command naming a VM (`info`,
-  `exec`, `start`, `stop`, `restart`, `eject`, `screen`/`view`,
-  `console-log`) and an open `vm view` count as use; `vm list` does not. After
+  `exec`, `pipe`, `start`, `stop`, `restart`, `eject`, `screen`/`view`,
+  `console-log`), an open `vm view` and an open `vm pipe` count as use;
+  `vm list` does not. After
   6 hours without use a VM is stopped — so an ephemeral one is deleted — and a
   persistent VM is deleted with its disk after 24 hours without use. Change
   them at launch with `--idle-stop` and, for persistent VMs, `--idle-delete`
@@ -64,7 +65,8 @@ vm status
   host and the network, but nothing in a VM can connect to a server running
   inside the sandbox. When a guest needs a service — a web server, a
   package mirror, files to download — run it on a small separate VM and point
-  the guest at that VM's address.
+  the guest at that VM's address. To move files between the sandbox and a
+  guest, use `vm pipe` (below); it needs no network.
 - CPU, memory, disk and VM count are capped by the user's Incus project; a
   "limit" error means ask the user, not retry.
 
@@ -126,6 +128,30 @@ than driving the screen — use it whenever the guest has the Incus agent
 (`images:` VMs do; ISO installs and foreign disk images usually do not). Just
 after launch the agent may not be up yet: retry for up to a minute before
 concluding it is missing.
+
+### Streaming data: `vm pipe`
+
+`vm exec` gives the guest no stdin and buffers output. `vm pipe` streams
+instead: the sandbox's stdin goes to the guest command, its stdout and stderr
+come back as they are written, and `vm pipe` exits with its exit code. It has
+no timeout and keeps the VM in use while open. Use it for anything that moves
+data or talks a protocol over stdio:
+
+```bash
+tar -C src -cf - . | vm pipe web -- tar -C /build -xf -     # copy a tree in
+vm pipe web -- tar -C /build/out -cf - . | tar -C out -xf - # copy results out
+vm pipe web -- sh -c 'cat > /etc/app.conf' < app.conf        # write one file
+rsync -a -e 'vm pipe' src/ web:/build/                       # incremental sync
+```
+
+`vm pipe NAME -- CMD ARG...` runs the command exactly as given. Without `--`
+the words are joined and run by the guest's `sh`, the way ssh runs a remote
+command; that form is what makes `rsync -e 'vm pipe'` work (rsync must be
+installed in the guest too). At most 8 pipes may be open at once.
+
+Results pulled out of a guest are written by the sandbox side, so treat a guest
+that ran untrusted code as untrusted: unpack its output into a fresh directory
+rather than over the workspace.
 
 `vm console-log NAME` prints the guest's serial console output, useful for
 boot failures on guests that log there. It requires an Incus server newer than

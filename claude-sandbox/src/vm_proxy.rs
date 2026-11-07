@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -35,6 +36,14 @@ const DEFAULT_MAX_ISO_SIZE: u64 = 16 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_MEDIA: usize = 16;
 const DEFAULT_MAX_REQUESTS: usize = 16;
 const DEFAULT_MAX_RELAY_CONNECTIONS: usize = 32;
+const DEFAULT_MAX_PIPES: usize = 8;
+const PIPE_FRAME_LIMIT: usize = 64 * 1024;
+const PIPE_CHUNK: usize = 32 * 1024;
+const FRAME_STDIN: u8 = 0;
+const FRAME_STDOUT: u8 = 1;
+const FRAME_STDERR: u8 = 2;
+const FRAME_EXIT: u8 = 3;
+const FRAME_STDIN_EOF: u8 = 4;
 const DEFAULT_RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PERSISTENT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const LAST_USED_KEY: &str = "user.claude-sandbox.last-used";
@@ -64,6 +73,8 @@ Usage:\n\
   vm screen NAME          print the VM's spice+unix:// display address\n\
   vm view NAME            open that display full-screen on the sandbox X display\n\
   vm exec NAME [--timeout SECS] -- CMD [ARG...]\n\
+  vm pipe NAME -- CMD [ARG...]   stream stdin/stdout to a guest command\n\
+  vm pipe NAME COMMAND...        same, run through the guest's sh like ssh does\n\
   vm console-log NAME\n\
   vm import PATH NAME\n\
   vm media [--json]\n\
@@ -77,7 +88,9 @@ Every command naming a VM counts as use. A VM idle for --idle-stop (default 6h)\
 is stopped, which deletes an ephemeral one; a persistent VM idle for\n\
 --idle-delete (default 24h) is deleted. DURATION is N followed by m, h or d,\n\
 from 1h; --idle-stop is at most 7d and --idle-delete at most 30d.\n\
-exec needs the Incus agent, which images: VMs have and ISO installs do not.\n\
+exec and pipe need the Incus agent, which images: VMs have and ISO installs do not.\n\
+pipe has no timeout and keeps the VM in use while it runs; it works as an\n\
+rsync remote shell: rsync -e 'vm pipe' DIR/ NAME:/DEST/\n\
 console-log requires an Incus server newer than 6.0.0 for VMs.\n";
 
 #[derive(Deserialize)]
@@ -214,6 +227,13 @@ enum Reap {
 
 struct RequestSlot(Arc<AtomicUsize>);
 
+struct PipeStart {
+    name: String,
+    command: Vec<String>,
+    _use: VmUse,
+    _slot: RequestSlot,
+}
+
 impl Drop for RequestSlot {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
@@ -234,6 +254,8 @@ pub(crate) struct IncusBridge {
     max_media: usize,
     max_relay_connections: usize,
     relay_idle_timeout: Duration,
+    max_pipes: usize,
+    pipes: Arc<AtomicUsize>,
     relays: Arc<Mutex<HashMap<String, Relay>>>,
     relay_start: Arc<Mutex<()>>,
     import_lock: Arc<Mutex<()>>,
@@ -303,6 +325,10 @@ enum VmCommand {
         timeout: Duration,
         command: Vec<String>,
     },
+    Pipe {
+        name: String,
+        command: Vec<String>,
+    },
     ConsoleLog {
         name: String,
     },
@@ -329,6 +355,7 @@ impl VmCommand {
             | Self::Eject { name }
             | Self::Screen { name }
             | Self::Exec { name, .. }
+            | Self::Pipe { name, .. }
             | Self::ConsoleLog { name } => Some(name),
             _ => None,
         }
@@ -352,6 +379,8 @@ impl IncusBridge {
             max_media: DEFAULT_MAX_MEDIA,
             max_relay_connections: DEFAULT_MAX_RELAY_CONNECTIONS,
             relay_idle_timeout: DEFAULT_RELAY_IDLE_TIMEOUT,
+            max_pipes: DEFAULT_MAX_PIPES,
+            pipes: Arc::new(AtomicUsize::new(0)),
             relays: Arc::new(Mutex::new(HashMap::new())),
             relay_start: Arc::new(Mutex::new(())),
             import_lock: Arc::new(Mutex::new(())),
@@ -751,6 +780,9 @@ impl IncusBridge {
                 timeout,
                 command,
             } => self.exec(&name, timeout, &command),
+            VmCommand::Pipe { .. } => {
+                Response::error("pipe needs a streaming connection; run it with the vm command")
+            }
             VmCommand::ConsoleLog { name } => self.console_log(&name),
             VmCommand::Import { path, name } => self.import(&path, &name, request.cwd.as_deref()),
             VmCommand::Media { json } => self.media(json),
@@ -1049,6 +1081,182 @@ impl IncusBridge {
             Ok(output) => command_response(output),
             Err(error) => Response::error(error),
         }
+    }
+
+    /// Serves one `vm pipe` connection: frames from the client feed the guest
+    /// command's stdin, its stdout and stderr go back as frames, and the last
+    /// frame carries its exit code. Returns that code for the log.
+    fn handle_pipe(
+        &self,
+        args: &[String],
+        reader: BufReader<&UnixStream>,
+        stream: &UnixStream,
+        request_slot: RequestSlot,
+    ) -> i32 {
+        let response = match self.prepare_pipe(args, request_slot) {
+            Ok(start) => return self.run_pipe(start, reader, stream),
+            Err(response) => response,
+        };
+        let mut writer = stream;
+        let _ = write_response_frames(&mut writer, &response);
+        response.exit_code
+    }
+
+    fn prepare_pipe(
+        &self,
+        args: &[String],
+        request_slot: RequestSlot,
+    ) -> Result<PipeStart, Response> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(Response::error("bridge is shutting down"));
+        }
+        let (name, command) = match parse_args(args).map_err(Response::error)? {
+            VmCommand::Pipe { name, command } => (name, command),
+            _ => return Err(Response::error("not a pipe request")),
+        };
+        self.ensure_healthy()?;
+        if !reserve_connection(&self.pipes, self.max_pipes) {
+            return Err(Response::error(format!(
+                "{} pipes are already open; close one and retry",
+                self.max_pipes
+            )));
+        }
+        let pipe_slot = RequestSlot(Arc::clone(&self.pipes));
+        // A pipe can stay open for hours, so it must not hold one of the
+        // short-request slots that every other command shares.
+        drop(request_slot);
+        let vm_use = self.begin_use(&name)?;
+        Ok(PipeStart {
+            name,
+            command,
+            _use: vm_use,
+            _slot: pipe_slot,
+        })
+    }
+
+    fn run_pipe(
+        &self,
+        start: PipeStart,
+        mut reader: BufReader<&UnixStream>,
+        stream: &UnixStream,
+    ) -> i32 {
+        let mut writer = stream;
+        let fail = |writer: &mut &UnixStream, message: String| {
+            let response = Response::error(message);
+            let _ = write_response_frames(writer, &response);
+            response.exit_code
+        };
+        if stream.set_read_timeout(None).is_err() || stream.set_write_timeout(None).is_err() {
+            return fail(
+                &mut writer,
+                "could not prepare the pipe connection".to_string(),
+            );
+        }
+        let mut args = vec![
+            "exec".to_string(),
+            "-T".to_string(),
+            "--project".to_string(),
+            self.project.to_string(),
+            format!("{}:{}", self.remote, start.name),
+            "--".to_string(),
+        ];
+        args.extend_from_slice(&start.command);
+        let mut command = match self.command() {
+            Ok(command) => command,
+            Err(error) => return fail(&mut writer, error),
+        };
+        command
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return fail(
+                    &mut writer,
+                    format!("failed to execute Incus client: {error}"),
+                );
+            }
+        };
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("piped stdout missing");
+        let stderr = child.stderr.take().expect("piped stderr missing");
+        let writer = Mutex::new(stream);
+        let client_gone = AtomicBool::new(false);
+
+        thread::scope(|scope| {
+            let writer = &writer;
+            let client_gone = &client_gone;
+            // The client ends stdin with an EOF frame and stays connected for
+            // the output; a bare end of stream means it went away.
+            scope.spawn(move || {
+                let mut stdin = stdin;
+                loop {
+                    match read_pipe_frame(&mut reader) {
+                        Ok(Some((FRAME_STDIN, data))) => {
+                            if let Some(pipe) = stdin.as_mut()
+                                && pipe.write_all(&data).is_err()
+                            {
+                                stdin = None;
+                            }
+                        }
+                        Ok(Some((FRAME_STDIN_EOF, _))) => stdin = None,
+                        _ => {
+                            client_gone.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+            });
+            let pump = move |mut source: Box<dyn Read + Send>, kind: u8| {
+                let mut buffer = vec![0; PIPE_CHUNK];
+                loop {
+                    match source.read(&mut buffer) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            let mut writer = writer.lock().expect("pipe writer lock poisoned");
+                            if write_pipe_frame(&mut *writer, kind, &buffer[..n]).is_err() {
+                                client_gone.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
+                    }
+                }
+            };
+            let stdout_pump = scope.spawn(move || pump(Box::new(stdout), FRAME_STDOUT));
+            let stderr_pump = scope.spawn(move || pump(Box::new(stderr), FRAME_STDERR));
+
+            let status = loop {
+                if client_gone.load(Ordering::Acquire) || self.shutting_down.load(Ordering::Acquire)
+                {
+                    let _ = child.kill();
+                }
+                match child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) => thread::sleep(Duration::from_millis(20)),
+                    Err(_) => {
+                        let _ = child.kill();
+                        break child.wait().ok();
+                    }
+                }
+            };
+            let _ = stdout_pump.join();
+            let _ = stderr_pump.join();
+            let code = match status {
+                Some(status) => status
+                    .code()
+                    .or_else(|| status.signal().map(|signal| 128 + signal))
+                    .unwrap_or(1),
+                None => 1,
+            };
+            if !client_gone.load(Ordering::Acquire) {
+                let mut writer = writer.lock().expect("pipe writer lock poisoned");
+                let _ = write_pipe_frame(&mut *writer, FRAME_EXIT, &code.to_be_bytes());
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+            code
+        })
     }
 
     fn console_log(&self, name: &str) -> Response {
@@ -1990,15 +2198,32 @@ pub fn run(
                 let log = Arc::clone(&log);
                 let requests = Arc::clone(&requests);
                 thread::spawn(move || {
-                    let _slot = RequestSlot(requests);
-                    let reader = BufReader::new(&stream);
+                    let slot = RequestSlot(requests);
+                    let mut reader = BufReader::new(&stream);
                     let mut writer = &stream;
                     let mut line = String::new();
-                    if let Ok(n) = reader.take(1_048_576).read_line(&mut line) {
+                    if let Ok(n) = (&mut reader).take(1_048_576).read_line(&mut line) {
                         if n == 0 {
                             return;
                         }
-                        let response = match serde_json::from_str::<Request>(&line) {
+                        let request = serde_json::from_str::<Request>(&line);
+                        if let Ok(request) = &request
+                            && request.args.first().map(String::as_str) == Some("pipe")
+                        {
+                            let display = truncate_log(escape_log(&request.args.join(" ")));
+                            log_line(&log, &format!("OPEN    vm {display}"));
+                            let denied = parse_args(&request.args).is_err();
+                            let code = bridge.handle_pipe(&request.args, reader, &stream, slot);
+                            let outcome = match (denied, code) {
+                                (true, _) => "DENIED ",
+                                (false, 0) => "ALLOWED",
+                                _ => "ERROR  ",
+                            };
+                            log_line(&log, &format!("{outcome} vm {display} -> {code}"));
+                            return;
+                        }
+                        let _slot = slot;
+                        let response = match request {
                             Ok(request) => {
                                 let display = truncate_log(escape_log(&request.args.join(" ")));
                                 let denied = parse_args(&request.args).is_err();
@@ -2066,6 +2291,7 @@ fn parse_args(args: &[String]) -> Result<VmCommand, String> {
         "screen" => parse_single_name(&args[1..]).map(|name| VmCommand::Screen { name }),
         "console-log" => parse_single_name(&args[1..]).map(|name| VmCommand::ConsoleLog { name }),
         "exec" => parse_exec(&args[1..]),
+        "pipe" => parse_pipe(&args[1..]),
         "import" if args.len() == 3 => {
             validate_name(&args[2])?;
             Ok(VmCommand::Import {
@@ -2329,6 +2555,32 @@ fn parse_exec(args: &[String]) -> Result<VmCommand, String> {
     Ok(VmCommand::Exec {
         name: name.clone(),
         timeout,
+        command,
+    })
+}
+
+/// `vm pipe NAME -- CMD...` runs CMD as given. Without `--` the words are
+/// joined and run by the guest's sh, the way ssh runs a remote command, so
+/// tools that take a remote shell (rsync -e) can use `vm pipe` directly.
+fn parse_pipe(args: &[String]) -> Result<VmCommand, String> {
+    const USAGE: &str = "usage: vm pipe NAME -- CMD [ARG...] or vm pipe NAME COMMAND...";
+    let Some((name, rest)) = args.split_first() else {
+        return Err(USAGE.to_string());
+    };
+    validate_name(name)?;
+    let command = match rest.split_first() {
+        Some((separator, command)) if separator == "--" => command.to_vec(),
+        Some((first, _)) if first.starts_with('-') => {
+            return Err(format!("vm pipe takes no options\n{USAGE}"));
+        }
+        Some(_) => vec!["sh".to_string(), "-c".to_string(), rest.join(" ")],
+        None => Vec::new(),
+    };
+    if command.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    Ok(VmCommand::Pipe {
+        name: name.clone(),
         command,
     })
 }
@@ -2695,6 +2947,51 @@ fn push_tpm_hint(response: &mut Response, options: &LaunchOptions) {
             .stderr
             .push_str("vm: the host may lack swtpm; retry with --no-tpm\n");
     }
+}
+
+/// One `vm pipe` frame: a kind byte, a big-endian u32 length, the payload.
+fn write_pipe_frame(writer: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
+    let length = u32::try_from(payload.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let mut frame = Vec::with_capacity(5 + payload.len());
+    frame.push(kind);
+    frame.extend_from_slice(&length.to_be_bytes());
+    frame.extend_from_slice(payload);
+    writer.write_all(&frame)
+}
+
+/// Reads one frame; `None` when the stream ends, an error for a frame over
+/// PIPE_FRAME_LIMIT or a stream cut mid-frame.
+fn read_pipe_frame(reader: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
+    let mut header = [0; 5];
+    let mut filled = 0;
+    while filled < header.len() {
+        match reader.read(&mut header[filled..]) {
+            Ok(0) if filled == 0 => return Ok(None),
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => filled += n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let length = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+    if length > PIPE_FRAME_LIMIT {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut payload = vec![0; length];
+    reader.read_exact(&mut payload)?;
+    Ok(Some((header[0], payload)))
+}
+
+fn write_response_frames(writer: &mut impl Write, response: &Response) -> io::Result<()> {
+    for (kind, text) in [
+        (FRAME_STDOUT, &response.stdout),
+        (FRAME_STDERR, &response.stderr),
+    ] {
+        for chunk in text.as_bytes().chunks(PIPE_CHUNK) {
+            write_pipe_frame(writer, kind, chunk)?;
+        }
+    }
+    write_pipe_frame(writer, FRAME_EXIT, &response.exit_code.to_be_bytes())
 }
 
 fn json_response(value: &Value) -> Response {
@@ -3818,6 +4115,172 @@ with pathlib.Path(__file__).with_name("calls").open("a") as f:
         drop(claim);
         let _use = bridge.begin_use("web").ok().unwrap();
         assert!(bridge.claim_idle("web").is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pipe_runs_argv_after_separator_and_shell_words_otherwise() {
+        let parse = |args: &[&str]| parse_args(&strings(args));
+        assert_eq!(
+            parse(&["pipe", "web", "--", "tar", "-xf", "-"]),
+            Ok(VmCommand::Pipe {
+                name: "web".to_string(),
+                command: strings(&["tar", "-xf", "-"]),
+            })
+        );
+        assert_eq!(
+            parse(&[
+                "pipe",
+                "web",
+                "rsync",
+                "--server",
+                "-logDtpre.iLsfxCIvu",
+                ".",
+                "/a\\ b/"
+            ]),
+            Ok(VmCommand::Pipe {
+                name: "web".to_string(),
+                command: strings(&["sh", "-c", "rsync --server -logDtpre.iLsfxCIvu . /a\\ b/"]),
+            })
+        );
+        for invalid in [
+            &["pipe"][..],
+            &["pipe", "web"],
+            &["pipe", "web", "--"],
+            &["pipe", "web", "-l", "root", "true"],
+            &["pipe", "--project", "--", "true"],
+            &["pipe", "Web", "--", "true"],
+        ] {
+            assert!(parse(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn frames_round_trip_and_reject_oversized_payloads() {
+        let mut buffer = Vec::new();
+        write_pipe_frame(&mut buffer, FRAME_STDOUT, b"hello").unwrap();
+        write_pipe_frame(&mut buffer, FRAME_STDIN_EOF, b"").unwrap();
+        let mut reader = buffer.as_slice();
+        assert_eq!(
+            read_pipe_frame(&mut reader).unwrap(),
+            Some((FRAME_STDOUT, b"hello".to_vec()))
+        );
+        assert_eq!(
+            read_pipe_frame(&mut reader).unwrap(),
+            Some((FRAME_STDIN_EOF, Vec::new()))
+        );
+        assert_eq!(read_pipe_frame(&mut reader).unwrap(), None);
+
+        let mut oversized = vec![FRAME_STDIN];
+        oversized.extend_from_slice(&(PIPE_FRAME_LIMIT as u32 + 1).to_be_bytes());
+        assert!(read_pipe_frame(&mut oversized.as_slice()).is_err());
+        assert!(read_pipe_frame(&mut &[FRAME_STDIN, 0, 0][..]).is_err());
+    }
+
+    fn pipe_test_bridge(label: &str) -> (PathBuf, IncusBridge) {
+        let root = temp_dir(label);
+        let fake = root.join("incus");
+        executable(
+            &fake,
+            "#!/bin/sh\n\
+             [ \"$1\" = exec ] || exit 0\n\
+             printf '%s\\n' \"$*\" > \"${0%/*}/exec-args\"\n\
+             case \"$*\" in *sleep*) exec /bin/sleep 30;; esac\n\
+             /bin/cat\n\
+             echo guest-stderr >&2\n\
+             exit 7\n",
+        );
+        let bridge = test_bridge(&root, &fake);
+        bridge.healthy.store(true, Ordering::Release);
+        (root, bridge)
+    }
+
+    fn serve_pipe(bridge: &IncusBridge, args: &[&str]) -> (UnixStream, thread::JoinHandle<i32>) {
+        let (client, server) = UnixStream::pair().unwrap();
+        let bridge = bridge.clone();
+        let args = strings(args);
+        let requests = Arc::new(AtomicUsize::new(1));
+        let handle = thread::spawn(move || {
+            bridge.handle_pipe(
+                &args,
+                BufReader::new(&server),
+                &server,
+                RequestSlot(requests),
+            )
+        });
+        (client, handle)
+    }
+
+    #[test]
+    fn pipe_streams_stdin_and_returns_output_and_exit_code() {
+        let (root, bridge) = pipe_test_bridge("pipe");
+        let (mut client, handle) = serve_pipe(&bridge, &["pipe", "web", "--", "cat"]);
+        write_pipe_frame(&mut client, FRAME_STDIN, b"hello ").unwrap();
+        write_pipe_frame(&mut client, FRAME_STDIN, b"guest").unwrap();
+        write_pipe_frame(&mut client, FRAME_STDIN_EOF, b"").unwrap();
+
+        let (mut stdout, mut stderr, mut exit) = (Vec::new(), Vec::new(), None);
+        while let Some((kind, payload)) = read_pipe_frame(&mut client).unwrap() {
+            match kind {
+                FRAME_STDOUT => stdout.extend(payload),
+                FRAME_STDERR => stderr.extend(payload),
+                FRAME_EXIT => exit = Some(i32::from_be_bytes(payload.try_into().unwrap())),
+                other => panic!("unexpected frame {other}"),
+            }
+        }
+        assert_eq!(handle.join().unwrap(), 7);
+        assert_eq!(exit, Some(7));
+        assert_eq!(stdout, b"hello guest");
+        assert_eq!(stderr, b"guest-stderr\n");
+        let exec_args = fs::read_to_string(root.join("exec-args")).unwrap();
+        assert_eq!(
+            exec_args,
+            "exec -T --project claude-sandbox claude-sandbox:web -- cat\n"
+        );
+        assert!(bridge.uses.lock().unwrap().active.is_empty());
+        assert_eq!(bridge.pipes.load(Ordering::Acquire), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pipe_kills_the_guest_command_when_the_client_goes_away() {
+        let (root, bridge) = pipe_test_bridge("pipe-gone");
+        let (client, handle) = serve_pipe(&bridge, &["pipe", "web", "--", "sleep", "30"]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.join("exec-args").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            bridge.claim_idle("web").is_none(),
+            "an open pipe keeps the VM in use"
+        );
+        let started = Instant::now();
+        drop(client);
+        let code = handle.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "guest command was not killed"
+        );
+        assert_eq!(code, 128 + 9);
+        assert!(bridge.uses.lock().unwrap().active.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pipe_reports_refusals_as_frames() {
+        let (root, bridge) = pipe_test_bridge("pipe-refused");
+        let (mut client, handle) = serve_pipe(&bridge, &["pipe", "web"]);
+        assert_eq!(handle.join().unwrap(), 1);
+        let mut frames = Vec::new();
+        while let Some(frame) = read_pipe_frame(&mut client).unwrap() {
+            frames.push(frame);
+        }
+        assert_eq!(
+            frames.last(),
+            Some(&(FRAME_EXIT, 1i32.to_be_bytes().to_vec()))
+        );
+        assert!(frames.iter().any(|(kind, text)| *kind == FRAME_STDERR
+            && String::from_utf8_lossy(text).contains("usage: vm pipe")));
         let _ = fs::remove_dir_all(root);
     }
 

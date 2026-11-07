@@ -75,8 +75,8 @@ you no longer need with <code>vm delete</code> or
 <h2 id="idle-limits"><a class="anchor" href="#idle-limits" aria-hidden="true">#</a>Idle limits</h2>
 <p>VMs the agent stops using are cleaned up on their own. Every <code>vm</code> command
 that names a VM — <code>info</code>, <code>start</code>, <code>stop</code>, <code>restart</code>, <code>eject</code>, <code>screen</code>,
-<code>view</code>, <code>exec</code> and <code>console-log</code> — counts as use, as does an open
-<code>vm view</code> display; <code>vm list</code> does not. A VM that goes unused for its idle-stop
+<code>view</code>, <code>exec</code>, <code>pipe</code> and <code>console-log</code> — counts as use, as do an open
+<code>vm view</code> display and an open <code>vm pipe</code>; <code>vm list</code> does not. A VM that goes unused for its idle-stop
 time is stopped, which deletes an ephemeral VM. A persistent VM that stays
 unused for its idle-delete time, counted from the same last use, is deleted
 with its disk.</p>
@@ -211,6 +211,14 @@ unrelated workloads out of the <code>claude-sandbox</code> project.</p>
 <td>Run a non-interactive command, with a default 120-second and maximum 3600-second timeout</td>
 </tr>
 <tr>
+<td><code>vm pipe NAME -- CMD [ARG...]</code></td>
+<td>Run a command with the sandbox&#39;s stdin streamed to it and its stdout and stderr streamed back, with no timeout and no output cap</td>
+</tr>
+<tr>
+<td><code>vm pipe NAME COMMAND...</code></td>
+<td>The same, with the words run by the guest&#39;s <code>sh</code> the way ssh runs a remote command, so <code>rsync -e &#39;vm pipe&#39;</code> works</td>
+</tr>
+<tr>
 <td><code>vm console-log NAME</code></td>
 <td>Print the VM console log (requires an Incus server newer than 6.0.0)</td>
 </tr>
@@ -228,9 +236,14 @@ unrelated workloads out of the <code>claude-sandbox</code> project.</p>
 </tr>
 </tbody></table>
 </div>
-<p><code>vm exec</code> requires the Incus agent in the guest. Public <code>images:</code> VMs include
-it; a fresh ISO installation does not. Command stdout and stderr are each
-capped at 1 MiB with a truncation notice. Local imports accept ISO9660 and
+<p><code>vm exec</code> and <code>vm pipe</code> require the Incus agent in the guest. Public <code>images:</code> VMs include
+it; a fresh ISO installation does not. <code>vm exec</code> stdout and stderr are each
+capped at 1 MiB with a truncation notice. <code>vm pipe</code> streams instead, which
+makes it the way to move files between the sandbox and a guest without any
+network path, for example <code>tar -cf - . | vm pipe web -- tar -C /build -xf -</code>
+or <code>rsync -a -e &#39;vm pipe&#39; src/ web:/build/</code>. The bridge only relays the bytes
+between the sandbox and <code>incus exec</code>; it never opens workspace files for a pipe.
+At most 8 pipes may be open at once, and an open pipe keeps its VM from going idle. Local imports accept ISO9660 and
 standalone qcow2 content only; convert raw disks first with
 <code>qemu-img convert -O qcow2</code>. ISO imports are capped at 16 GiB, qcow2 imports at
 64 GiB, and at most 16 imported media entries may be retained.</p>
