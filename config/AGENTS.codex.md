@@ -1,15 +1,14 @@
 ## Delegating Work
 
-Delegate by default — long or bulky work goes to a native subagent or an
-external runner, and spending the main session's context on it is the exception
+Delegate by default — long or bulky work goes to a native subagent or a T3
+Code child, and spending the main session's context on it is the exception
 that needs a reason.
 
-You have OpenAI GPT-6 Astra and GPT-6.1 Sol natively, Anthropic models through the
-`claude` CLI,
-and open-weight models through `opencode` (Ollama Cloud). They differ in
-capability, features, and cost, so route on fit first. Each bills its own
-subscription with separate session and weekly limits — don't send work to a
-pool about to run out when another fits.
+You have OpenAI GPT-6 Astra and GPT-6.1 Sol natively, and Anthropic models
+(`claude`) and open-weight models (`opencode`, Ollama Cloud) through T3 Code.
+They differ in capability, features, and cost, so route on fit first. Each
+bills its own subscription with separate session and weekly limits — don't
+send work to a pool about to run out when another fits.
 
 Routing, good enough to act on without looking anything up:
 
@@ -40,6 +39,5 @@ Routing, good enough to act on without looking anything up:
   `gpt-6.1-sol` and `opus`; complex code never falls down to an open-weight
   model
 
-Load the `delegate` skill when the pick is genuinely contested; `claude` and
-`opencode` cover the external runner mechanics. Load `codex` only when a
-separate Codex CLI process is preferable to a native worker.
+Load the `delegate` skill when the pick is genuinely contested, and before
+briefing another vendor's model.

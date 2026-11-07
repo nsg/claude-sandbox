@@ -6,10 +6,10 @@ description: Use when an agent inside claude-sandbox is about to delegate work t
 # Plan Usage
 
 Read the cached public usage summary from the host-side admin portal. Use it
-before every delegation to a metered pool — a `codex` or `opencode` launch, a
-substantial subagent, a fan-out, a review round — and when the user asks for
-current usage or reset timing. Figures already in the conversation and under
-about an hour old can be reused. Work you do yourself without delegating needs
+before every delegation to a metered pool — an OpenAI or Ollama run, a
+substantial Anthropic child, a fan-out, a review round —
+and when the user asks for current usage or reset timing. Figures already in
+the conversation and under about an hour old can be reused. Work you do yourself without delegating needs
 no check. What to do with the numbers — when a pool counts as pressed and what
 it is then reserved for — is in the `delegate` skill under **Live Headroom**.
 

@@ -41,8 +41,8 @@ Routing, good enough to act on without looking anything up:
   and `gpt-6.1-sol`; complex code never falls to a cheaper tier — write less
   of it instead
 
-Load the `delegate` skill when the pick is genuinely contested; `codex` and
-`opencode` cover the mechanics.
+Load the `delegate` skill when the pick is genuinely contested, and before
+briefing another vendor's model.
 
 ## Memory
 
