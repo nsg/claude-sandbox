@@ -131,14 +131,15 @@ concluding it is missing.
 
 ### Streaming data: `vm pipe`
 
-`vm exec` gives the guest no stdin and buffers output. `vm pipe` streams
+`vm exec` gives the guest no stdin, buffers output and returns it as text
+(invalid UTF-8 is replaced, so binary output is corrupted). `vm pipe` streams
 instead: the sandbox's stdin goes to the guest command, its stdout and stderr
 come back as they are written, and `vm pipe` exits with its exit code. It has
 no timeout and keeps the VM in use while open. Use it for anything that moves
 data or talks a protocol over stdio:
 
 ```bash
-tar -C src -cf - . | vm pipe web -- tar -C /build -xf -     # copy a tree in
+tar -C src -cf - --exclude=.claude-sandbox . | vm pipe web -- tar -C /build -xf -  # copy a tree in
 vm pipe web -- tar -C /build/out -cf - . | tar -C out -xf - # copy results out
 vm pipe web -- sh -c 'cat > /etc/app.conf' < app.conf        # write one file
 rsync -a -e 'vm pipe' src/ web:/build/                       # incremental sync
@@ -151,7 +152,72 @@ installed in the guest too). At most 8 pipes may be open at once.
 
 Results pulled out of a guest are written by the sandbox side, so treat a guest
 that ran untrusted code as untrusted: unpack its output into a fresh directory
-rather than over the workspace.
+rather than over the workspace. Leave `.claude-sandbox` directories out of
+anything sent in: they hold per-instance state, sometimes secrets.
+
+### Sharing a folder: sshfs over `vm pipe`
+
+When a guest needs live access to a sandbox folder rather than a copy, run
+sshfs in the guest in passive mode, which speaks SFTP on its stdin and stdout,
+and connect it through `vm pipe` to an `sftp-server` in the sandbox. No
+network or SSH login is involved, and the server sees only the shared folder.
+
+The server must run in a jail: `sftp-server` has no chroot of its own, so
+without one the guest could read anything in the sandbox through `..` paths
+or symlinks. Write this once to `/workspace/.claude-sandbox/tools/sftp-jail`
+(the fake `passwd` is required; `sftp-server` refuses to start without an
+entry for its uid):
+
+```sh
+#!/bin/sh
+# sftp-jail DIR: serve DIR over SFTP on stdio, seen as /share, nothing else.
+exec bwrap --unshare-user --unshare-ipc --unshare-net --unshare-uts --die-with-parent \
+  --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+  --symlink usr/bin /bin --symlink usr/sbin /sbin --dev /dev \
+  --file 3 /etc/passwd --file 4 /etc/group \
+  --bind "$1" /share --chdir /share \
+  -- /usr/lib/openssh/sftp-server -d /share \
+  3<<P 4<<G
+root:x:0:0:root:/share:/bin/false
+P
+root:x:0:
+G
+```
+
+Then:
+
+```bash
+apt-get install -y openssh-sftp-server                    # sandbox, if missing
+vm exec web --timeout 300 -- sh -c 'apt-get update && apt-get install -y sshfs && mkdir -p /src'
+
+T=/workspace/.claude-sandbox/tools; rm -f $T/sftp.fifo; mkfifo $T/sftp.fifo
+( $T/sftp-jail /workspace/myproject < $T/sftp.fifo \
+  | vm pipe web -- sshfs -f -o passive,allow_other,uid=1000,gid=1000 :/share /src \
+  > $T/sftp.fifo ) > $T/sftp.log 2>&1 &
+
+vm exec web -- ls /src                                    # mounted
+vm exec web -- fusermount -u /src                         # unmount; both sides exit
+```
+
+- `-f` is required: a backgrounded sshfs detaches from stdio and the mount
+  dies at once. The mount lives exactly as long as the pipe; killing the
+  `vm pipe` unmounts it in the guest and stops the server.
+- Use the fifo, not `socat`: socat splits its arguments on commas and
+  mangles the sshfs `-o` list.
+- `uid=`/`gid=` set the owner the guest sees (pick the guest's build user);
+  everything written lands in the sandbox owned by its own user regardless.
+  `allow_other` lets users other than root use the mount.
+- Relative symlinks inside the folder work; absolute ones and ones pointing
+  outside it do not resolve.
+- Speed is fine for sources (a 100 MB file reads in about 0.6 s, 500 small
+  files are written in about 0.7 s) but every file operation is a round trip:
+  keep build output such as `target/` or `node_modules` on the guest's own
+  disk. For a one-shot copy, tar or rsync is simpler.
+- Add `-o ro` when the guest runs untrusted code: otherwise it can change
+  anything in the folder, `.git/hooks` included. Share the project folder, not
+  `/workspace`, and first check it holds no `.claude-sandbox` directory.
+- There is no reconnect. The mount uses one of the 8 pipe slots and keeps the
+  VM in use while it is up.
 
 `vm console-log NAME` prints the guest's serial console output, useful for
 boot failures on guests that log there. It requires an Incus server newer than
