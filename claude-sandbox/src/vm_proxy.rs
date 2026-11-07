@@ -44,6 +44,8 @@ const FRAME_STDOUT: u8 = 1;
 const FRAME_STDERR: u8 = 2;
 const FRAME_EXIT: u8 = 3;
 const FRAME_STDIN_EOF: u8 = 4;
+const FRAME_HEARTBEAT: u8 = 5;
+const PIPE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PERSISTENT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const LAST_USED_KEY: &str = "user.claude-sandbox.last-used";
@@ -1184,10 +1186,12 @@ impl IncusBridge {
         let stderr = child.stderr.take().expect("piped stderr missing");
         let writer = Mutex::new(stream);
         let client_gone = AtomicBool::new(false);
+        let done = AtomicBool::new(false);
 
         thread::scope(|scope| {
             let writer = &writer;
             let client_gone = &client_gone;
+            let done = &done;
             // The client ends stdin with an EOF frame and stays connected for
             // the output; a bare end of stream means it went away.
             scope.spawn(move || {
@@ -1226,31 +1230,68 @@ impl IncusBridge {
             };
             let stdout_pump = scope.spawn(move || pump(Box::new(stdout), FRAME_STDOUT));
             let stderr_pump = scope.spawn(move || pump(Box::new(stderr), FRAME_STDERR));
-
-            let status = loop {
-                if client_gone.load(Ordering::Acquire) || self.shutting_down.load(Ordering::Acquire)
-                {
-                    let _ = child.kill();
-                }
-                match child.try_wait() {
-                    Ok(Some(status)) => break Some(status),
-                    Ok(None) => thread::sleep(Duration::from_millis(20)),
-                    Err(_) => {
-                        let _ = child.kill();
-                        break child.wait().ok();
+            // Writing to a closed socket fails at once, so a heartbeat notices a
+            // vanished client even while the stdin writer is stuck on a guest
+            // that does not read and the pumps have nothing to send.
+            scope.spawn(move || {
+                let mut last = Instant::now();
+                while !done.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(100));
+                    if last.elapsed() < PIPE_HEARTBEAT_INTERVAL {
+                        continue;
+                    }
+                    last = Instant::now();
+                    // A pump holding the lock notices a closed socket itself.
+                    let Ok(mut writer) = writer.try_lock() else {
+                        continue;
+                    };
+                    if done.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if write_pipe_frame(&mut *writer, FRAME_HEARTBEAT, &[]).is_err() {
+                        client_gone.store(true, Ordering::Release);
+                        return;
                     }
                 }
-            };
-            let _ = stdout_pump.join();
-            let _ = stderr_pump.join();
-            let code = match status {
+            });
+
+            let mut status = None;
+            let mut cancelled = false;
+            loop {
+                if !cancelled
+                    && (client_gone.load(Ordering::Acquire)
+                        || self.shutting_down.load(Ordering::Acquire))
+                {
+                    cancelled = true;
+                    let _ = child.kill();
+                    // Wakes every thread blocked on the socket, so none of them
+                    // waits on a client that is gone or no longer reading.
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+                if status.is_none() {
+                    match child.try_wait() {
+                        Ok(Some(exit)) => status = Some(Some(exit)),
+                        Ok(None) => {}
+                        Err(_) => {
+                            let _ = child.kill();
+                            status = Some(child.wait().ok());
+                        }
+                    }
+                }
+                if status.is_some() && stdout_pump.is_finished() && stderr_pump.is_finished() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            done.store(true, Ordering::Release);
+            let code = match status.flatten() {
                 Some(status) => status
                     .code()
                     .or_else(|| status.signal().map(|signal| 128 + signal))
                     .unwrap_or(1),
                 None => 1,
             };
-            if !client_gone.load(Ordering::Acquire) {
+            if !client_gone.load(Ordering::Acquire) && !cancelled {
                 let mut writer = writer.lock().expect("pipe writer lock poisoned");
                 let _ = write_pipe_frame(&mut *writer, FRAME_EXIT, &code.to_be_bytes());
             }
@@ -4185,7 +4226,7 @@ with pathlib.Path(__file__).with_name("calls").open("a") as f:
             "#!/bin/sh\n\
              [ \"$1\" = exec ] || exit 0\n\
              printf '%s\\n' \"$*\" > \"${0%/*}/exec-args\"\n\
-             case \"$*\" in *sleep*) exec /bin/sleep 30;; esac\n\
+             case \"$*\" in *sleep*) exec /bin/sleep 30;; *flood*) exec /usr/bin/yes;; esac\n\
              /bin/cat\n\
              echo guest-stderr >&2\n\
              exit 7\n",
@@ -4263,6 +4304,45 @@ with pathlib.Path(__file__).with_name("calls").open("a") as f:
         );
         assert_eq!(code, 128 + 9);
         assert!(bridge.uses.lock().unwrap().active.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pipe_notices_a_vanished_client_while_guest_stdin_is_full() {
+        let (root, bridge) = pipe_test_bridge("pipe-stdin-full");
+        let (mut client, handle) = serve_pipe(&bridge, &["pipe", "web", "--", "sleep", "30"]);
+        let chunk = vec![0; PIPE_FRAME_LIMIT];
+        for _ in 0..3 {
+            write_pipe_frame(&mut client, FRAME_STDIN, &chunk).unwrap();
+        }
+        thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        drop(client);
+        assert_eq!(handle.join().unwrap(), 128 + 9);
+        assert!(
+            started.elapsed() < PIPE_HEARTBEAT_INTERVAL * 3,
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(bridge.pipes.load(Ordering::Acquire), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pipe_shutdown_does_not_wait_for_a_client_that_stopped_reading() {
+        let (root, bridge) = pipe_test_bridge("pipe-not-reading");
+        let (client, handle) = serve_pipe(&bridge, &["pipe", "web", "--", "flood"]);
+        thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        bridge.shutting_down.store(true, Ordering::Release);
+        handle.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(bridge.uses.lock().unwrap().active.is_empty());
+        drop(client);
         let _ = fs::remove_dir_all(root);
     }
 
