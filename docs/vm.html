@@ -66,11 +66,40 @@ VMs only, and VMs are ephemeral by default: <strong>stopping a VM deletes it and
 Imported ISO volumes and disk images are retained for later sessions.</p>
 <p>Pass <code>--persistent</code> to <code>vm launch</code> to opt a VM out of that. A persistent
 VM keeps its disk when it is stopped with <code>vm stop</code> or shuts itself down,
-boots again with <code>vm start</code>, and is removed only by <code>vm delete</code>. It is shut
-down, not deleted, when the launcher exits, and is still there in the next
-<code>--vm</code> session. Stopped persistent VMs keep counting against the project&#39;s
-<code>limits.disk</code> and <code>limits.virtual-machines</code>; remove ones you no longer need
-with <code>vm delete</code> or <code>incus delete --project claude-sandbox NAME</code>.</p>
+boots again with <code>vm start</code>, and is removed by <code>vm delete</code> or by the idle
+limit below. It is shut down, not deleted, when the launcher exits, and is
+still there in the next <code>--vm</code> session. Stopped persistent VMs keep counting
+against the project&#39;s <code>limits.disk</code> and <code>limits.virtual-machines</code>; remove ones
+you no longer need with <code>vm delete</code> or
+<code>incus delete --project claude-sandbox NAME</code>.</p>
+<h2 id="idle-limits"><a class="anchor" href="#idle-limits" aria-hidden="true">#</a>Idle limits</h2>
+<p>VMs the agent stops using are cleaned up on their own. Every <code>vm</code> command
+that names a VM — <code>info</code>, <code>start</code>, <code>stop</code>, <code>restart</code>, <code>eject</code>, <code>screen</code>,
+<code>view</code>, <code>exec</code> and <code>console-log</code> — counts as use, as does an open
+<code>vm view</code> display; <code>vm list</code> does not. A VM that goes unused for its idle-stop
+time is stopped, which deletes an ephemeral VM. A persistent VM that stays
+unused for its idle-delete time, counted from the same last use, is deleted
+with its disk.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr><th>Launch flag</th><th>Default</th><th>Range</th><th>Incus config key</th></tr>
+</thead>
+<tbody>
+<tr><td><code>--idle-stop DURATION</code></td><td>6h</td><td>1h to 7d</td><td><code>user.claude-sandbox.idle-stop</code></td></tr>
+<tr><td><code>--idle-delete DURATION</code> (persistent only)</td><td>24h, or the idle-stop time if longer</td><td>idle-stop to 30d</td><td><code>user.claude-sandbox.idle-delete</code></td></tr>
+</tbody></table>
+</div>
+<p>A duration is a whole number followed by <code>m</code>, <code>h</code> or <code>d</code>. The keys hold
+seconds, and the time of last use is kept in <code>user.claude-sandbox.last-used</code>
+as Unix seconds. Because all of it lives in the VM&#39;s Incus config, the limits
+survive bridge restarts and host reboots: the bridge checks every VM once at
+startup and then every minute, and a persistent VM left stopped between
+sessions is deleted at the next <code>--vm</code> start once its idle-delete time has
+passed. To change a limit or extend a VM&#39;s life by hand, set the keys with
+<code>incus config set --project claude-sandbox NAME KEY=VALUE</code>. VMs without a
+last-use time, such as ones created before idle limits existed, start a fresh
+clock when the bridge first sees them. Each action is logged to
+<code>vm-proxy.log</code>.</p>
 <p>VMs use the network configured in the Incus <code>default</code> profile. Traffic on that
 Incus bridge is not filtered by the Podman sandbox, so apply any required
 network policy on the Incus bridge or upstream network.</p>
@@ -143,11 +172,11 @@ unrelated workloads out of the <code>claude-sandbox</code> project.</p>
 </tr>
 <tr>
 <td><code>vm info NAME [--json]</code></td>
-<td>Show one VM, including its addresses</td>
+<td>Show one VM, including its addresses, idle limits and time since last use</td>
 </tr>
 <tr>
-<td><code>vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--no-tpm] [--persistent]</code></td>
-<td>Create and start a VM, ephemeral unless <code>--persistent</code>; defaults are 2 CPUs, 4 GiB memory, a 20 GiB disk, and a virtual TPM</td>
+<td><code>vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--no-tpm] [--persistent] [--idle-stop DURATION] [--idle-delete DURATION]</code></td>
+<td>Create and start a VM, ephemeral unless <code>--persistent</code>; defaults are 2 CPUs, 4 GiB memory, a 20 GiB disk, a virtual TPM, and the <a href="#idle-limits">idle limits</a></td>
 </tr>
 <tr>
 <td><code>vm start NAME</code></td>

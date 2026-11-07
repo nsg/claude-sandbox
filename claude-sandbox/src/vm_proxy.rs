@@ -37,6 +37,16 @@ const DEFAULT_MAX_REQUESTS: usize = 16;
 const DEFAULT_MAX_RELAY_CONNECTIONS: usize = 32;
 const DEFAULT_RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PERSISTENT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+const LAST_USED_KEY: &str = "user.claude-sandbox.last-used";
+const IDLE_STOP_KEY: &str = "user.claude-sandbox.idle-stop";
+const IDLE_DELETE_KEY: &str = "user.claude-sandbox.idle-delete";
+const DEFAULT_IDLE_STOP: u64 = 6 * 3600;
+const DEFAULT_IDLE_DELETE: u64 = 24 * 3600;
+const MIN_IDLE: u64 = 3600;
+const MAX_IDLE_STOP: u64 = 7 * 24 * 3600;
+const MAX_IDLE_DELETE: u64 = 30 * 24 * 3600;
+const REAP_INTERVAL: Duration = Duration::from_secs(60);
+const TOUCH_INTERVAL: Duration = Duration::from_secs(60);
 
 const HELP: &str = "vm - restricted Incus virtual-machine bridge\n\
 \n\
@@ -45,7 +55,7 @@ Usage:\n\
   vm status\n\
   vm list [--json]\n\
   vm info NAME [--json]\n\
-  vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--no-tpm] [--persistent]\n\
+  vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--no-tpm] [--persistent] [--idle-stop DURATION] [--idle-delete DURATION]\n\
   vm start NAME           boot a stopped persistent VM\n\
   vm stop NAME [--force]\n\
   vm restart NAME [--force]\n\
@@ -63,6 +73,10 @@ VMs are ephemeral by default: stopping one deletes it and its disk.\n\
 --persistent VMs keep their disk when stopped, are stopped when the sandbox exits,\n\
 and remain until `vm delete`.\n\
 VMs get a virtual TPM 2.0 unless launched with --no-tpm.\n\
+Every command naming a VM counts as use. A VM idle for --idle-stop (default 6h)\n\
+is stopped, which deletes an ephemeral one; a persistent VM idle for\n\
+--idle-delete (default 24h) is deleted. DURATION is N followed by m, h or d,\n\
+from 1h; --idle-stop is at most 7d and --idle-delete at most 30d.\n\
 exec needs the Incus agent, which images: VMs have and ISO installs do not.\n\
 console-log requires an Incus server newer than 6.0.0 for VMs.\n";
 
@@ -148,6 +162,56 @@ impl Drop for LaunchClaim {
     }
 }
 
+/// Marks a VM as in use for the length of one command and records the use
+/// in its Incus config at both ends, so long commands count as activity.
+struct VmUse {
+    bridge: IncusBridge,
+    name: String,
+}
+
+impl Drop for VmUse {
+    fn drop(&mut self) {
+        self.bridge.touch(&self.name);
+        let mut uses = self.bridge.uses.lock().expect("use lock poisoned");
+        if let Some(count) = uses.active.get_mut(&self.name) {
+            *count -= 1;
+            if *count == 0 {
+                uses.active.remove(&self.name);
+            }
+        }
+    }
+}
+
+/// Commands in flight per VM, and VMs the reaper has claimed. Both live under
+/// one lock so a command and an idle stop can never overlap on the same VM.
+#[derive(Default)]
+struct Uses {
+    active: HashMap<String, usize>,
+    reaping: HashSet<String>,
+}
+
+struct ReapClaim {
+    bridge: IncusBridge,
+    name: String,
+}
+
+impl Drop for ReapClaim {
+    fn drop(&mut self) {
+        self.bridge
+            .uses
+            .lock()
+            .expect("use lock poisoned")
+            .reaping
+            .remove(&self.name);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reap {
+    Stop,
+    Delete,
+}
+
 struct RequestSlot(Arc<AtomicUsize>);
 
 impl Drop for RequestSlot {
@@ -174,6 +238,8 @@ pub(crate) struct IncusBridge {
     relay_start: Arc<Mutex<()>>,
     import_lock: Arc<Mutex<()>>,
     launching: Arc<Mutex<HashSet<String>>>,
+    uses: Arc<Mutex<Uses>>,
+    touched: Arc<Mutex<HashMap<String, Instant>>>,
     healthy: Arc<AtomicBool>,
     cleaned: Arc<AtomicBool>,
     shutting_down: Arc<AtomicBool>,
@@ -196,6 +262,8 @@ struct LaunchOptions {
     no_secureboot: bool,
     persistent: bool,
     no_tpm: bool,
+    idle_stop: u64,
+    idle_delete: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -250,6 +318,23 @@ enum VmCommand {
     },
 }
 
+impl VmCommand {
+    /// The VM whose idle clock this command resets.
+    fn used_vm(&self) -> Option<&str> {
+        match self {
+            Self::Info { name, .. }
+            | Self::Start { name }
+            | Self::Stop { name, .. }
+            | Self::Restart { name, .. }
+            | Self::Eject { name }
+            | Self::Screen { name }
+            | Self::Exec { name, .. }
+            | Self::ConsoleLog { name } => Some(name),
+            _ => None,
+        }
+    }
+}
+
 impl IncusBridge {
     fn new(home: &Path, workspace_root: &Path, runtime_dir: &Path) -> Self {
         let workspace_root =
@@ -271,6 +356,8 @@ impl IncusBridge {
             relay_start: Arc::new(Mutex::new(())),
             import_lock: Arc::new(Mutex::new(())),
             launching: Arc::new(Mutex::new(HashSet::new())),
+            uses: Arc::new(Mutex::new(Uses::default())),
+            touched: Arc::new(Mutex::new(HashMap::new())),
             healthy: Arc::new(AtomicBool::new(false)),
             cleaned: Arc::new(AtomicBool::new(false)),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -637,6 +724,17 @@ impl IncusBridge {
         if let Err(response) = self.ensure_healthy() {
             return response;
         }
+        let _use = match parsed.used_vm().map(|name| self.begin_use(name)) {
+            Some(Err(response)) => return response,
+            Some(Ok(guard)) => Some(guard),
+            None => None,
+        };
+        if let VmCommand::Delete { name } = &parsed {
+            self.touched
+                .lock()
+                .expect("touch lock poisoned")
+                .remove(name);
+        }
 
         match parsed {
             VmCommand::List { json } => self.list(json),
@@ -724,14 +822,15 @@ impl IncusBridge {
             return json_response(&instance);
         }
         Response::ok(format!(
-            "name: {}\nstatus: {}\nipv4: {}\nipv6: {}\ncpus: {}\nmemory: {}\nlifetime: {}\n",
+            "name: {}\nstatus: {}\nipv4: {}\nipv6: {}\ncpus: {}\nmemory: {}\nlifetime: {}\n{}",
             string_field(&instance, "name"),
             string_field(&instance, "status"),
             string_array(&instance, "ipv4").join(", "),
             string_array(&instance, "ipv6").join(", "),
             string_field(&instance, "cpus"),
             string_field(&instance, "memory"),
-            lifetime(&instance)
+            lifetime(&instance),
+            idle_report(&instance)
         ))
     }
 
@@ -781,7 +880,14 @@ impl IncusBridge {
             Ok(profile) => profile,
             Err(error) => return Response::error(error),
         };
-        let (args, body) = build_launch(options, &pool, &root_device, self.remote, self.project);
+        let (args, body) = build_launch(
+            options,
+            &pool,
+            &root_device,
+            self.remote,
+            self.project,
+            unix_now(),
+        );
         let output = match self.run_command(
             &args,
             CommandInput::Bytes(body.into_bytes()),
@@ -1391,6 +1497,7 @@ impl IncusBridge {
             .expect("relay lock poisoned")
             .insert(name.to_string(), relay);
         let relays = Arc::clone(&self.relays);
+        let uses = Arc::clone(&self.uses);
         let relay_name = name.to_string();
         let max_connections = self.max_relay_connections;
         let idle_timeout = self.relay_idle_timeout;
@@ -1412,9 +1519,14 @@ impl IncusBridge {
                         };
                         let id = connection_ids.fetch_add(1, Ordering::Relaxed);
                         {
+                            // Same lock order as `claim_idle`: no viewer joins a VM
+                            // the idle reaper has claimed.
+                            let uses = uses.lock().expect("use lock poisoned");
                             let mut active =
                                 connections.lock().expect("relay connection lock poisoned");
-                            if stopping.load(Ordering::Acquire) {
+                            if stopping.load(Ordering::Acquire)
+                                || uses.reaping.contains(&relay_name)
+                            {
                                 let _ = client.shutdown(Shutdown::Both);
                                 connection_count.fetch_sub(1, Ordering::AcqRel);
                                 continue;
@@ -1543,6 +1655,153 @@ impl IncusBridge {
             DEFAULT_TIMEOUT,
             COMMAND_OUTPUT_LIMIT,
         );
+    }
+
+    fn begin_use(&self, name: &str) -> Result<VmUse, Response> {
+        {
+            let mut uses = self.uses.lock().expect("use lock poisoned");
+            if uses.reaping.contains(name) {
+                return Err(Response::error(format!(
+                    "{name} sat idle past its limit and is being stopped or deleted; check `vm list`"
+                )));
+            }
+            *uses.active.entry(name.to_string()).or_default() += 1;
+        }
+        self.touch(name);
+        Ok(VmUse {
+            bridge: self.clone(),
+            name: name.to_string(),
+        })
+    }
+
+    /// Reserves NAME for an idle stop, unless a command, launch or open
+    /// display is using it. New commands are refused until the claim drops.
+    fn claim_idle(&self, name: &str) -> Option<ReapClaim> {
+        let mut uses = self.uses.lock().expect("use lock poisoned");
+        let busy = uses.active.contains_key(name)
+            || self
+                .launching
+                .lock()
+                .expect("launch lock poisoned")
+                .contains(name)
+            || self
+                .relays
+                .lock()
+                .expect("relay lock poisoned")
+                .get(name)
+                .is_some_and(|relay| {
+                    !relay
+                        .connections
+                        .lock()
+                        .expect("relay connections lock poisoned")
+                        .is_empty()
+                });
+        if busy || !uses.reaping.insert(name.to_string()) {
+            return None;
+        }
+        Some(ReapClaim {
+            bridge: self.clone(),
+            name: name.to_string(),
+        })
+    }
+
+    /// Records use in the VM's Incus config, at most once per TOUCH_INTERVAL.
+    fn touch(&self, name: &str) {
+        if self
+            .touched
+            .lock()
+            .expect("touch lock poisoned")
+            .get(name)
+            .is_some_and(|last| last.elapsed() < TOUCH_INTERVAL)
+        {
+            return;
+        }
+        if self.write_last_used(name, unix_now()) {
+            self.touched
+                .lock()
+                .expect("touch lock poisoned")
+                .insert(name.to_string(), Instant::now());
+        }
+    }
+
+    fn write_last_used(&self, name: &str, now: u64) -> bool {
+        let args = vec![
+            "config".to_string(),
+            "set".to_string(),
+            "--project".to_string(),
+            self.project.to_string(),
+            format!("{}:{name}", self.remote),
+            format!("{LAST_USED_KEY}={now}"),
+        ];
+        self.run_command(
+            &args,
+            CommandInput::Null,
+            DEFAULT_TIMEOUT,
+            COMMAND_OUTPUT_LIMIT,
+        )
+        .is_ok_and(|output| output.status.success() && !output.timed_out)
+    }
+
+    /// Stops or deletes VMs that have been idle too long. Every input lives in
+    /// Incus, so a restarted bridge picks up where the last one left off.
+    fn reap(&self, now: u64) -> Vec<String> {
+        let Ok(instances) = self.query(
+            "/1.0/instances?recursion=1&project=claude-sandbox",
+            Duration::from_secs(30),
+        ) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        for instance in instances.as_array().into_iter().flatten() {
+            let Some(name) = instance
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| valid_name(name))
+            else {
+                continue;
+            };
+            if last_used(instance).is_none() {
+                // Adopt VMs from before idle tracking with a fresh clock.
+                self.write_last_used(name, now);
+                continue;
+            }
+            if reap_action(instance, now).is_none() {
+                continue;
+            }
+            let Some(_claim) = self.claim_idle(name) else {
+                // In use right now, e.g. an open display: that counts as use.
+                self.touch(name);
+                continue;
+            };
+            // Re-read under the claim: a command that finished since the list
+            // query has already written its use.
+            let Ok(current) = self.query(
+                &format!("/1.0/instances/{name}?project=claude-sandbox"),
+                Duration::from_secs(30),
+            ) else {
+                continue;
+            };
+            let Some(action) = reap_action(&current, now) else {
+                continue;
+            };
+            let idle = format_duration(now.saturating_sub(last_used(&current).unwrap_or(now)));
+            match action {
+                Reap::Stop => {
+                    self.stop_relay(name);
+                    self.shut_down(name);
+                    events.push(format!("stopped persistent VM {name} after {idle} idle"));
+                }
+                Reap::Delete => {
+                    self.force_delete(name);
+                    self.touched
+                        .lock()
+                        .expect("touch lock poisoned")
+                        .remove(name);
+                    events.push(format!("deleted VM {name} after {idle} idle"));
+                }
+            }
+        }
+        events
     }
 
     /// Every project instance's name and whether it was launched `--persistent`.
@@ -1687,6 +1946,24 @@ pub fn run(
         log_line(&log, &format!("ERROR   startup snapshot cleanup: {error}"));
     }
     bridge.checked_report();
+
+    let reaper_bridge = Arc::clone(&bridge);
+    let reaper_log = Arc::clone(&log);
+    thread::spawn(move || {
+        loop {
+            if reaper_bridge.shutting_down.load(Ordering::Acquire) {
+                return;
+            }
+            if reaper_bridge.healthy.load(Ordering::Acquire)
+                || preflight_is_healthy(&reaper_bridge.checked_report())
+            {
+                for event in reaper_bridge.reap(unix_now()) {
+                    log_line(&reaper_log, &format!("IDLE    {event}"));
+                }
+            }
+            thread::sleep(REAP_INTERVAL);
+        }
+    });
 
     let requests = Arc::new(AtomicUsize::new(0));
     let mut last_accept_log = None;
@@ -1860,6 +2137,8 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
     let mut no_secureboot = false;
     let mut persistent = false;
     let mut no_tpm = false;
+    let mut idle_stop = None;
+    let mut idle_delete = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -1905,11 +2184,30 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
             "--no-secureboot" => no_secureboot = true,
             "--persistent" => persistent = true,
             "--no-tpm" => no_tpm = true,
+            "--idle-stop" => {
+                let value = required_value(args, &mut index, "--idle-stop")?;
+                idle_stop = Some(parse_idle(value, "--idle-stop", MAX_IDLE_STOP)?);
+            }
+            "--idle-delete" => {
+                let value = required_value(args, &mut index, "--idle-delete")?;
+                idle_delete = Some(parse_idle(value, "--idle-delete", MAX_IDLE_DELETE)?);
+            }
             flag => return Err(format!("unknown launch option: {flag}")),
         }
         index += 1;
     }
     let source = source.ok_or_else(|| "exactly one of --image or --iso is required".to_string())?;
+    let idle_stop = idle_stop.unwrap_or(DEFAULT_IDLE_STOP);
+    let idle_delete = match idle_delete {
+        Some(_) if !persistent => {
+            return Err("--idle-delete applies only to --persistent VMs".to_string());
+        }
+        Some(value) if value < idle_stop => {
+            return Err("--idle-delete must be at least --idle-stop".to_string());
+        }
+        Some(value) => value,
+        None => DEFAULT_IDLE_DELETE.max(idle_stop),
+    };
     Ok(LaunchOptions {
         name: name.clone(),
         source,
@@ -1919,7 +2217,89 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
         no_secureboot,
         persistent,
         no_tpm,
+        idle_stop,
+        idle_delete,
     })
+}
+
+fn parse_idle(value: &str, flag: &str, maximum: u64) -> Result<u64, String> {
+    let error = || {
+        format!(
+            "{flag} must be a whole number of m, h or d from 1h through {}",
+            format_duration(maximum)
+        )
+    };
+    if value.is_empty() || !value.is_ascii() {
+        return Err(error());
+    }
+    let (digits, unit) = value.split_at(value.len() - 1);
+    let scale = match unit {
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return Err(error()),
+    };
+    if digits.is_empty() || digits.len() > 6 || digits.starts_with('0') {
+        return Err(error());
+    }
+    digits
+        .parse::<u64>()
+        .ok()
+        .filter(|_| digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(|count| count * scale)
+        .filter(|seconds| (MIN_IDLE..=maximum).contains(seconds))
+        .ok_or_else(error)
+}
+
+fn format_duration(seconds: u64) -> String {
+    match seconds {
+        s if s >= 86_400 && s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s >= 3600 && s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s >= 3600 => format!("{}h {}m", s / 3600, s % 3600 / 60),
+        s => format!("{}m", s / 60),
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn config_value<'a>(instance: &'a Value, key: &str) -> Option<&'a str> {
+    instance
+        .get("config")
+        .and_then(|config| config.get(key))
+        .and_then(Value::as_str)
+}
+
+fn last_used(instance: &Value) -> Option<u64> {
+    config_value(instance, LAST_USED_KEY)?.parse().ok()
+}
+
+/// The idle limits stored on a VM, falling back to the defaults.
+fn idle_limits(instance: &Value) -> (u64, Option<u64>) {
+    let stored = |key| config_value(instance, key).and_then(|value| value.parse::<u64>().ok());
+    let stop = stored(IDLE_STOP_KEY).unwrap_or(DEFAULT_IDLE_STOP);
+    let delete = is_persistent(instance)
+        .then(|| stored(IDLE_DELETE_KEY).unwrap_or(DEFAULT_IDLE_DELETE.max(stop)));
+    (stop, delete)
+}
+
+fn reap_action(instance: &Value, now: u64) -> Option<Reap> {
+    let idle = now.saturating_sub(last_used(instance)?);
+    let (stop, delete) = idle_limits(instance);
+    if delete.is_some_and(|delete| idle >= delete) {
+        return Some(Reap::Delete);
+    }
+    let stopped = instance.get("status").and_then(Value::as_str) == Some("Stopped");
+    if stopped || idle < stop {
+        None
+    } else if is_persistent(instance) {
+        Some(Reap::Stop)
+    } else {
+        Some(Reap::Delete)
+    }
 }
 
 fn parse_exec(args: &[String]) -> Result<VmCommand, String> {
@@ -2048,8 +2428,20 @@ fn build_launch(
     root_device: &str,
     remote: &str,
     project: &str,
+    now: u64,
 ) -> (Vec<String>, String) {
     let mut config = serde_json::Map::new();
+    config.insert(LAST_USED_KEY.to_string(), json!(now.to_string()));
+    config.insert(
+        IDLE_STOP_KEY.to_string(),
+        json!(options.idle_stop.to_string()),
+    );
+    if options.persistent {
+        config.insert(
+            IDLE_DELETE_KEY.to_string(),
+            json!(options.idle_delete.to_string()),
+        );
+    }
     config.insert("limits.cpu".to_string(), json!(options.cpus.to_string()));
     config.insert("limits.memory".to_string(), json!(options.memory));
     if options.no_secureboot {
@@ -2364,6 +2756,9 @@ fn summarize_instance(instance: &Value) -> Value {
         "cpus": config.and_then(|c| c.get("limits.cpu")).and_then(Value::as_str).unwrap_or(""),
         "memory": config.and_then(|c| c.get("limits.memory")).and_then(Value::as_str).unwrap_or(""),
         "persistent": is_persistent(instance),
+        "last_used": last_used(instance),
+        "idle_stop": idle_limits(instance).0,
+        "idle_delete": idle_limits(instance).1,
     })
 }
 
@@ -2434,6 +2829,9 @@ fn portal_instance(instance: &Value) -> Value {
         "name": summary["name"],
         "status": summary["status"],
         "persistent": summary["persistent"],
+        "last_used": summary["last_used"],
+        "idle_stop": summary["idle_stop"],
+        "idle_delete": summary["idle_delete"],
         "ipv4": summary["ipv4"],
         "image": setting("image.description"),
         "created_at": instance.get("created_at").and_then(Value::as_str).unwrap_or(""),
@@ -2472,6 +2870,23 @@ fn size_bytes(value: &str) -> Option<u64> {
         _ => return None,
     };
     number.checked_mul(scale)
+}
+
+fn idle_report(summary: &Value) -> String {
+    let mut report = format!(
+        "idle stop after: {}\n",
+        format_duration(summary["idle_stop"].as_u64().unwrap_or(DEFAULT_IDLE_STOP))
+    );
+    if let Some(delete) = summary["idle_delete"].as_u64() {
+        report.push_str(&format!("idle delete after: {}\n", format_duration(delete)));
+    }
+    if let Some(last) = summary["last_used"].as_u64() {
+        report.push_str(&format!(
+            "idle for: {}\n",
+            format_duration(unix_now().saturating_sub(last))
+        ));
+    }
+    report
 }
 
 fn lifetime(summary: &Value) -> &'static str {
@@ -2774,8 +3189,11 @@ mod tests {
             no_secureboot: true,
             persistent: false,
             no_tpm: false,
+            idle_stop: DEFAULT_IDLE_STOP,
+            idle_delete: DEFAULT_IDLE_DELETE,
         };
-        let (public_args, public_body) = build_launch(&base, "pool", "system", REMOTE, PROJECT);
+        let (public_args, public_body) =
+            build_launch(&base, "pool", "system", REMOTE, PROJECT, 1000);
         assert_eq!(
             public_args,
             strings(&[
@@ -2800,7 +3218,8 @@ mod tests {
         local.source = LaunchSource::LocalImage("installer".to_string());
         local.no_secureboot = false;
         local.no_tpm = true;
-        let (local_args, local_body) = build_launch(&local, "pool", "system", REMOTE, PROJECT);
+        let (local_args, local_body) =
+            build_launch(&local, "pool", "system", REMOTE, PROJECT, 1000);
         assert_eq!(
             local_args,
             strings(&[
@@ -2819,7 +3238,7 @@ mod tests {
 
         let mut iso = base;
         iso.source = LaunchSource::Iso("ubuntu-iso".to_string());
-        let (iso_args, iso_body) = build_launch(&iso, "pool", "system", REMOTE, PROJECT);
+        let (iso_args, iso_body) = build_launch(&iso, "pool", "system", REMOTE, PROJECT, 1000);
         assert_eq!(
             iso_args,
             strings(&[
@@ -2839,7 +3258,7 @@ mod tests {
         let mut persistent = iso;
         persistent.persistent = true;
         let (persistent_args, persistent_body) =
-            build_launch(&persistent, "pool", "system", REMOTE, PROJECT);
+            build_launch(&persistent, "pool", "system", REMOTE, PROJECT, 1000);
         assert!(!persistent_args.contains(&"--ephemeral".to_string()));
         let body: Value = serde_json::from_str(&persistent_body).unwrap();
         assert_eq!(body["ephemeral"], false);
@@ -3104,6 +3523,8 @@ raise SystemExit(0)
             no_secureboot: false,
             persistent: false,
             no_tpm: false,
+            idle_stop: DEFAULT_IDLE_STOP,
+            idle_delete: DEFAULT_IDLE_DELETE,
         });
         assert_ne!(response.exit_code, 0);
         let calls = fs::read_to_string(root.join("calls")).unwrap();
@@ -3138,6 +3559,8 @@ raise SystemExit(0)
             no_secureboot: false,
             persistent: false,
             no_tpm: false,
+            idle_stop: DEFAULT_IDLE_STOP,
+            idle_delete: DEFAULT_IDLE_DELETE,
         });
         assert!(response.stderr.contains("'kept' already exists"));
         bridge.launching.lock().unwrap().insert("busy".to_string());
@@ -3150,10 +3573,251 @@ raise SystemExit(0)
             no_secureboot: false,
             persistent: true,
             no_tpm: false,
+            idle_stop: DEFAULT_IDLE_STOP,
+            idle_delete: DEFAULT_IDLE_DELETE,
         });
         assert!(response.stderr.contains("already being launched"));
         let calls = fs::read_to_string(root.join("calls")).unwrap();
         assert!(!calls.contains("create") && !calls.contains("delete"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn idle_durations_are_bounded() {
+        assert_eq!(parse_idle("6h", "--idle-stop", MAX_IDLE_STOP), Ok(6 * 3600));
+        assert_eq!(parse_idle("90m", "--idle-stop", MAX_IDLE_STOP), Ok(5400));
+        assert_eq!(
+            parse_idle("7d", "--idle-stop", MAX_IDLE_STOP),
+            Ok(MAX_IDLE_STOP)
+        );
+        for bad in [
+            "59m", "8d", "06h", "h", "1.5h", "-1h", "+1h", "1w", "", "1000000h", "é", "1é", "éh",
+        ] {
+            assert!(
+                parse_idle(bad, "--idle-stop", MAX_IDLE_STOP).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(format_duration(6 * 3600), "6h");
+        assert_eq!(format_duration(86_400), "1d");
+        assert_eq!(format_duration(5400), "1h 30m");
+        assert_eq!(format_duration(59), "0m");
+
+        let launch = |extra: &[&str]| {
+            let mut args = strings(&["test", "--image", "images:debian/13"]);
+            args.extend(strings(extra));
+            parse_launch(&args)
+        };
+        let defaults = launch(&[]).unwrap();
+        assert_eq!(
+            (defaults.idle_stop, defaults.idle_delete),
+            (6 * 3600, 24 * 3600)
+        );
+        let long = launch(&["--persistent", "--idle-stop", "2d"]).unwrap();
+        assert_eq!(long.idle_delete, 2 * 86_400);
+        assert!(launch(&["--idle-delete", "2d"]).is_err());
+        assert!(launch(&["--persistent", "--idle-stop", "2d", "--idle-delete", "1d"]).is_err());
+        assert!(launch(&["--persistent", "--idle-delete", "31d"]).is_err());
+        let set = launch(&["--persistent", "--idle-stop", "2h", "--idle-delete", "3d"]).unwrap();
+        assert_eq!((set.idle_stop, set.idle_delete), (7200, 3 * 86_400));
+
+        let (_, body) = build_launch(&set, "pool", "root", REMOTE, PROJECT, 1234);
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["config"][LAST_USED_KEY], "1234");
+        assert_eq!(body["config"][IDLE_STOP_KEY], "7200");
+        assert_eq!(body["config"][IDLE_DELETE_KEY], "259200");
+        let (_, body) = build_launch(&defaults, "pool", "root", REMOTE, PROJECT, 1234);
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert!(body["config"].get(IDLE_DELETE_KEY).is_none());
+    }
+
+    #[test]
+    fn idle_vms_are_stopped_then_deleted() {
+        let vm = |status: &str, ephemeral: bool, last: Option<u64>, extra: Value| {
+            let mut config = json!({});
+            if let Some(last) = last {
+                config[LAST_USED_KEY] = json!(last.to_string());
+            }
+            for (key, value) in extra.as_object().into_iter().flatten() {
+                config[key] = value.clone();
+            }
+            json!({"name": "vm", "status": status, "ephemeral": ephemeral, "config": config})
+        };
+        let hour = 3600;
+        let now = 100 * hour;
+        let ago = |hours: u64| Some(now - hours * hour);
+        let none = json!({});
+        assert_eq!(
+            reap_action(&vm("Running", true, ago(5), none.clone()), now),
+            None
+        );
+        assert_eq!(
+            reap_action(&vm("Running", true, ago(6), none.clone()), now),
+            Some(Reap::Delete)
+        );
+        assert_eq!(
+            reap_action(&vm("Running", false, ago(6), none.clone()), now),
+            Some(Reap::Stop)
+        );
+        assert_eq!(
+            reap_action(&vm("Frozen", false, ago(6), none.clone()), now),
+            Some(Reap::Stop)
+        );
+        assert_eq!(
+            reap_action(&vm("Stopped", false, ago(23), none.clone()), now),
+            None
+        );
+        assert_eq!(
+            reap_action(&vm("Stopped", false, ago(24), none.clone()), now),
+            Some(Reap::Delete)
+        );
+        assert_eq!(
+            reap_action(&vm("Running", false, ago(30), none.clone()), now),
+            Some(Reap::Delete)
+        );
+        assert_eq!(
+            reap_action(&vm("Running", true, None, none.clone()), now),
+            None
+        );
+        assert_eq!(
+            reap_action(&vm("Running", true, Some(now + hour), none.clone()), now),
+            None
+        );
+        let custom = json!({IDLE_STOP_KEY: "7200", IDLE_DELETE_KEY: "10800"});
+        assert_eq!(
+            reap_action(&vm("Running", false, ago(1), custom.clone()), now),
+            None
+        );
+        assert_eq!(
+            reap_action(&vm("Running", false, ago(2), custom.clone()), now),
+            Some(Reap::Stop)
+        );
+        assert_eq!(
+            reap_action(&vm("Stopped", false, ago(3), custom), now),
+            Some(Reap::Delete)
+        );
+        let long_stop = json!({IDLE_STOP_KEY: "172800"});
+        assert_eq!(
+            reap_action(&vm("Running", false, ago(30), long_stop), now),
+            None
+        );
+    }
+
+    #[test]
+    fn reaper_acts_on_incus_state_and_spares_busy_vms() {
+        if !Path::new("/usr/bin/python3").exists() {
+            return;
+        }
+        let root = temp_dir("reap");
+        let fake = root.join("incus");
+        let now = 1_000_000_u64;
+        let hours_ago = |hours: u64| (now - hours * 3600).to_string();
+        let instances = json!([
+            {"name": "fresh", "status": "Running", "ephemeral": true, "config": {LAST_USED_KEY: hours_ago(1)}},
+            {"name": "stale", "status": "Running", "ephemeral": true, "config": {LAST_USED_KEY: hours_ago(7)}},
+            {"name": "keep", "status": "Running", "ephemeral": false, "config": {LAST_USED_KEY: hours_ago(7)}},
+            {"name": "gone", "status": "Stopped", "ephemeral": false, "config": {LAST_USED_KEY: hours_ago(25)}},
+            {"name": "busy", "status": "Running", "ephemeral": true, "config": {LAST_USED_KEY: hours_ago(9)}},
+            {"name": "legacy", "status": "Running", "ephemeral": true, "config": {}},
+            {"name": "--evil", "status": "Running", "ephemeral": true, "config": {LAST_USED_KEY: "0"}}
+        ]);
+        fs::write(root.join("instances.json"), instances.to_string()).unwrap();
+        executable(
+            &fake,
+            r#"#!/usr/bin/python3
+import json, pathlib, sys
+here = pathlib.Path(__file__).parent
+with (here / "calls").open("a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+a = sys.argv[1:]
+if a[0] == "query":
+    instances = json.loads((here / "instances.json").read_text())
+    if "/instances?" in a[-1]:
+        print(json.dumps(instances))
+    else:
+        name = a[-1].split("/instances/")[1].split("?")[0]
+        print(json.dumps(next(i for i in instances if i["name"] == name)))
+"#,
+        );
+        let bridge = test_bridge(&root, &fake);
+        bridge
+            .uses
+            .lock()
+            .unwrap()
+            .active
+            .insert("busy".to_string(), 1);
+        let events = bridge.reap(now);
+        let calls = fs::read_to_string(root.join("calls")).unwrap();
+        let acted = |verb: &str, name: &str| {
+            calls.lines().any(|line| {
+                line.starts_with(verb) && line.ends_with(&format!("claude-sandbox:{name}"))
+            })
+        };
+        assert!(acted("delete --force", "stale"));
+        assert!(acted("stop --timeout", "keep"));
+        assert!(!acted("delete", "keep"));
+        assert!(acted("delete --force", "gone"));
+        for spared in ["fresh", "busy", "legacy"] {
+            assert!(
+                !acted("delete", spared) && !acted("stop", spared),
+                "{spared}"
+            );
+        }
+        assert!(!calls.contains("--evil"));
+        assert!(calls.contains(&format!(
+            "config set --project claude-sandbox claude-sandbox:legacy {LAST_USED_KEY}={now}"
+        )));
+        assert!(calls.lines().any(|line| line.starts_with("config set") && line.contains("claude-sandbox:busy ")));
+        assert_eq!(events.len(), 3, "{events:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commands_naming_a_vm_record_use() {
+        if !Path::new("/usr/bin/python3").exists() {
+            return;
+        }
+        let root = temp_dir("touch");
+        let fake = root.join("incus");
+        executable(
+            &fake,
+            r#"#!/usr/bin/python3
+import pathlib, sys
+with pathlib.Path(__file__).with_name("calls").open("a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+"#,
+        );
+        let bridge = test_bridge(&root, &fake);
+        bridge.healthy.store(true, Ordering::Release);
+        let request = |args: &[&str]| {
+            bridge.handle(Request {
+                args: strings(args),
+                cwd: None,
+            })
+        };
+        request(&["exec", "web", "--", "true"]);
+        request(&["restart", "web"]);
+        request(&["list"]);
+        let calls = fs::read_to_string(root.join("calls")).unwrap();
+        let touches: Vec<_> = calls
+            .lines()
+            .filter(|line| line.starts_with("config set") && line.contains(LAST_USED_KEY))
+            .collect();
+        assert_eq!(touches.len(), 1, "throttled to one write: {calls}");
+        assert!(touches[0].contains("claude-sandbox:web "));
+        assert!(bridge.uses.lock().unwrap().active.is_empty());
+
+        let claim = bridge.claim_idle("web").unwrap();
+        assert!(bridge.claim_idle("web").is_none());
+        let refused = request(&["exec", "web", "--", "true"]);
+        assert!(
+            refused.stderr.contains("being stopped or deleted"),
+            "{}",
+            refused.stderr
+        );
+        drop(claim);
+        let _use = bridge.begin_use("web").ok().unwrap();
+        assert!(bridge.claim_idle("web").is_none());
         let _ = fs::remove_dir_all(root);
     }
 

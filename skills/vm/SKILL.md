@@ -31,11 +31,24 @@ vm status
   keeps it. Copy anything worth keeping out of the guest before stopping it.
 - **`vm launch --persistent` opts a VM out.** Its disk survives `vm stop` and
   guest shutdowns, `vm start NAME` boots it again, and only `vm delete`
-  removes it. When the sandbox exits it is shut down, not deleted, and it is
-  still there next session — check `vm list` (last column) before launching.
+  removes it (or the idle limit below). When the sandbox exits it is shut
+  down, not deleted, and it is still there next session — check `vm list`
+  (last column) before launching.
   Use it only when the task needs to power the VM off and keep it, or the user
   wants it kept; it holds disk quota while stopped, so delete it once it is no
   longer wanted.
+- **Unused VMs are cleaned up.** Any `vm` command naming a VM (`info`,
+  `exec`, `start`, `stop`, `restart`, `eject`, `screen`/`view`,
+  `console-log`) and an open `vm view` count as use; `vm list` does not. After
+  6 hours without use a VM is stopped — so an ephemeral one is deleted — and a
+  persistent VM is deleted with its disk after 24 hours without use. Change
+  them at launch with `--idle-stop` and, for persistent VMs, `--idle-delete`
+  (durations such as `12h` or `3d`; idle-stop 1h–7d, idle-delete up to
+  30d). If you step away from a VM you
+  still need, for example while a long job runs elsewhere, run `vm info NAME`
+  now and then; it also shows how long the VM has been idle. A command that
+  arrives while an idle VM is being stopped is refused with a message saying
+  so; check `vm list` before going on.
 - **Ephemeral VMs are deleted when the bridge starts healthy and when the
   launcher exits.** If the bridge itself is killed, they keep running until
   the next `--vm` start; the user can check with
@@ -64,6 +77,7 @@ vm launch inst --iso ubuntu-server --no-secureboot     # empty VM booting an imp
 vm launch app --image my-disk                          # imported qcow2
 vm launch db --image images:debian/13 --persistent     # survives stop and later sessions
 vm stop db && vm start db                              # persistent only: power-cycle, disk kept
+vm launch soak --image images:debian/13 --idle-stop 12h  # longer idle allowance
 vm list
 vm info web
 ```
@@ -181,5 +195,5 @@ vm delete web
 ```
 
 Delete VMs as soon as the task is done; they hold host memory and count
-against the project limits. A persistent VM is not cleaned up for you, so
-delete it unless the user asked to keep it.
+against the project limits. The idle limits are a backstop, not a cleanup
+plan: delete a persistent VM yourself unless the user asked to keep it.
