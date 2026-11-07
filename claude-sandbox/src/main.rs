@@ -42,6 +42,7 @@ const SCRIPT_URL: &str =
     "https://github.com/nsg/claude-sandbox/releases/latest/download/claude-sandbox";
 const SKILLS_URL: &str =
     "https://github.com/nsg/claude-sandbox/releases/latest/download/skills.tar.gz";
+const RETIRED_SKILLS: &[&str] = &["claude", "codex", "opencode"];
 const IMAGE: &str = "ghcr.io/nsg/claude-sandbox:latest";
 const IMAGE_SOURCE_LABEL: &str =
     "org.opencontainers.image.source=https://github.com/nsg/claude-sandbox";
@@ -986,11 +987,15 @@ fn do_binary_update(client: &Client, remote_lastmod: &str) {
     std::process::exit(1);
 }
 
-fn install_skills(client: &Client, quiet: bool) {
-    let target_dirs = [
+fn skill_target_dirs() -> [PathBuf; 2] {
+    [
         home_dir().join(".claude/skills"),
         home_dir().join(".agents/skills"),
-    ];
+    ]
+}
+
+fn install_skills(client: &Client, quiet: bool) {
+    let target_dirs = skill_target_dirs();
     let cache_file = cache_dir().join("claude-sandbox-skills-lastmod");
 
     if !quiet {
@@ -1036,6 +1041,7 @@ fn install_skills(client: &Client, quiet: bool) {
             return;
         }
     }
+    remove_retired_skills();
 
     if let Some(remote_lastmod) = get_last_modified(client, SKILLS_URL) {
         write_cache_file(&cache_file, &remote_lastmod);
@@ -1043,6 +1049,23 @@ fn install_skills(client: &Client, quiet: bool) {
 
     if !quiet {
         println!("Skills installed successfully.");
+    }
+}
+
+fn remove_retired_skills() {
+    for skill_dir in skill_target_dirs()
+        .iter()
+        .flat_map(|dir| RETIRED_SKILLS.iter().map(|name| dir.join(name)))
+    {
+        if skill_dir.join("SKILL.md").exists()
+            && let Err(e) = fs::remove_dir_all(&skill_dir)
+        {
+            eprintln!(
+                "Failed to remove retired skill {}: {}",
+                skill_dir.display(),
+                e
+            );
+        }
     }
 }
 
@@ -1852,6 +1875,7 @@ fn main() {
     let should_pull = perform_updates(&client, &update_status, cli.auto_update, cli.quiet)
         && update_status.online;
     refresh_extension(cli.quiet);
+    remove_retired_skills();
 
     match cli.command {
         Some(Commands::Install { target, .. }) => {
