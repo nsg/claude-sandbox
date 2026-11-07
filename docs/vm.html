@@ -259,8 +259,9 @@ API itself, so SPICE viewers installed on the host, such as <code>remote-viewer<
 the portal gains a <strong>VMs</strong> page. It lists every instance in the
 <code>claude-sandbox</code> Incus project with its status, a <strong>Persistent</strong> tag where
 it applies, image and address; CPU,
-memory and disk use against the VM&#39;s limits; network traffic; uptime; and the
-process count when the Incus agent runs in the guest. It refreshes every five
+memory and disk use against the VM&#39;s limits; network traffic; uptime; the
+process count when the Incus agent runs in the guest; and how long the VM has
+been idle and when its idle limit stops or deletes it. It refreshes every five
 seconds from <code>/api/vms</code>, which needs the same PIN session as the rest of the
 portal. The page only reads: VMs are still started and stopped with <code>vm</code>.</p>
 

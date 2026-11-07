@@ -15,6 +15,7 @@ pub(crate) const STYLE: &str = r#"
 .gauge-row span{font-weight:700;white-space:nowrap}
 .gauge-meta{color:var(--faint);font-size:12px;overflow-wrap:anywhere}
 .vm .facts{margin-top:0}
+.vm .facts div{flex-basis:max(130px,22%)}
 .vm-empty{padding:36px 18px;border:1px dashed var(--border-strong);border-radius:14px;color:var(--muted);text-align:center}
 .vm-empty b{display:block;color:var(--text);margin-bottom:4px}
 .vm-foot{display:flex;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;color:var(--faint);font-size:12.5px}
@@ -55,6 +56,29 @@ pub(crate) const SCRIPT: &str = r#"(function () {
   };
 
   const running = vm => vm.status === "Running" || vm.status === "Ready";
+
+  const span = seconds => {
+    const minutes = Math.max(0, Math.floor(seconds / 60));
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours}h ${minutes % 60}m`;
+    return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+  };
+
+  function idleFact(vm) {
+    const stopped = vm.status === "Stopped";
+    if (!vm.last_used || (stopped && !vm.persistent)) return fact("Idle limit", "—");
+    // Mirrors the bridge: deletion wins when both limits have passed.
+    const events = [];
+    if (vm.persistent) events.push([vm.last_used + vm.idle_delete, "Deleted if idle in"]);
+    if (!stopped) events.push([vm.last_used + vm.idle_stop, vm.persistent ? "Stopped if idle in" : "Deleted if idle in"]);
+    events.sort((a, b) => a[0] - b[0]);
+    const now = Date.now() / 1000;
+    const [at, label] = events.find(([due, text]) => due <= now && text.startsWith("Deleted")) || events[0];
+    const left = at - now;
+    return fact(label, left > 0 ? span(left) : "Next check");
+  }
+
   const clamp = value => Math.max(0, Math.min(100, value));
   const level = value => value >= 90 ? "critical" : value >= 75 ? "warning" : "normal";
 
@@ -136,6 +160,8 @@ pub(crate) const SCRIPT: &str = r#"(function () {
     facts.append(fact("Network in / out", `${bytes(vm.rx_bytes)} / ${bytes(vm.tx_bytes)}`));
     facts.append(fact(running(vm) ? "Up for" : "Created", since(running(vm) ? vm.started_at : vm.created_at)));
     facts.append(fact("Processes", vm.processes ? String(vm.processes) : "No agent"));
+    facts.append(fact("Idle for", vm.last_used ? span(Date.now() / 1000 - vm.last_used) : "—"));
+    facts.append(idleFact(vm));
     card.append(facts);
     return card;
   }
@@ -188,7 +214,7 @@ pub(crate) const SCRIPT: &str = r#"(function () {
 
 pub(crate) fn main() -> String {
     format!(
-        r#"<main class="page vms"><div class="page-h"><h1>Virtual machines</h1><p>VMs launched through the Virtual Machine Bridge, with their limits and live resource use.</p></div><section class="kpis" aria-label="VM summary"><div class="card kpi"><span>Running</span><strong id="running">Loading…</strong></div><div class="card kpi"><span>vCPUs allocated</span><strong id="vcpus">—</strong></div><div class="card kpi"><span>Memory allocated</span><strong id="memory">—</strong></div></section><div class="flash error" id="error" role="alert" hidden>{}<span></span></div><section class="vm-list" id="vm-list" aria-live="polite"></section><footer class="vm-foot"><span>VMs are ephemeral unless marked Persistent: stopping an ephemeral VM deletes it and its disk.</span><span id="refreshed">Refreshes every 5 seconds</span></footer></main>"#,
+        r#"<main class="page vms"><div class="page-h"><h1>Virtual machines</h1><p>VMs launched through the Virtual Machine Bridge, with their limits and live resource use.</p></div><section class="kpis" aria-label="VM summary"><div class="card kpi"><span>Running</span><strong id="running">Loading…</strong></div><div class="card kpi"><span>vCPUs allocated</span><strong id="vcpus">—</strong></div><div class="card kpi"><span>Memory allocated</span><strong id="memory">—</strong></div></section><div class="flash error" id="error" role="alert" hidden>{}<span></span></div><section class="vm-list" id="vm-list" aria-live="polite"></section><footer class="vm-foot"><span>VMs are ephemeral unless marked Persistent: stopping an ephemeral VM deletes it and its disk. Idle VMs are stopped after 6 hours and persistent ones deleted after 24 by default.</span><span id="refreshed">Refreshes every 5 seconds</span></footer></main>"#,
         portal_ui::ICON_WARN
     )
 }
