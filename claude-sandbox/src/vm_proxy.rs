@@ -2,7 +2,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
@@ -36,6 +36,7 @@ const DEFAULT_MAX_MEDIA: usize = 16;
 const DEFAULT_MAX_REQUESTS: usize = 16;
 const DEFAULT_MAX_RELAY_CONNECTIONS: usize = 32;
 const DEFAULT_RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const PERSISTENT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const HELP: &str = "vm - restricted Incus virtual-machine bridge\n\
 \n\
@@ -44,7 +45,8 @@ Usage:\n\
   vm status\n\
   vm list [--json]\n\
   vm info NAME [--json]\n\
-  vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot]\n\
+  vm launch NAME (--image images:ALIAS | --image LOCAL | --iso MEDIA) [--cpus N] [--memory SIZE] [--disk SIZE] [--no-secureboot] [--persistent]\n\
+  vm start NAME           boot a stopped persistent VM\n\
   vm stop NAME [--force]\n\
   vm restart NAME [--force]\n\
   vm delete NAME\n\
@@ -57,7 +59,9 @@ Usage:\n\
   vm media [--json]\n\
   vm media-delete NAME\n\
 \n\
-VMs are always ephemeral: stopping a VM deletes it and its disk.\n\
+VMs are ephemeral by default: stopping one deletes it and its disk.\n\
+--persistent VMs keep their disk when stopped, are stopped when the sandbox exits,\n\
+and remain until `vm delete`.\n\
 exec needs the Incus agent, which images: VMs have and ISO installs do not.\n\
 console-log requires an Incus server newer than 6.0.0 for VMs.\n";
 
@@ -129,6 +133,20 @@ impl Drop for Snapshot {
     }
 }
 
+struct LaunchClaim {
+    names: Arc<Mutex<HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for LaunchClaim {
+    fn drop(&mut self) {
+        self.names
+            .lock()
+            .expect("launch lock poisoned")
+            .remove(&self.name);
+    }
+}
+
 struct RequestSlot(Arc<AtomicUsize>);
 
 impl Drop for RequestSlot {
@@ -154,6 +172,7 @@ pub(crate) struct IncusBridge {
     relays: Arc<Mutex<HashMap<String, Relay>>>,
     relay_start: Arc<Mutex<()>>,
     import_lock: Arc<Mutex<()>>,
+    launching: Arc<Mutex<HashSet<String>>>,
     healthy: Arc<AtomicBool>,
     cleaned: Arc<AtomicBool>,
     shutting_down: Arc<AtomicBool>,
@@ -174,6 +193,7 @@ struct LaunchOptions {
     memory: String,
     disk: String,
     no_secureboot: bool,
+    persistent: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -188,6 +208,9 @@ enum VmCommand {
         json: bool,
     },
     Launch(LaunchOptions),
+    Start {
+        name: String,
+    },
     Stop {
         name: String,
         force: bool,
@@ -245,6 +268,7 @@ impl IncusBridge {
             relays: Arc::new(Mutex::new(HashMap::new())),
             relay_start: Arc::new(Mutex::new(())),
             import_lock: Arc::new(Mutex::new(())),
+            launching: Arc::new(Mutex::new(HashSet::new())),
             healthy: Arc::new(AtomicBool::new(false)),
             cleaned: Arc::new(AtomicBool::new(false)),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -584,7 +608,7 @@ impl IncusBridge {
     fn checked_report(&self) -> String {
         let report = self.preflight_report();
         if preflight_is_healthy(&report) && !self.cleaned.swap(true, Ordering::AcqRel) {
-            self.cleanup_instances();
+            self.cleanup_instances(false);
         }
         report
     }
@@ -616,6 +640,7 @@ impl IncusBridge {
             VmCommand::List { json } => self.list(json),
             VmCommand::Info { name, json } => self.info(&name, json),
             VmCommand::Launch(options) => self.launch(&options),
+            VmCommand::Start { name } => self.instance_action("start", &name, false),
             VmCommand::Stop { name, force } => self.instance_action("stop", &name, force),
             VmCommand::Restart { name, force } => self.instance_action("restart", &name, force),
             VmCommand::Delete { name } => self.instance_action("delete", &name, true),
@@ -648,13 +673,14 @@ impl IncusBridge {
         let mut output = String::new();
         for item in instances.as_array().into_iter().flatten() {
             output.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 string_field(item, "name"),
                 string_field(item, "status"),
                 string_array(item, "ipv4").join(","),
                 string_array(item, "ipv6").join(","),
                 string_field(item, "cpus"),
-                string_field(item, "memory")
+                string_field(item, "memory"),
+                lifetime(item)
             ));
         }
         Response::ok(output)
@@ -696,17 +722,39 @@ impl IncusBridge {
             return json_response(&instance);
         }
         Response::ok(format!(
-            "name: {}\nstatus: {}\nipv4: {}\nipv6: {}\ncpus: {}\nmemory: {}\n",
+            "name: {}\nstatus: {}\nipv4: {}\nipv6: {}\ncpus: {}\nmemory: {}\nlifetime: {}\n",
             string_field(&instance, "name"),
             string_field(&instance, "status"),
             string_array(&instance, "ipv4").join(", "),
             string_array(&instance, "ipv6").join(", "),
             string_field(&instance, "cpus"),
-            string_field(&instance, "memory")
+            string_field(&instance, "memory"),
+            lifetime(&instance)
         ))
     }
 
     fn launch(&self, options: &LaunchOptions) -> Response {
+        // The failure paths below force-delete NAME, so it must not already
+        // exist and no concurrent launch may create it.
+        if !self
+            .launching
+            .lock()
+            .expect("launch lock poisoned")
+            .insert(options.name.clone())
+        {
+            return Response::error(format!("'{}' is already being launched", options.name));
+        }
+        let _claim = LaunchClaim {
+            names: Arc::clone(&self.launching),
+            name: options.name.clone(),
+        };
+        match self.instances() {
+            Ok(instances) if instances.iter().any(|(name, _)| *name == options.name) => {
+                return Response::error(format!("instance '{}' already exists", options.name));
+            }
+            Ok(_) => {}
+            Err(error) => return Response::error(error),
+        }
         self.stop_relay(&options.name);
         let wanted = match &options.source {
             LaunchSource::PublicImage(_) => None,
@@ -795,7 +843,7 @@ impl IncusBridge {
     }
 
     fn instance_action(&self, verb: &str, name: &str, force: bool) -> Response {
-        if matches!(verb, "stop" | "delete") {
+        if matches!(verb, "start" | "stop" | "delete") {
             self.stop_relay(name);
         }
         let mut args = vec![
@@ -1493,17 +1541,76 @@ impl IncusBridge {
         );
     }
 
-    fn cleanup_instances(&self) {
-        self.stop_all_relays();
-        if let Ok(instances) = self.query(
+    /// Every project instance's name and whether it was launched `--persistent`.
+    fn instances(&self) -> Result<Vec<(String, bool)>, String> {
+        let instances = self.query(
             "/1.0/instances?recursion=1&project=claude-sandbox",
             Duration::from_secs(30),
-        ) {
-            for instance in instances.as_array().into_iter().flatten() {
-                if let Some(name) = instance.get("name").and_then(Value::as_str) {
-                    self.force_delete(name);
-                }
+        )?;
+        Ok(instances
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|instance| {
+                let name = instance.get("name").and_then(Value::as_str)?;
+                Some((name.to_string(), is_persistent(instance)))
+            })
+            .collect())
+    }
+
+    /// Deletes ephemeral VMs. With `stop_persistent`, persistent VMs are shut
+    /// down, gracefully first, and kept; otherwise they are left as they are.
+    fn cleanup_instances(&self, stop_persistent: bool) {
+        self.stop_all_relays();
+        let Ok(instances) = self.instances() else {
+            return;
+        };
+        let mut stops = Vec::new();
+        for (name, persistent) in instances {
+            if !persistent {
+                self.force_delete(&name);
+            } else if stop_persistent {
+                let bridge = self.clone();
+                stops.push(thread::spawn(move || bridge.shut_down(&name)));
             }
+        }
+        for stop in stops {
+            let _ = stop.join();
+        }
+    }
+
+    fn shut_down(&self, name: &str) {
+        let target = format!("{}:{name}", self.remote);
+        let graceful = vec![
+            "stop".to_string(),
+            "--timeout".to_string(),
+            PERSISTENT_STOP_TIMEOUT.as_secs().to_string(),
+            "--project".to_string(),
+            self.project.to_string(),
+            target.clone(),
+        ];
+        let stopped = self
+            .run_command(
+                &graceful,
+                CommandInput::Null,
+                PERSISTENT_STOP_TIMEOUT + Duration::from_secs(10),
+                COMMAND_OUTPUT_LIMIT,
+            )
+            .is_ok_and(|output| output.status.success() && !output.timed_out);
+        if !stopped {
+            let forced = vec![
+                "stop".to_string(),
+                "--force".to_string(),
+                "--project".to_string(),
+                self.project.to_string(),
+                target,
+            ];
+            let _ = self.run_command(
+                &forced,
+                CommandInput::Null,
+                DEFAULT_TIMEOUT,
+                COMMAND_OUTPUT_LIMIT,
+            );
         }
     }
 }
@@ -1562,9 +1669,9 @@ pub fn run(
                     &watchdog_log,
                     &format!("parent {parent_pid} exited (ppid now {current_ppid}), cleaning up"),
                 );
-                watchdog_bridge.cleanup_instances();
+                watchdog_bridge.cleanup_instances(true);
                 thread::sleep(Duration::from_secs(2));
-                watchdog_bridge.cleanup_instances();
+                watchdog_bridge.cleanup_instances(true);
                 let _ = socket_identity.remove_if_owned();
                 process::exit(0);
             }
@@ -1666,6 +1773,7 @@ fn parse_args(args: &[String]) -> Result<VmCommand, String> {
             Ok(VmCommand::Info { name, json })
         }
         "launch" => parse_launch(&args[1..]).map(VmCommand::Launch),
+        "start" => parse_single_name(&args[1..]).map(|name| VmCommand::Start { name }),
         "stop" => {
             parse_action(&args[1..], true).map(|(name, force)| VmCommand::Stop { name, force })
         }
@@ -1746,6 +1854,7 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
     let mut memory = "4GiB".to_string();
     let mut disk = "20GiB".to_string();
     let mut no_secureboot = false;
+    let mut persistent = false;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -1789,6 +1898,7 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
                 disk = value.to_string();
             }
             "--no-secureboot" => no_secureboot = true,
+            "--persistent" => persistent = true,
             flag => return Err(format!("unknown launch option: {flag}")),
         }
         index += 1;
@@ -1801,6 +1911,7 @@ fn parse_launch(args: &[String]) -> Result<LaunchOptions, String> {
         memory,
         disk,
         no_secureboot,
+        persistent,
     })
 }
 
@@ -1949,16 +2060,15 @@ fn build_launch(
         );
     }
     let body = serde_json::to_string(&json!({
-        "ephemeral": true,
+        "ephemeral": !options.persistent,
         "config": config,
         "devices": devices,
     }))
     .expect("launch JSON serialization failed");
-    let mut args = vec![
-        "create".to_string(),
-        "--vm".to_string(),
-        "--ephemeral".to_string(),
-    ];
+    let mut args = vec!["create".to_string(), "--vm".to_string()];
+    if !options.persistent {
+        args.push("--ephemeral".to_string());
+    }
     if matches!(options.source, LaunchSource::Iso(_)) {
         args.push("--empty".to_string());
     }
@@ -2235,7 +2345,12 @@ fn summarize_instance(instance: &Value) -> Value {
         "ipv6": ipv6,
         "cpus": config.and_then(|c| c.get("limits.cpu")).and_then(Value::as_str).unwrap_or(""),
         "memory": config.and_then(|c| c.get("limits.memory")).and_then(Value::as_str).unwrap_or(""),
+        "persistent": is_persistent(instance),
     })
+}
+
+fn is_persistent(instance: &Value) -> bool {
+    instance.get("ephemeral").and_then(Value::as_bool) == Some(false)
 }
 
 fn portal_instance(instance: &Value) -> Value {
@@ -2300,6 +2415,7 @@ fn portal_instance(instance: &Value) -> Value {
     json!({
         "name": summary["name"],
         "status": summary["status"],
+        "persistent": summary["persistent"],
         "ipv4": summary["ipv4"],
         "image": setting("image.description"),
         "created_at": instance.get("created_at").and_then(Value::as_str).unwrap_or(""),
@@ -2338,6 +2454,14 @@ fn size_bytes(value: &str) -> Option<u64> {
         _ => return None,
     };
     number.checked_mul(scale)
+}
+
+fn lifetime(summary: &Value) -> &'static str {
+    if summary["persistent"] == true {
+        "persistent"
+    } else {
+        "ephemeral"
+    }
 }
 
 fn string_field<'a>(value: &'a Value, field: &str) -> &'a str {
@@ -2601,6 +2725,24 @@ mod tests {
         assert!(parse_args(&strings(&["exec", "test", "id"])).is_err());
         assert!(parse_args(&strings(&["exec", "test", "--", "--project"])).is_ok());
         assert!(parse_args(&strings(&["launch", "test", "--image", "--project"])).is_err());
+        assert!(matches!(
+            parse_args(&strings(&[
+                "launch",
+                "test",
+                "--image",
+                "images:debian/13",
+                "--persistent"
+            ])),
+            Ok(VmCommand::Launch(LaunchOptions {
+                persistent: true,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            parse_args(&strings(&["start", "test"])),
+            Ok(VmCommand::Start { .. })
+        ));
+        assert!(parse_args(&strings(&["start", "test", "--force"])).is_err());
     }
 
     #[test]
@@ -2612,6 +2754,7 @@ mod tests {
             memory: "8GiB".to_string(),
             disk: "40GiB".to_string(),
             no_secureboot: true,
+            persistent: false,
         };
         let (public_args, public_body) = build_launch(&base, "pool", "system", REMOTE, PROJECT);
         assert_eq!(
@@ -2670,6 +2813,14 @@ mod tests {
         let body: Value = serde_json::from_str(&iso_body).unwrap();
         assert_eq!(body["devices"]["iso"]["source"], "ubuntu-iso");
         assert_eq!(body["devices"]["iso"]["boot.priority"], "10");
+
+        let mut persistent = iso;
+        persistent.persistent = true;
+        let (persistent_args, persistent_body) =
+            build_launch(&persistent, "pool", "system", REMOTE, PROJECT);
+        assert!(!persistent_args.contains(&"--ephemeral".to_string()));
+        let body: Value = serde_json::from_str(&persistent_body).unwrap();
+        assert_eq!(body["ephemeral"], false);
     }
 
     #[test]
@@ -2909,6 +3060,9 @@ a = sys.argv[1:]
 if a and a[0] == "query" and "/profiles/default" in a[-1]:
     print(json.dumps({"devices": {"root": {"type": "disk", "path": "/", "pool": "default"}}}))
     raise SystemExit(0)
+if a and a[0] == "query" and "/instances?" in a[-1]:
+    print(json.dumps([{"name": "kept", "ephemeral": False}]))
+    raise SystemExit(0)
 if a and a[0] == "create":
     pathlib.Path(__file__).with_name("stdin").write_bytes(sys.stdin.buffer.read())
     raise SystemExit(0)
@@ -2926,6 +3080,7 @@ raise SystemExit(0)
             memory: "4GiB".to_string(),
             disk: "20GiB".to_string(),
             no_secureboot: false,
+            persistent: false,
         });
         assert_ne!(response.exit_code, 0);
         let calls = fs::read_to_string(root.join("calls")).unwrap();
@@ -2949,6 +3104,69 @@ raise SystemExit(0)
         assert_eq!(stdin["ephemeral"], true);
         assert_eq!(stdin["config"]["limits.cpu"], "2");
         assert_eq!(stdin["devices"]["root"]["size"], "20GiB");
+
+        fs::remove_file(root.join("calls")).unwrap();
+        let response = bridge.launch(&LaunchOptions {
+            name: "kept".to_string(),
+            source: LaunchSource::PublicImage("images:ubuntu/24.04".to_string()),
+            cpus: 2,
+            memory: "4GiB".to_string(),
+            disk: "20GiB".to_string(),
+            no_secureboot: false,
+            persistent: false,
+        });
+        assert!(response.stderr.contains("'kept' already exists"));
+        bridge.launching.lock().unwrap().insert("busy".to_string());
+        let response = bridge.launch(&LaunchOptions {
+            name: "busy".to_string(),
+            source: LaunchSource::PublicImage("images:ubuntu/24.04".to_string()),
+            cpus: 2,
+            memory: "4GiB".to_string(),
+            disk: "20GiB".to_string(),
+            no_secureboot: false,
+            persistent: true,
+        });
+        assert!(response.stderr.contains("already being launched"));
+        let calls = fs::read_to_string(root.join("calls")).unwrap();
+        assert!(!calls.contains("create") && !calls.contains("delete"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cleanup_deletes_ephemeral_and_stops_persistent_vms() {
+        if !Path::new("/usr/bin/python3").exists() {
+            return;
+        }
+        let root = temp_dir("cleanup");
+        let fake = root.join("incus");
+        executable(
+            &fake,
+            r#"#!/usr/bin/python3
+import json, pathlib, sys
+with pathlib.Path(__file__).with_name("calls").open("a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+a = sys.argv[1:]
+if a[0] == "query":
+    print(json.dumps([{"name": "scratch", "ephemeral": True}, {"name": "keep", "ephemeral": False}]))
+if a[0] == "stop" and "--timeout" in a:
+    raise SystemExit(1)
+"#,
+        );
+        let bridge = test_bridge(&root, &fake);
+        let calls = || fs::read_to_string(root.join("calls")).unwrap_or_default();
+
+        bridge.cleanup_instances(false);
+        let startup = calls();
+        assert!(startup.contains("delete --force --project claude-sandbox claude-sandbox:scratch"));
+        assert!(!startup.contains("keep"));
+
+        fs::remove_file(root.join("calls")).unwrap();
+        bridge.cleanup_instances(true);
+        let exit = calls();
+        assert!(exit.contains("delete --force --project claude-sandbox claude-sandbox:scratch"));
+        assert!(exit.contains("stop --timeout 30 --project claude-sandbox claude-sandbox:keep"));
+        assert!(exit.contains("stop --force --project claude-sandbox claude-sandbox:keep"));
+        assert!(!exit.contains("delete --force --project claude-sandbox claude-sandbox:keep"));
         let _ = fs::remove_dir_all(root);
     }
 

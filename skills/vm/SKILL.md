@@ -26,10 +26,17 @@ vm status
 
 ## Facts that shape every task
 
-- **Every VM is ephemeral.** `vm stop`, a guest shutdown, `vm delete` and the
-  sandbox exiting all delete the VM and its disk. A guest *reboot* keeps it.
-  Copy anything worth keeping out of the guest before stopping it.
-- **All project VMs are deleted when the bridge starts healthy and when the
+- **VMs are ephemeral by default.** `vm stop`, a guest shutdown, `vm delete`
+  and the sandbox exiting all delete the VM and its disk. A guest *reboot*
+  keeps it. Copy anything worth keeping out of the guest before stopping it.
+- **`vm launch --persistent` opts a VM out.** Its disk survives `vm stop` and
+  guest shutdowns, `vm start NAME` boots it again, and only `vm delete`
+  removes it. When the sandbox exits it is shut down, not deleted, and it is
+  still there next session — check `vm list` (last column) before launching.
+  Use it only when the task needs to power the VM off and keep it, or the user
+  wants it kept; it holds disk quota while stopped, so delete it once it is no
+  longer wanted.
+- **Ephemeral VMs are deleted when the bridge starts healthy and when the
   launcher exits.** If the bridge itself is killed, they keep running until
   the next `--vm` start; the user can check with
   `incus list --project claude-sandbox`. Imported ISOs and disk images are kept
@@ -55,6 +62,8 @@ vm launch web --image images:debian/13                 # public Incus image, boo
 vm launch web --image images:ubuntu/24.04 --cpus 4 --memory 8GiB --disk 40GiB
 vm launch inst --iso ubuntu-server --no-secureboot     # empty VM booting an imported ISO
 vm launch app --image my-disk                          # imported qcow2
+vm launch db --image images:debian/13 --persistent     # survives stop and later sessions
+vm stop db && vm start db                              # persistent only: power-cycle, disk kept
 vm list
 vm info web
 ```
@@ -151,14 +160,15 @@ client is needed; `vm view` is that plus `remote-viewer` in kiosk mode.
 4. When the installer asks to reboot, run `vm eject NAME` first. It
    hot-unplugs the ISO while the guest keeps running, so the reboot starts
    the installed system rather than the installer again.
-5. Then let the guest reboot itself. Do **not** `vm stop` it — that deletes
-   the freshly installed disk. Installers that power off instead of
-   rebooting (or are told to) delete the VM the same way, so make sure the
-   last step is a reboot.
+5. Then let the guest reboot itself. On an ephemeral VM, do **not**
+   `vm stop` it — that deletes the freshly installed disk. Installers that
+   power off instead of rebooting (or are told to) delete it the same way, so
+   make sure the last step is a reboot. A `--persistent` VM may power off;
+   `vm start` it afterwards.
 
-An installed system lives only as long as the VM does. If the user needs it to
-outlast the session, say so before starting: that is outside what the bridge
-offers.
+On an ephemeral VM, an installed system lives only as long as the VM does.
+If the install must survive a power-off or outlast the session, launch it
+with `--persistent` from the start — an ephemeral VM cannot be converted.
 
 ## Clean up
 
@@ -167,4 +177,5 @@ vm delete web
 ```
 
 Delete VMs as soon as the task is done; they hold host memory and count
-against the project limits.
+against the project limits. A persistent VM is not cleaned up for you, so
+delete it unless the user asked to keep it.

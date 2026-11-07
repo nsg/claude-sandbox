@@ -7,6 +7,7 @@ pub(crate) const STYLE: &str = r#"
 .vm{padding:20px;display:grid;gap:18px;min-width:0}
 .vm-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
 .vm-head h3{font-size:17px;overflow-wrap:anywhere}
+.vm-chips{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .vm-head p{margin-top:3px;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
 .gauges{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px 24px}
 .gauge-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:13px}
@@ -112,7 +113,10 @@ pub(crate) const SCRIPT: &str = r#"(function () {
     title.append(el("h3", "mono", vm.name));
     title.append(el("p", "", [vm.image || "Installed from media", ...(vm.ipv4 || [])].join(" · ")));
     head.append(title);
-    head.append(statusChip(vm.status));
+    const chips = el("div", "vm-chips");
+    if (vm.persistent) chips.append(el("span", "chip gray", "Persistent"));
+    chips.append(statusChip(vm.status));
+    head.append(chips);
     card.append(head);
 
     const cpu = cpuPercent(vm, now);
@@ -184,7 +188,7 @@ pub(crate) const SCRIPT: &str = r#"(function () {
 
 pub(crate) fn main() -> String {
     format!(
-        r#"<main class="page vms"><div class="page-h"><h1>Virtual machines</h1><p>VMs launched through the Virtual Machine Bridge, with their limits and live resource use.</p></div><section class="kpis" aria-label="VM summary"><div class="card kpi"><span>Running</span><strong id="running">Loading…</strong></div><div class="card kpi"><span>vCPUs allocated</span><strong id="vcpus">—</strong></div><div class="card kpi"><span>Memory allocated</span><strong id="memory">—</strong></div></section><div class="flash error" id="error" role="alert" hidden>{}<span></span></div><section class="vm-list" id="vm-list" aria-live="polite"></section><footer class="vm-foot"><span>VMs are ephemeral: stopping one deletes it and its disk.</span><span id="refreshed">Refreshes every 5 seconds</span></footer></main>"#,
+        r#"<main class="page vms"><div class="page-h"><h1>Virtual machines</h1><p>VMs launched through the Virtual Machine Bridge, with their limits and live resource use.</p></div><section class="kpis" aria-label="VM summary"><div class="card kpi"><span>Running</span><strong id="running">Loading…</strong></div><div class="card kpi"><span>vCPUs allocated</span><strong id="vcpus">—</strong></div><div class="card kpi"><span>Memory allocated</span><strong id="memory">—</strong></div></section><div class="flash error" id="error" role="alert" hidden>{}<span></span></div><section class="vm-list" id="vm-list" aria-live="polite"></section><footer class="vm-foot"><span>VMs are ephemeral unless marked Persistent: stopping an ephemeral VM deletes it and its disk.</span><span id="refreshed">Refreshes every 5 seconds</span></footer></main>"#,
         portal_ui::ICON_WARN
     )
 }
