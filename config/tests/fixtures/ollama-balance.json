@@ -1,0 +1,15 @@
+{
+  "included": {
+    "session": {
+      "remaining_percent": 75,
+      "resets_at": "2030-01-01T05:00:00Z"
+    },
+    "weekly": {
+      "remaining_percent": 39.6,
+      "resets_at": "2030-01-07T00:00:00Z"
+    }
+  },
+  "purchased": {
+    "balance_usd": 25
+  }
+}

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import fcntl
 import json
 import math
@@ -30,7 +31,7 @@ MAX_TUI_BYTES = 256 * 1024
 DEFAULT_TIMEOUT = 20.0
 TUI_ROWS = 40
 TUI_COLUMNS = 120
-OLLAMA_USAGE_URL = "https://ollama.com/api/usage"
+OLLAMA_BALANCE_URL = "https://ollama.com/api/balance"
 LABELS_ENV = "CLAUDE_SANDBOX_USAGE_LABELS"
 PROVIDERS = {"anthropic", "openai", "ollama"}
 CLAUDE_ENV_ALLOWLIST = {
@@ -263,19 +264,32 @@ def normalize_openai(raw: Any, observed_at: int) -> dict[str, Any]:
 
 
 def normalize_ollama(raw: Any, observed_at: int) -> dict[str, Any]:
-    limits = _object(_object(raw).get("limits"))
+    included = _object(_object(raw).get("included"))
     buckets: list[dict[str, Any]] = []
-    for name, raw_limit in limits.items():
-        limit = _object(raw_limit)
-        if limit.get("usage") is None:
-            continue
+    for name in ("session", "weekly"):
+        if name in included:
+            limit = _object(included[name])
+            buckets.append(
+                _bucket(
+                    name,
+                    "overall",
+                    _percent(100 - _number(limit.get("remaining_percent"))),
+                    _rfc3339_epoch(limit.get("resets_at")),
+                    label=name,
+                )
+            )
+    if "allowance_usd" in included:
+        allowance = decimal.Decimal(repr(_number(included["allowance_usd"])))
+        if allowance <= 0:
+            raise _fail("invalid-response")
+        balance = decimal.Decimal(repr(_number(included.get("balance_usd"))))
         buckets.append(
             _bucket(
-                _period_from_name(name),
+                "monthly",
                 "overall",
-                _percent(limit["usage"], fraction=True),
-                None,
-                label=_label(name),
+                _percent(float(100 * (allowance - balance) / allowance)),
+                _rfc3339_epoch(_object(included.get("period")).get("until")),
+                label="included credits",
             )
         )
     return _protocol("ollama", observed_at, buckets)
@@ -539,7 +553,7 @@ def _ollama_key(auth_path: Path | None = None) -> str:
 def probe_ollama(
     *,
     auth_path: Path | None = None,
-    url: str = OLLAMA_USAGE_URL,
+    url: str = OLLAMA_BALANCE_URL,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     request = urllib.request.Request(

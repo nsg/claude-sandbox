@@ -88,8 +88,9 @@ outside the agent-mounted workspace.</p>
 <p>The HTTP request itself reads that cache only and never contacts a provider.
 The collector obtains Anthropic limits through the built-in <code>/usage</code> view in
 an isolated Claude session without sending a model prompt, OpenAI limits from
-the Codex account rate-limit interface, and Ollama limits from its usage
-endpoint. The cache and public response retain provider limit and model labels
+the Codex account rate-limit interface, and Ollama limits from its balance
+endpoint: session and weekly limits on legacy plans, or included monthly credits
+as a percentage on credit plans. The cache and public response retain provider limit and model labels
 needed to interpret the percentages. They exclude credentials and tokens,
 account identifiers, billing amounts, costs and credits, and raw provider
 errors. The endpoint returns HTTP 503 only when every provider is unknown.

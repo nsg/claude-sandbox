@@ -127,14 +127,42 @@ class NormalizeTests(unittest.TestCase):
         value = usage_probe.normalize_openai(raw, 1893450000)
         self.assertIsNone(value["buckets"][-1]["resets_at"])
 
-    def test_ollama_normalization_is_sanitized(self) -> None:
-        result, value = self.normalize_cli("ollama", "ollama-usage.json")
+    def test_ollama_legacy_limits_are_sanitized(self) -> None:
+        result, value = self.normalize_cli("ollama", "ollama-balance.json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_contract(value, "ollama")
-        self.assertEqual([bucket["used_percent"] for bucket in value["buckets"]], [12, 3])
+        self.assertEqual([bucket["used_percent"] for bucket in value["buckets"]], [25, 60])
         self.assertEqual([bucket["label"] for bucket in value["buckets"]], ["session", "weekly"])
-        self.assertTrue(all(bucket["resets_at"] is None for bucket in value["buckets"]))
-        self.assertNotIn(b"cost", result.stdout)
+        self.assertEqual(
+            [bucket["resets_at"] for bucket in value["buckets"]], [1893474000, 1893974400]
+        )
+        self.assertNotIn(b"balance", result.stdout)
+
+    def test_ollama_included_credits_become_a_monthly_bucket(self) -> None:
+        raw = {
+            "included": {
+                "balance_usd": 72.5,
+                "allowance_usd": 100,
+                "period": {"from": "2029-12-15T00:00:00Z", "until": "2030-01-15T00:00:00Z"},
+            },
+            "purchased": {"balance_usd": 25},
+        }
+        value = usage_probe.normalize_ollama(raw, 1893456000)
+        self.assertEqual(
+            value["buckets"],
+            [
+                {
+                    "period": "monthly",
+                    "scope": "overall",
+                    "label": "included credits",
+                    "used_percent": 27,
+                    "resets_at": 1894665600,
+                }
+            ],
+        )
+        raw["included"]["balance_usd"] = 90
+        value = usage_probe.normalize_ollama(raw, 1893456000)
+        self.assertEqual(value["buckets"][0]["used_percent"], 10)
 
     def test_anthropic_normalization_uses_snapshot_time_and_preserves_model_name(self) -> None:
         result, value = self.normalize_cli("anthropic", "anthropic-usage.json")
@@ -169,7 +197,7 @@ class NormalizeTests(unittest.TestCase):
         self.assertNotIn("scope", bucket)
 
     def test_empty_or_malformed_input_fails_without_stdout(self) -> None:
-        for provider, raw in (("ollama", b'{"limits":{}}'), ("openai", b"not-json")):
+        for provider, raw in (("ollama", b'{"included":{}}'), ("openai", b"not-json")):
             result = subprocess.run(
                 [str(PROBE_PATH), "--normalize", provider],
                 input=raw,
@@ -214,8 +242,8 @@ class AcquisitionTests(unittest.TestCase):
         self.assertNotIn("private-model-id", encoded)
         self.assertNotIn("private-plan", encoded)
 
-    def test_ollama_calls_only_usage_endpoint(self) -> None:
-        fixture = (FIXTURES / "ollama-usage.json").read_bytes()
+    def test_ollama_calls_only_balance_endpoint(self) -> None:
+        fixture = (FIXTURES / "ollama-balance.json").read_bytes()
         requests: list[tuple[str, str | None]] = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -249,14 +277,14 @@ class AcquisitionTests(unittest.TestCase):
                 },
             ):
                 value = usage_probe.probe_ollama(
-                    url=f"http://127.0.0.1:{server.server_port}/api/usage", timeout=2
+                    url=f"http://127.0.0.1:{server.server_port}/api/balance", timeout=2
                 )
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
         self.assertEqual(value["provider"], "ollama")
-        self.assertEqual(requests, [("/api/usage", "Bearer test-only-key")])
+        self.assertEqual(requests, [("/api/balance", "Bearer test-only-key")])
 
     def test_anthropic_uses_isolated_safe_pty_and_only_usage_command(self) -> None:
         fixture = (FIXTURES / "anthropic-usage.json").read_text(encoding="utf-8")
