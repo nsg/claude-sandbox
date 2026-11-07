@@ -93,6 +93,7 @@ const FRAME_STDOUT = 1;
 const FRAME_STDERR = 2;
 const FRAME_EXIT = 3;
 const FRAME_STDIN_EOF = 4;
+// FRAME_HEARTBEAT (5) is the bridge's liveness probe and carries nothing.
 const FRAME_CHUNK = 32 * 1024;
 
 function frame(kind, payload) {
@@ -107,13 +108,43 @@ function frame(kind, payload) {
 function pipe(args) {
   const socket = net.createConnection(SOCKET_PATH);
   let pending = Buffer.alloc(0);
+  // A bridge too busy to read the request answers with one plain JSON line
+  // before switching to frames, and frames never start with "{".
+  let mode = null;
+  let json = "";
+  let blocked = 0;
   let exited = false;
+  let socketError = null;
 
   const exit = (code) => {
+    if (exited) {
+      return;
+    }
     exited = true;
     process.stdin.pause();
     socket.destroy();
-    process.stdout.write("", () => process.exit(code));
+    let waiting = 2;
+    const flushed = () => {
+      waiting -= 1;
+      if (waiting === 0) {
+        process.exit(code);
+      }
+    };
+    process.stdout.write("", flushed);
+    process.stderr.write("", flushed);
+  };
+
+  const output = (stream, payload) => {
+    if (!stream.write(payload)) {
+      blocked += 1;
+      socket.pause();
+      stream.once("drain", () => {
+        blocked -= 1;
+        if (blocked === 0 && !exited) {
+          socket.resume();
+        }
+      });
+    }
   };
 
   const sendStdinEof = () => {
@@ -121,6 +152,9 @@ function pipe(args) {
       socket.write(frame(FRAME_STDIN_EOF, Buffer.alloc(0)));
     }
   };
+
+  process.stdout.on("error", () => exit(1));
+  process.stderr.on("error", () => exit(1));
 
   socket.on("connect", () => {
     socket.write(JSON.stringify({ args, cwd: process.cwd() }) + "\n");
@@ -140,6 +174,13 @@ function pipe(args) {
   });
 
   socket.on("data", (chunk) => {
+    if (mode === null) {
+      mode = chunk[0] === 0x7b ? "json" : "frames";
+    }
+    if (mode === "json") {
+      json += chunk.toString();
+      return;
+    }
     pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
     while (pending.length >= 5) {
       const length = pending.readUInt32BE(1);
@@ -150,12 +191,9 @@ function pipe(args) {
       const payload = pending.subarray(5, 5 + length);
       pending = pending.subarray(5 + length);
       if (kind === FRAME_STDOUT) {
-        if (!process.stdout.write(payload)) {
-          socket.pause();
-          process.stdout.once("drain", () => socket.resume());
-        }
+        output(process.stdout, payload);
       } else if (kind === FRAME_STDERR) {
-        process.stderr.write(payload);
+        output(process.stderr, payload);
       } else if (kind === FRAME_EXIT && length === 4) {
         exit(payload.readInt32BE(0));
         return;
@@ -164,23 +202,41 @@ function pipe(args) {
   });
 
   socket.on("close", () => {
-    if (!exited) {
-      process.stderr.write("vm: lost the connection to the VM bridge\n");
-      exit(255);
-    }
-  });
-
-  socket.on("error", (error) => {
     if (exited) {
       return;
     }
-    exited = true;
-    if (error.code === "ENOENT") {
+    if (mode === "json") {
+      try {
+        const response = JSON.parse(json.trim());
+        process.stdout.write(response.stdout || "");
+        process.stderr.write(response.stderr || "");
+        exit(response.exit_code);
+        return;
+      } catch (_) {
+        // Fall through to the lost-connection report.
+      }
+    }
+    if (mode === null) {
+      // The bridge closes at once when every request slot is taken, and a
+      // refusal it sent can be lost if our request write fails first.
+      process.stderr.write(
+        "vm: the VM bridge closed the connection before answering; it may be busy, retry shortly\n",
+      );
+    } else {
+      const reason = socketError ? ": " + socketError.message : "";
+      process.stderr.write("vm: lost the connection to the VM bridge" + reason + "\n");
+    }
+    exit(255);
+  });
+
+  socket.on("error", (error) => {
+    if (error.code === "ENOENT" && !exited) {
+      exited = true;
       process.stderr.write("vm: sandbox was not launched with --vm\n");
       process.exit(1);
     }
-    process.stderr.write("vm-proxy-client: connection error: " + error.message + "\n");
-    process.exit(255);
+    // "close" follows and reports it, after any plain JSON refusal.
+    socketError = error;
   });
 }
 
