@@ -238,9 +238,25 @@ fn run_probe(
         OUTER_TIMEOUT,
     )?;
     if !output.status.success() {
-        return Err(format!("helper exited with {}", output.status));
+        return Err(match probe_reason(&output.stderr) {
+            Some(reason) => format!("helper exited with {}: {reason}", output.status),
+            None => format!("helper exited with {}", output.status),
+        });
     }
     usage_api::parse_probe(&output.stdout, provider, unix_time())
+}
+
+fn probe_reason(stderr: &[u8]) -> Option<&str> {
+    let reason = std::str::from_utf8(stderr)
+        .ok()?
+        .strip_prefix("usage-probe:")?
+        .strip_suffix('\n')?;
+    (!reason.is_empty()
+        && reason.len() <= 32
+        && reason
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'-'))
+    .then_some(reason)
 }
 
 fn probe_command(container_name: &str, provider: Provider) -> Command {
@@ -267,6 +283,7 @@ fn probe_command(container_name: &str, provider: Provider) -> Command {
 struct CommandOutput {
     status: std::process::ExitStatus,
     stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 struct OutputCapture {
@@ -307,20 +324,24 @@ impl OutputCapture {
     }
 
     fn read(mut self) -> Result<Vec<u8>, String> {
+        let too_large = || "helper output exceeds its size limit".to_string();
         if self.exceeds_limit() {
-            return Err("helper output exceeds its size limit".to_string());
+            return Err(too_large());
         }
+        let mut bytes = Vec::new();
         self.file
             .seek(SeekFrom::Start(0))
             .and_then(|_| {
-                let mut bytes = Vec::new();
                 self.file
                     .by_ref()
                     .take(MAX_HELPER_OUTPUT + 1)
                     .read_to_end(&mut bytes)
-                    .map(|_| bytes)
             })
-            .map_err(|error| format!("could not read helper output: {error}"))
+            .map_err(|error| format!("could not read helper output: {error}"))?;
+        if bytes.len() as u64 > MAX_HELPER_OUTPUT {
+            return Err(too_large());
+        }
+        Ok(bytes)
     }
 }
 
@@ -337,14 +358,17 @@ fn collect_command_output(
 ) -> Result<CommandOutput, String> {
     command.process_group(0);
     let capture = OutputCapture::new(capture_dir)?;
-    let stdout = capture
-        .file
-        .try_clone()
-        .map_err(|error| format!("could not capture helper output: {error}"))?;
+    let error_capture = OutputCapture::new(capture_dir)?;
+    let clone = |capture: &OutputCapture| {
+        capture
+            .file
+            .try_clone()
+            .map_err(|error| format!("could not capture helper output: {error}"))
+    };
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(clone(&capture)?))
+        .stderr(Stdio::from(clone(&error_capture)?))
         .spawn()
         .map_err(|error| format!("could not start helper: {error}"))?;
 
@@ -352,7 +376,7 @@ fn collect_command_output(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if capture.exceeds_limit() => {
+            Ok(None) if capture.exceeds_limit() || error_capture.exceeds_limit() => {
                 terminate_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
@@ -374,10 +398,12 @@ fn collect_command_output(
         }
     };
     let stdout = capture.read()?;
-    if stdout.len() as u64 > MAX_HELPER_OUTPUT {
-        return Err("helper output exceeds its size limit".to_string());
-    }
-    Ok(CommandOutput { status, stdout })
+    let stderr = error_capture.read()?;
+    Ok(CommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn terminate_process_group(pid: u32) {
@@ -529,9 +555,23 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, b"small");
 
+        let mut failure = Command::new("sh");
+        failure.args(["-c", "echo usage-probe:timeout >&2; exit 1"]);
+        let output = collect_command_output(failure, &directory, Duration::from_secs(2)).unwrap();
+        assert_eq!(output.stderr, b"usage-probe:timeout\n");
+
         let mut oversized = Command::new("sh");
         oversized.args(["-c", "head -c 70000 /dev/zero"]);
         assert!(collect_command_output(oversized, &directory, Duration::from_secs(2)).is_err());
+
+        let mut noisy = Command::new("sh");
+        noisy.args(["-c", "while :; do head -c 70000 /dev/zero >&2; done"]);
+        let started = Instant::now();
+        assert_eq!(
+            collect_command_output(noisy, &directory, Duration::from_secs(5)).unwrap_err(),
+            "helper output exceeds its size limit"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
 
         let mut slow = Command::new("sh");
         slow.args(["-c", "sleep 2"]);
@@ -549,6 +589,23 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn only_well_formed_probe_reasons_are_reported() {
+        assert_eq!(
+            probe_reason(b"usage-probe:invalid-response\n"),
+            Some("invalid-response")
+        );
+        for stderr in [
+            &b""[..],
+            b"usage-probe:\n",
+            b"usage-probe:Bearer secret\n",
+            b"usage-probe:timeout\nextra\n",
+            b"Error: no such container\n",
+        ] {
+            assert_eq!(probe_reason(stderr), None, "{stderr:?}");
+        }
     }
 
     #[test]
