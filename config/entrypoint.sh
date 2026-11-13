@@ -26,22 +26,10 @@ if [ -f /etc/claude/mcp.json ]; then
     fi
 fi
 
-# Merge managed opencode config into user-level opencode.json
-if [ -f /etc/opencode/opencode.json ]; then
-    OPENCODE_TARGET="$HOME/.config/opencode/opencode.json"
-    mkdir -p "$(dirname "$OPENCODE_TARGET")"
-    if [ -f "$OPENCODE_TARGET" ]; then
-        # Merge: image config wins over user config for shared keys (e.g. mcp.playwright)
-        jq -s '.[0] * .[1]' "$OPENCODE_TARGET" /etc/opencode/opencode.json > "$OPENCODE_TARGET.tmp" \
-            && mv "$OPENCODE_TARGET.tmp" "$OPENCODE_TARGET"
-    else
-        cp /etc/opencode/opencode.json "$OPENCODE_TARGET"
-    fi
-fi
+# Managed configs and instructions, deployed to each harness home.
 
-# Merge managed Codex config into user-level config.toml
-MANAGED_CODEX_CONFIG_SOURCE=/etc/codex/config.toml
-MANAGED_CODEX_CONFIG_TARGET="$HOME/.codex/config.toml"
+# Merge a managed TOML file into a user config inside # MANAGED markers,
+# preserving user-owned content outside the block.
 TOML_MANAGED_START="# MANAGED START"
 TOML_MANAGED_END="# MANAGED END"
 merge_managed_toml() {
@@ -65,11 +53,21 @@ $TOML_MANAGED_END"
     fi
 }
 
-if [ -f "$MANAGED_CODEX_CONFIG_SOURCE" ]; then
-    merge_managed_toml "$MANAGED_CODEX_CONFIG_SOURCE" "$MANAGED_CODEX_CONFIG_TARGET"
-fi
+# Merge a managed JSON file into a user config; managed keys win.
+merge_managed_json() {
+    local source_file="$1"
+    local target_file="$2"
 
-# Merge managed AGENTS.md from image into user-level Claude and Codex files.
+    mkdir -p "$(dirname "$target_file")"
+    if [ -f "$target_file" ]; then
+        jq -s '.[0] * .[1]' "$target_file" "$source_file" > "$target_file.tmp" \
+            && mv "$target_file.tmp" "$target_file"
+    else
+        cp "$source_file" "$target_file"
+    fi
+}
+
+# Merge managed AGENTS.md from image into a harness instructions file.
 # The managed part is the H1 section from the source file (# Global
 # Instructions): it is replaced on every start, up to the next H1 or EOF.
 # Users can add their own H1 sections below; those are preserved.
@@ -77,17 +75,27 @@ fi
 # (/etc/AGENTS.<harness>.md). Overlays must contain only ## sections — no
 # H1 — so their content stays inside the managed H1 section (enforced in CI).
 MANAGED_SOURCE=/etc/AGENTS.md
-CLAUDE_MD="$HOME/.claude/CLAUDE.md"
-CODEX_AGENTS_MD="$HOME/.codex/AGENTS.md"
-OPENCODE_AGENTS_MD="$HOME/.config/opencode/AGENTS.md"
-merge_managed_file() {
-    local target_file="$1"
+merge_managed_instructions() {
+    local harness="$1"
+    local target_file="$2"
+    local overlay="/etc/AGENTS.$harness.md"
+    local managed_h1=""
+    local managed_block=""
     local user_content=""
+
+    [ -f "$MANAGED_SOURCE" ] || return 0
+    managed_h1=$(head -n 1 "$MANAGED_SOURCE")
+    managed_block=$(cat "$MANAGED_SOURCE")
+    if [ -s "$overlay" ]; then
+        managed_block="$managed_block
+
+$(cat "$overlay")"
+    fi
 
     mkdir -p "$(dirname "$target_file")"
 
     if [ -f "$target_file" ]; then
-        user_content=$(awk -v h1="$MANAGED_H1" '
+        user_content=$(awk -v h1="$managed_h1" '
             # Clean up legacy <!-- MANAGED --> marker blocks
             $0 == "<!-- MANAGED START -->" { legacy = 1; next }
             legacy { if ($0 == "<!-- MANAGED END -->") legacy = 0; next }
@@ -100,49 +108,56 @@ merge_managed_file() {
         ' "$target_file")
     fi
 
-    printf '%s\n' "$MANAGED_BLOCK" > "$target_file"
+    printf '%s\n' "$managed_block" > "$target_file"
     if [ -n "$user_content" ]; then
         printf '\n%s\n' "$user_content" >> "$target_file"
     fi
 }
 
-compose_managed_block() {
-    local overlay="/etc/AGENTS.$1.md"
-    MANAGED_BLOCK=$(cat "$MANAGED_SOURCE")
-    if [ -s "$overlay" ]; then
-        MANAGED_BLOCK="$MANAGED_BLOCK
+# Symlink Claude's auto-memory into .claude-sandbox so it's per-project
+# (all containers mount at /workspace, so the slug is always "-workspace")
+MEMORY_TARGET=/workspace/.claude-sandbox/memory
+link_claude_memory() {
+    local memory_link="$1/projects/-workspace/memory"
 
-$(cat "$overlay")"
+    if [ ! -L "$memory_link" ]; then
+        mkdir -p "$(dirname "$memory_link")"
+        if [ -d "$memory_link" ] && [ ! -e "$MEMORY_TARGET" ]; then
+            # Migrate existing memory into the project folder
+            mkdir -p "$(dirname "$MEMORY_TARGET")"
+            mv "$memory_link" "$MEMORY_TARGET"
+        elif [ -d "$memory_link" ]; then
+            # The project already has memory; keep this copy aside
+            mv "$memory_link" "$memory_link.pre-sandbox.$(date +%s)"
+        fi
+        ln -s "$MEMORY_TARGET" "$memory_link"
     fi
+    # Ensure the target directory exists (symlink may point to a not-yet-created path)
+    mkdir -p "$MEMORY_TARGET"
 }
 
-if [ -f "$MANAGED_SOURCE" ]; then
-    MANAGED_H1=$(head -n 1 "$MANAGED_SOURCE")
-    compose_managed_block claude
-    merge_managed_file "$CLAUDE_MD"
-    compose_managed_block codex
-    merge_managed_file "$CODEX_AGENTS_MD"
-    compose_managed_block opencode
-    merge_managed_file "$OPENCODE_AGENTS_MD"
-fi
+deploy_claude_home() {
+    merge_managed_instructions claude "$1/CLAUDE.md"
+    link_claude_memory "$1"
+}
 
-# Symlink auto-memory into .claude-sandbox so it's per-project
-# (all containers mount at /workspace, so the slug is always "-workspace")
-MEMORY_LINK="$HOME/.claude/projects/-workspace/memory"
-MEMORY_TARGET=/workspace/.claude-sandbox/memory
-if [ ! -L "$MEMORY_LINK" ]; then
-    mkdir -p "$(dirname "$MEMORY_LINK")"
-    if [ -d "$MEMORY_LINK" ]; then
-        # Migrate existing memory into the project folder
-        mkdir -p "$(dirname "$MEMORY_TARGET")"
-        mv "$MEMORY_LINK" "$MEMORY_TARGET"
-    else
-        mkdir -p "$MEMORY_TARGET"
+deploy_codex_home() {
+    if [ -f /etc/codex/config.toml ]; then
+        merge_managed_toml /etc/codex/config.toml "$1/config.toml"
     fi
-    ln -s "$MEMORY_TARGET" "$MEMORY_LINK"
-fi
-# Ensure the target directory exists (symlink may point to a not-yet-created path)
-mkdir -p "$MEMORY_TARGET"
+    merge_managed_instructions codex "$1/AGENTS.md"
+}
+
+deploy_opencode_home() {
+    if [ -f /etc/opencode/opencode.json ]; then
+        merge_managed_json /etc/opencode/opencode.json "$1/opencode.json"
+    fi
+    merge_managed_instructions opencode "$1/AGENTS.md"
+}
+
+deploy_claude_home "$HOME/.claude"
+deploy_codex_home "$HOME/.codex"
+deploy_opencode_home "$HOME/.config/opencode"
 
 # Choose Buildah's storage driver. Overlay is far smaller and faster than vfs
 # but needs a real filesystem under /var/lib/containers, which the image's
