@@ -66,6 +66,10 @@ struct Cli {
     #[arg(short = 'p', long = "port", action = clap::ArgAction::Append)]
     ports: Vec<u16>,
 
+    /// Mount an extra host path, HOST[:CONTAINER][:ro|rw] (can be repeated); CONTAINER defaults to the same path, with $HOME mapped to /root
+    #[arg(short = 'v', long = "volume", value_name = "SPEC", action = clap::ArgAction::Append)]
+    volumes: Vec<String>,
+
     /// Automatically update without prompting
     #[arg(long)]
     auto_update: bool,
@@ -1319,6 +1323,127 @@ fn stale_image_ids(
     stale
 }
 
+const BUILTIN_MOUNT_DESTINATIONS: &[&str] = &[
+    "/workspace",
+    CONTAINER_PROXY_RUNTIME_DIR,
+    "/root/.claude",
+    "/root/.codex",
+    "/root/.agents",
+    "/root/.t3",
+    "/root/.config/opencode",
+    "/root/.local/share/opencode",
+    "/etc/localtime",
+    "/etc/timezone",
+];
+
+#[derive(Debug, PartialEq)]
+struct ExtraMount {
+    host: PathBuf,
+    container: PathBuf,
+    read_only: bool,
+}
+
+impl ExtraMount {
+    fn podman_arg(&self) -> String {
+        let mode = if self.read_only { "ro" } else { "rw" };
+        format!(
+            "{}:{}:{mode}",
+            self.host.display(),
+            self.container.display()
+        )
+    }
+}
+
+fn parse_extra_mount(spec: &str, cwd: &Path, home: &Path) -> Result<ExtraMount, String> {
+    let invalid = |reason: &str| format!("invalid --volume '{spec}': {reason}");
+    let parts: Vec<&str> = spec.split(':').collect();
+    let mode = |value: &str| match value {
+        "ro" => Ok(true),
+        "rw" => Ok(false),
+        _ => Err(invalid("the mode must be ro or rw")),
+    };
+    let (host, container, read_only) = match parts.as_slice() {
+        [host] => (*host, None, false),
+        [host, last @ ("ro" | "rw")] => (*host, None, mode(last)?),
+        [host, container] => (*host, Some(*container), false),
+        [host, container, last] => (*host, Some(*container), mode(last)?),
+        _ => return Err(invalid("expected HOST[:CONTAINER][:ro|rw]")),
+    };
+    if host.is_empty() {
+        return Err(invalid("the host path is empty"));
+    }
+
+    let host = if host == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = host.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        cwd.join(host)
+    };
+    let host: PathBuf = host.components().collect();
+
+    let container = match container {
+        Some(path) if !path.starts_with('/') => {
+            return Err(invalid("the container path must be absolute"));
+        }
+        Some(path) => PathBuf::from(path).components().collect(),
+        None => match host.strip_prefix(home) {
+            Ok(rest) => Path::new("/root").join(rest),
+            Err(_) => host.clone(),
+        },
+    };
+    if container
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(invalid("the container path must not contain '..'"));
+    }
+    if container == Path::new("/") {
+        return Err(invalid("the container path must not be /"));
+    }
+    if BUILTIN_MOUNT_DESTINATIONS
+        .iter()
+        .any(|reserved| container == Path::new(reserved))
+    {
+        return Err(invalid(&format!(
+            "{} is already mounted by claude-sandbox",
+            container.display()
+        )));
+    }
+
+    Ok(ExtraMount {
+        host,
+        container,
+        read_only,
+    })
+}
+
+fn resolve_extra_mounts(
+    specs: &[String],
+    cwd: &Path,
+    home: &Path,
+) -> Result<Vec<ExtraMount>, String> {
+    let mut mounts: Vec<ExtraMount> = Vec::new();
+    for spec in specs {
+        let mount = parse_extra_mount(spec, cwd, home)?;
+        if mounts
+            .iter()
+            .any(|other| other.container == mount.container)
+        {
+            return Err(format!(
+                "invalid --volume '{spec}': {} is mounted twice",
+                mount.container.display()
+            ));
+        }
+        if !mount.host.exists() {
+            fs::create_dir_all(&mount.host)
+                .map_err(|error| format!("could not create {}: {error}", mount.host.display()))?;
+        }
+        mounts.push(mount);
+    }
+    Ok(mounts)
+}
+
 fn admin_pasta_network(container_env: &[String]) -> Option<String> {
     container_env.iter().find_map(|entry| {
         entry
@@ -1383,8 +1508,13 @@ fn run_container(
     portal: Option<&PortalState>,
     explicit_container_name: Option<&str>,
     vm_enabled: bool,
+    volumes: &[String],
 ) {
     let cwd = env::current_dir().expect("Could not get current directory");
+    let extra_mounts = resolve_extra_mounts(volumes, &cwd, &home_dir()).unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        std::process::exit(2);
+    });
     let proxy_runtime_dir = create_proxy_runtime_dir().unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         std::process::exit(1);
@@ -1515,6 +1645,10 @@ fn run_container(
     // bind-mount it when present, otherwise Docker fails to statfs the source.
     if Path::new("/etc/timezone").exists() {
         cmd.args(["-v", "/etc/timezone:/etc/timezone:ro"]);
+    }
+
+    for mount in &extra_mounts {
+        cmd.arg("-v").arg(mount.podman_arg());
     }
 
     for entry in container_env {
@@ -1909,6 +2043,7 @@ fn main() {
                 None,
                 None,
                 cli.vm,
+                &cli.volumes,
             );
         }
         Some(Commands::T3code { args }) => {
@@ -1992,6 +2127,7 @@ fn main() {
                 portal.as_ref(),
                 named_container,
                 cli.vm,
+                &cli.volumes,
             );
         }
         Some(Commands::WrapType {
@@ -2026,6 +2162,7 @@ fn main() {
                 None,
                 None,
                 cli.vm,
+                &cli.volumes,
             );
         }
     }
@@ -2047,6 +2184,55 @@ mod tests {
             "claude-sandbox-main-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn extra_mount_specs_resolve_host_and_container_paths() {
+        let cwd = Path::new("/home/me/project");
+        let home = Path::new("/home/me");
+        let parse = |spec| parse_extra_mount(spec, cwd, home).map(|m| m.podman_arg());
+
+        assert_eq!(
+            parse("~/.claude-work").unwrap(),
+            "/home/me/.claude-work:/root/.claude-work:rw"
+        );
+        assert_eq!(parse("/srv/data:ro").unwrap(), "/srv/data:/srv/data:ro");
+        assert_eq!(
+            parse("cache/").unwrap(),
+            "/home/me/project/cache:/root/project/cache:rw"
+        );
+        assert_eq!(parse("/srv/data:/data/:ro").unwrap(), "/srv/data:/data:ro");
+        assert_eq!(parse("/srv/data:/data").unwrap(), "/srv/data:/data:rw");
+
+        for (spec, reason) in [
+            ("", "empty"),
+            ("/srv:data", "absolute"),
+            ("/srv:/data:rx", "ro or rw"),
+            ("/a:/b:ro:x", "expected"),
+            ("/srv:/", "not be /"),
+            ("/srv:/data/../root", "'..'"),
+            ("~/.claude", "already mounted"),
+            ("/srv:/workspace/", "already mounted"),
+        ] {
+            let error = parse(spec).unwrap_err();
+            assert!(error.contains(reason), "{spec}: {error}");
+        }
+    }
+
+    #[test]
+    fn extra_mounts_create_missing_host_directories_and_reject_duplicates() {
+        let root = test_root("extra-mounts");
+        let missing = root.join("new/dir");
+        let spec = format!("{}:/data", missing.display());
+
+        let mounts = resolve_extra_mounts(std::slice::from_ref(&spec), &root, &root).unwrap();
+        assert_eq!(mounts[0].host, missing);
+        assert!(missing.is_dir());
+
+        let error =
+            resolve_extra_mounts(&[spec.clone(), format!("{spec}:ro")], &root, &root).unwrap_err();
+        assert!(error.contains("mounted twice"), "{error}");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

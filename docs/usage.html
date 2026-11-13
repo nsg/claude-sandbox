@@ -70,6 +70,9 @@ claude-sandbox run 'cargo build &amp;&amp; cargo test'
 claude-sandbox -p 8080
 claude-sandbox -p 8080 -p 3000 -p 5173
 
+# Mount extra host folders (see &quot;Extra mounts&quot;)
+claude-sandbox -v ~/.claude-work -v /srv/datasets:/data:ro
+
 # Allow the agent to push the launch repository; run from its root
 # (executed on the host, see &quot;Git Push Bridge&quot;)
 claude-sandbox --allow-push
@@ -103,6 +106,14 @@ CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --install-service --portal --t3-
 <p>Claude Code, Codex, and opencode are installed in the container. Start <code>claude</code>, <code>codex</code>, or <code>opencode</code> from the shell, or use <code>run</code> to launch a command directly.</p>
 <p><code>run</code> preserves argument boundaries when given multiple arguments. With one argument, it passes the text verbatim to the shell, so pipelines, redirects, and command chaining work.</p>
 <p><a href="wrap.html"><code>--wrap</code></a> applies only to the default shell and <code>run</code>; combining it with <code>t3code</code> is an error.</p>
+<h2 id="extra-mounts"><a class="anchor" href="#extra-mounts" aria-hidden="true">#</a>Extra mounts</h2>
+<p>Besides the project and the shared agent homes (<code>~/.claude</code>, <code>~/.codex</code>, <code>~/.agents</code>, <code>~/.t3</code> and opencode&#39;s folders), each <code>-v</code> / <code>--volume HOST[:CONTAINER][:ro|rw]</code> mounts another host path, so state kept there survives container restarts. Repeat the flag for more mounts.</p>
+<ul>
+<li><code>HOST</code> may start with <code>~/</code>; a relative path is taken from the launch directory. A missing host path is created as a directory.</li>
+<li><code>CONTAINER</code> must be absolute. Leave it out to use the same path, with your home directory mapped to <code>/root</code>, so <code>-v ~/.claude-work</code> appears at <code>/root/.claude-work</code>.</li>
+<li>Mounts are read-write unless they end in <code>:ro</code>. A destination claude-sandbox already mounts, or one given twice, is an error.</li>
+</ul>
+<p>For example, a second Claude Code account can keep its login in its own folder: launch with <code>-v ~/.claude-work</code> and run Claude with <code>CLAUDE_CONFIG_DIR=/root/.claude-work</code>. <code>--install-service</code> records the flags, so the service mounts them too.</p>
 <h2 id="auto-update"><a class="anchor" href="#auto-update" aria-hidden="true">#</a>Auto-update</h2>
 <p>Skip the interactive update prompt and update automatically:</p>
 <pre><code class="language-bash">claude-sandbox --auto-update
