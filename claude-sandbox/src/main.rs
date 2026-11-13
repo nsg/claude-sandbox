@@ -70,6 +70,10 @@ struct Cli {
     #[arg(short = 'v', long = "volume", value_name = "SPEC", action = clap::ArgAction::Append)]
     volumes: Vec<String>,
 
+    /// Also deploy managed instructions, config and skills to a HARNESS=CONTAINER_PATH home inside a writable --volume (can be repeated; harness: claude, codex or opencode)
+    #[arg(long = "harness-home", value_name = "HARNESS=PATH", action = clap::ArgAction::Append)]
+    harness_homes: Vec<String>,
+
     /// Automatically update without prompting
     #[arg(long)]
     auto_update: bool,
@@ -998,6 +1002,73 @@ fn skill_target_dirs() -> [PathBuf; 2] {
     ]
 }
 
+fn skills_archive_cache() -> PathBuf {
+    cache_dir().join("claude-sandbox-skills.tar.gz")
+}
+
+fn write_skills_archive_cache(bytes: &[u8]) -> std::io::Result<()> {
+    let cache = skills_archive_cache();
+    let parent = cache.parent().expect("cache path has a parent");
+    fs::create_dir_all(parent)?;
+    let partial = parent.join(format!(
+        ".claude-sandbox-skills.tar.gz.{}.partial",
+        std::process::id()
+    ));
+    fs::write(&partial, bytes)
+        .and_then(|()| fs::rename(&partial, &cache))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&partial);
+        })
+}
+
+fn download_skills(client: &Client) -> Result<Vec<u8>, String> {
+    let bytes = client
+        .get(SKILLS_URL)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.bytes())
+        .map_err(|e| format!("Failed to download skills: {e}"))?
+        .to_vec();
+    if let Err(error) = write_skills_archive_cache(&bytes) {
+        eprintln!("Warning: could not cache the skills archive: {error}");
+    }
+    Ok(bytes)
+}
+
+fn unpack_skills(bytes: &[u8], target_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(target_dir).map_err(|e| {
+        format!(
+            "Failed to create skills directory {}: {e}",
+            target_dir.display()
+        )
+    })?;
+    Archive::new(GzDecoder::new(bytes))
+        .unpack(target_dir)
+        .map_err(|e| format!("Failed to extract skills to {}: {e}", target_dir.display()))?;
+    remove_retired_skills_in(target_dir);
+    Ok(())
+}
+
+// The container extracts this archive into extra Claude homes itself, so
+// symlinks and nested mounts there resolve inside the sandbox.
+fn skills_archive_for_harness_homes(homes: &[HarnessHome]) -> Option<PathBuf> {
+    if homes.is_empty() {
+        return None;
+    }
+    let cache = skills_archive_cache();
+    if cache.is_file() {
+        return Some(cache);
+    }
+    match download_skills(&Client::new()) {
+        Ok(_) if cache.is_file() => Some(cache),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("Warning: skills not deployed to extra harness homes: {error}");
+            None
+        }
+    }
+}
+
 fn install_skills(client: &Client, quiet: bool) {
     let target_dirs = skill_target_dirs();
     let cache_file = cache_dir().join("claude-sandbox-skills-lastmod");
@@ -1008,44 +1079,20 @@ fn install_skills(client: &Client, quiet: bool) {
         }
     }
 
-    let response = match client.get(SKILLS_URL).send() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to download skills: {}", e);
-            return;
-        }
-    };
-
-    let bytes = match response.bytes() {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("Failed to read skills tarball: {}", e);
+    let bytes = match download_skills(client) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("{error}");
             return;
         }
     };
 
     for target_dir in &target_dirs {
-        if let Err(e) = fs::create_dir_all(target_dir) {
-            eprintln!(
-                "Failed to create skills directory {}: {}",
-                target_dir.display(),
-                e
-            );
-            return;
-        }
-        let decoder = GzDecoder::new(&bytes[..]);
-        let mut archive = Archive::new(decoder);
-
-        if let Err(e) = archive.unpack(target_dir) {
-            eprintln!(
-                "Failed to extract skills to {}: {}",
-                target_dir.display(),
-                e
-            );
+        if let Err(error) = unpack_skills(&bytes, target_dir) {
+            eprintln!("{error}");
             return;
         }
     }
-    remove_retired_skills();
 
     if let Some(remote_lastmod) = get_last_modified(client, SKILLS_URL) {
         write_cache_file(&cache_file, &remote_lastmod);
@@ -1057,10 +1104,13 @@ fn install_skills(client: &Client, quiet: bool) {
 }
 
 fn remove_retired_skills() {
-    for skill_dir in skill_target_dirs()
-        .iter()
-        .flat_map(|dir| RETIRED_SKILLS.iter().map(|name| dir.join(name)))
-    {
+    for dir in skill_target_dirs() {
+        remove_retired_skills_in(&dir);
+    }
+}
+
+fn remove_retired_skills_in(dir: &Path) {
+    for skill_dir in RETIRED_SKILLS.iter().map(|name| dir.join(name)) {
         if skill_dir.join("SKILL.md").exists()
             && let Err(e) = fs::remove_dir_all(&skill_dir)
         {
@@ -1326,6 +1376,7 @@ fn stale_image_ids(
 const BUILTIN_MOUNT_DESTINATIONS: &[&str] = &[
     "/workspace",
     CONTAINER_PROXY_RUNTIME_DIR,
+    CONTAINER_SKILLS_ARCHIVE,
     "/root/.claude",
     "/root/.codex",
     "/root/.agents",
@@ -1444,6 +1495,83 @@ fn resolve_extra_mounts(
     Ok(mounts)
 }
 
+const HARNESSES: &[&str] = &["claude", "codex", "opencode"];
+
+const HARNESS_HOMES_ENV: &str = "CLAUDE_SANDBOX_HARNESS_HOMES";
+const CONTAINER_SKILLS_ARCHIVE: &str = "/run/claude-sandbox-skills.tar.gz";
+
+#[derive(Debug, PartialEq)]
+struct HarnessHome {
+    harness: &'static str,
+    container: PathBuf,
+}
+
+fn parse_harness_home(spec: &str, mounts: &[ExtraMount]) -> Result<HarnessHome, String> {
+    let invalid = |reason: &str| format!("invalid --harness-home '{spec}': {reason}");
+    let (name, path) = spec
+        .split_once('=')
+        .ok_or_else(|| invalid("expected HARNESS=CONTAINER_PATH"))?;
+    let harness = HARNESSES
+        .iter()
+        .find(|harness| **harness == name)
+        .ok_or_else(|| {
+            invalid(&format!(
+                "the harness must be one of {}",
+                HARNESSES.join(", ")
+            ))
+        })?;
+    if !path.starts_with('/') {
+        return Err(invalid("the container path must be absolute"));
+    }
+    if path.contains(':') || path.chars().any(char::is_control) {
+        return Err(invalid(
+            "the container path must not contain ':' or control characters",
+        ));
+    }
+    let container: PathBuf = PathBuf::from(path).components().collect();
+    if container
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(invalid("the container path must not contain '..'"));
+    }
+    let mount = mounts
+        .iter()
+        .filter(|mount| container.starts_with(&mount.container))
+        .max_by_key(|mount| mount.container.components().count())
+        .ok_or_else(|| invalid("the path is not inside a --volume mount"))?;
+    if mount.read_only {
+        return Err(invalid("the --volume holding it is read-only"));
+    }
+    Ok(HarnessHome { harness, container })
+}
+
+fn resolve_harness_homes(
+    specs: &[String],
+    mounts: &[ExtraMount],
+) -> Result<Vec<HarnessHome>, String> {
+    let mut homes: Vec<HarnessHome> = Vec::new();
+    for spec in specs {
+        let home = parse_harness_home(spec, mounts)?;
+        if homes.iter().any(|other| other.container == home.container) {
+            return Err(format!(
+                "invalid --harness-home '{spec}': {} is given twice",
+                home.container.display()
+            ));
+        }
+        homes.push(home);
+    }
+    Ok(homes)
+}
+
+fn harness_homes_env(homes: &[HarnessHome]) -> String {
+    let entries: Vec<String> = homes
+        .iter()
+        .map(|home| format!("{}={}", home.harness, home.container.display()))
+        .collect();
+    format!("{HARNESS_HOMES_ENV}={}", entries.join(":"))
+}
+
 fn admin_pasta_network(container_env: &[String]) -> Option<String> {
     container_env.iter().find_map(|entry| {
         entry
@@ -1509,12 +1637,19 @@ fn run_container(
     explicit_container_name: Option<&str>,
     vm_enabled: bool,
     volumes: &[String],
+    harness_home_specs: &[String],
 ) {
     let cwd = env::current_dir().expect("Could not get current directory");
-    let extra_mounts = resolve_extra_mounts(volumes, &cwd, &home_dir()).unwrap_or_else(|error| {
-        eprintln!("Error: {error}");
-        std::process::exit(2);
-    });
+    let (extra_mounts, harness_homes) = resolve_extra_mounts(volumes, &cwd, &home_dir())
+        .and_then(|mounts| {
+            let homes = resolve_harness_homes(harness_home_specs, &mounts)?;
+            Ok((mounts, homes))
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
+            std::process::exit(2);
+        });
+    let skills_archive = skills_archive_for_harness_homes(&harness_homes);
     let proxy_runtime_dir = create_proxy_runtime_dir().unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         std::process::exit(1);
@@ -1649,6 +1784,15 @@ fn run_container(
 
     for mount in &extra_mounts {
         cmd.arg("-v").arg(mount.podman_arg());
+    }
+    if !harness_homes.is_empty() {
+        cmd.arg("-e").arg(harness_homes_env(&harness_homes));
+    }
+    if let Some(archive) = &skills_archive {
+        cmd.arg("-v").arg(format!(
+            "{}:{CONTAINER_SKILLS_ARCHIVE}:ro",
+            archive.display()
+        ));
     }
 
     for entry in container_env {
@@ -2044,6 +2188,7 @@ fn main() {
                 None,
                 cli.vm,
                 &cli.volumes,
+                &cli.harness_homes,
             );
         }
         Some(Commands::T3code { args }) => {
@@ -2128,6 +2273,7 @@ fn main() {
                 named_container,
                 cli.vm,
                 &cli.volumes,
+                &cli.harness_homes,
             );
         }
         Some(Commands::WrapType {
@@ -2163,6 +2309,7 @@ fn main() {
                 None,
                 cli.vm,
                 &cli.volumes,
+                &cli.harness_homes,
             );
         }
     }
@@ -2215,6 +2362,51 @@ mod tests {
             ("/srv:/workspace/", "already mounted"),
         ] {
             let error = parse(spec).unwrap_err();
+            assert!(error.contains(reason), "{spec}: {error}");
+        }
+    }
+
+    #[test]
+    fn harness_homes_must_sit_inside_a_writable_volume() {
+        let mounts = [
+            ExtraMount {
+                host: PathBuf::from("/home/me/.work"),
+                container: PathBuf::from("/root/.work"),
+                read_only: false,
+            },
+            ExtraMount {
+                host: PathBuf::from("/srv/shared"),
+                container: PathBuf::from("/shared"),
+                read_only: true,
+            },
+            ExtraMount {
+                host: PathBuf::from("/srv/frozen"),
+                container: PathBuf::from("/root/.work/frozen"),
+                read_only: true,
+            },
+        ];
+
+        let home = parse_harness_home("codex=/root/.work/codex/", &mounts).unwrap();
+        assert_eq!(home.harness, "codex");
+        assert_eq!(home.container, Path::new("/root/.work/codex"));
+        assert!(parse_harness_home("claude=/root/.work", &mounts).is_ok());
+        assert_eq!(
+            harness_homes_env(&[home]),
+            "CLAUDE_SANDBOX_HARNESS_HOMES=codex=/root/.work/codex"
+        );
+
+        for (spec, reason) in [
+            ("/root/.work", "HARNESS=CONTAINER_PATH"),
+            ("cursor=/root/.work", "claude, codex, opencode"),
+            ("claude=root/.work", "absolute"),
+            ("claude=/root/.work/../.claude", "'..'"),
+            ("claude=/root/.workshop", "not inside a --volume"),
+            ("claude=/shared/claude", "read-only"),
+            ("claude=/root/.work/frozen/claude", "read-only"),
+            ("claude=/root/.work/a:b", "':'"),
+            ("claude=/root/.work/a\nb", "control characters"),
+        ] {
+            let error = parse_harness_home(spec, &mounts).unwrap_err();
             assert!(error.contains(reason), "{spec}: {error}");
         }
     }

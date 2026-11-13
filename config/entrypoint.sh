@@ -26,7 +26,9 @@ if [ -f /etc/claude/mcp.json ]; then
     fi
 fi
 
-# Managed configs and instructions, deployed to each harness home.
+# Managed configs and instructions, deployed to every harness home: the
+# built-in ones below plus any extra homes the launcher passes in
+# CLAUDE_SANDBOX_HARNESS_HOMES (harness=path entries joined by ":").
 
 # Merge a managed TOML file into a user config inside # MANAGED markers,
 # preserving user-owned content outside the block.
@@ -136,6 +138,28 @@ link_claude_memory() {
     mkdir -p "$MEMORY_TARGET"
 }
 
+# The launcher installs skills into the built-in homes and mounts the same
+# archive here when extra homes are given. Codex and opencode read the shared
+# ~/.agents/skills, so only extra Claude homes need their own copy.
+SKILLS_ARCHIVE=/run/claude-sandbox-skills.tar.gz
+RETIRED_SKILLS=(claude codex opencode) # keep in sync with RETIRED_SKILLS in main.rs
+deploy_skills() {
+    local target_dir="$1"
+    local name=""
+
+    [ -f "$SKILLS_ARCHIVE" ] || return 0
+    if ! mkdir -p "$target_dir" \
+        || ! tar --no-same-owner -xzf "$SKILLS_ARCHIVE" -C "$target_dir"; then
+        echo "entrypoint: could not deploy skills to $target_dir" >&2
+        return 0
+    fi
+    for name in "${RETIRED_SKILLS[@]}"; do
+        if [ -f "$target_dir/$name/SKILL.md" ]; then
+            rm -rf "${target_dir:?}/$name"
+        fi
+    done
+}
+
 deploy_claude_home() {
     merge_managed_instructions claude "$1/CLAUDE.md"
     link_claude_memory "$1"
@@ -158,6 +182,22 @@ deploy_opencode_home() {
 deploy_claude_home "$HOME/.claude"
 deploy_codex_home "$HOME/.codex"
 deploy_opencode_home "$HOME/.config/opencode"
+
+if [ -n "$CLAUDE_SANDBOX_HARNESS_HOMES" ]; then
+    IFS=: read -r -a harness_homes <<< "$CLAUDE_SANDBOX_HARNESS_HOMES"
+    for entry in "${harness_homes[@]}"; do
+        harness="${entry%%=*}"
+        home="${entry#*=}"
+        case "$harness" in
+            claude)
+                deploy_claude_home "$home"
+                deploy_skills "$home/skills"
+                ;;
+            codex | opencode) "deploy_${harness}_home" "$home" ;;
+            *) echo "entrypoint: unknown harness '$harness' in CLAUDE_SANDBOX_HARNESS_HOMES" >&2 ;;
+        esac
+    done
+fi
 
 # Choose Buildah's storage driver. Overlay is far smaller and faster than vfs
 # but needs a real filesystem under /var/lib/containers, which the image's

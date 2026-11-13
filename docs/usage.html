@@ -72,6 +72,8 @@ claude-sandbox -p 8080 -p 3000 -p 5173
 
 # Mount extra host folders (see &quot;Extra mounts&quot;)
 claude-sandbox -v ~/.claude-work -v /srv/datasets:/data:ro
+# Treat a mounted folder as an extra harness home (see &quot;Extra harness homes&quot;)
+claude-sandbox -v ~/.claude-work --harness-home claude=/root/.claude-work
 
 # Allow the agent to push the launch repository; run from its root
 # (executed on the host, see &quot;Git Push Bridge&quot;)
@@ -114,6 +116,15 @@ CLAUDE_SANDBOX_PORTAL_PIN=123456 claude-sandbox --install-service --portal --t3-
 <li>Mounts are read-write unless they end in <code>:ro</code>. A destination claude-sandbox already mounts, or one given twice, is an error.</li>
 </ul>
 <p>For example, a second Claude Code account can keep its login in its own folder: launch with <code>-v ~/.claude-work</code> and run Claude with <code>CLAUDE_CONFIG_DIR=/root/.claude-work</code>. <code>--install-service</code> records the flags, so the service mounts them too.</p>
+<h2 id="extra-harness-homes"><a class="anchor" href="#extra-harness-homes" aria-hidden="true">#</a>Extra harness homes</h2>
+<p>claude-sandbox keeps the built-in harness homes, <code>~/.claude</code>, <code>~/.codex</code> and <code>~/.config/opencode</code>, supplied with its <a href="environment.html#managed-configuration">managed instructions</a>, managed config and skills. <code>--harness-home HARNESS=CONTAINER_PATH</code> marks another folder as a home for <code>claude</code>, <code>codex</code> or <code>opencode</code>, so it gets the same managed content. The path must be inside a <code>-v</code> mount that is not read-only and is created if missing; each path may be given once. Repeat the flag for more homes.</p>
+<pre><code class="language-bash">claude-sandbox -v ~/.work \
+  --harness-home claude=/root/.work/claude \
+  --harness-home codex=/root/.work/codex \
+  t3code
+</code></pre>
+<p>On every start the container replaces the managed <code># Global Instructions</code> section of the home&#39;s <code>CLAUDE.md</code> or <code>AGENTS.md</code> and merges the managed Codex <code>config.toml</code> block or opencode <code>opencode.json</code>, keeping everything else in those files. A Claude home also gets the sandbox skills in its <code>skills</code> folder and the per-project memory link; codex and opencode already read skills from the shared <code>~/.agents/skills</code>. Only what claude-sandbox ships is deployed: your own skills and instruction sections in the built-in homes are not copied, so the extra home keeps its own.</p>
+<p>Point the harness at the home yourself, for example with <code>CLAUDE_CONFIG_DIR=/root/.work/claude</code>, <code>CODEX_HOME=/root/.work/codex</code> or <code>OPENCODE_CONFIG_DIR</code>.</p>
 <h2 id="auto-update"><a class="anchor" href="#auto-update" aria-hidden="true">#</a>Auto-update</h2>
 <p>Skip the interactive update prompt and update automatically:</p>
 <pre><code class="language-bash">claude-sandbox --auto-update
