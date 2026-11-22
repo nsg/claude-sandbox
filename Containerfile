@@ -129,7 +129,8 @@ RUN chmod +x /usr/local/bin/vm
 
 # t3code instance launcher
 COPY config/t3code-register.sh /usr/local/bin/t3code-register
-RUN chmod +x /usr/local/bin/t3code-register
+COPY config/t3code-full-paths.js /usr/local/bin/t3code-full-paths
+RUN chmod +x /usr/local/bin/t3code-register /usr/local/bin/t3code-full-paths
 
 # Provider-neutral plan usage collector (invoked by the host admin service)
 COPY config/usage-probe.py /usr/local/bin/claude-sandbox-usage-probe
