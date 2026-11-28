@@ -34,9 +34,18 @@ vm status
   removes it (or the idle limit below). When the sandbox exits it is shut
   down, not deleted, and it is still there next session — check `vm list`
   (last column) before launching.
-  Use it only when the task needs to power the VM off and keep it, or the user
-  wants it kept; it holds disk quota while stopped, so delete it once it is no
-  longer wanted.
+- **Pick ephemeral unless the task truly needs persistent.** Persistent VMs
+  hold disk quota while stopped and pile up across sessions, so use them
+  sparingly. Launch one only when:
+  - the VM must survive a power-off it cannot avoid, such as an installer or
+    test that shuts the guest down rather than rebooting it, or
+  - the user asked for a VM that is kept for later sessions.
+
+  These are not reasons: a long job (an ephemeral VM lives as long as it is
+  used; raise `--idle-stop` if needed), setup that takes a while but can be
+  scripted again, or the VM might come in handy later. When in doubt, launch
+  it ephemeral. When you do create a persistent VM, tell the user, and delete
+  it once it is no longer wanted.
 - **Unused VMs are cleaned up.** Any `vm` command naming a VM (`info`,
   `exec`, `pipe`, `start`, `stop`, `restart`, `eject`, `screen`/`view`,
   `console-log`), an open `vm view` and an open `vm pipe` count as use;
@@ -276,9 +285,10 @@ client is needed; `vm view` is that plus `remote-viewer` in kiosk mode.
    make sure the last step is a reboot. A `--persistent` VM may power off;
    `vm start` it afterwards.
 
-On an ephemeral VM, an installed system lives only as long as the VM does.
-If the install must survive a power-off or outlast the session, launch it
-with `--persistent` from the start — an ephemeral VM cannot be converted.
+On an ephemeral VM, an installed system lives only as long as the VM does,
+which is enough for most tasks. Launch it with `--persistent` from the start
+only if the install must survive a power-off or outlast the session — an
+ephemeral VM cannot be converted.
 
 ## Clean up
 
