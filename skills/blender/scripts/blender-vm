@@ -1,0 +1,176 @@
+#!/bin/bash
+# blender-vm: run Blender and the official Blender Lab MCP server in a `vm` VM.
+#
+#   blender-vm up               create/boot the VM and provision it (idempotent)
+#   blender-vm mcp              MCP server on stdio (what .mcp.json runs)
+#   blender-vm status           VM state, Blender service, add-on socket
+#   blender-vm view             show the VM's screen on the virtual display
+#   blender-vm push PATH...     copy files/dirs into the guest's /root/work
+#   blender-vm pull GUEST [DIR] copy a guest path out into DIR (default: a new dir)
+#   blender-vm stop             power off, keeping the disk
+#   blender-vm destroy          delete the VM and its disk
+#   blender-vm install-mcp [HARNESS] [DIR]
+#                               register the MCP server in project DIR (default .)
+#                               for HARNESS claude (default), codex or opencode
+#
+# Environment: BLENDER_VM_NAME (default blender), and for `up` on first launch
+# BLENDER_VM_IMAGE (images:ubuntu/24.04), BLENDER_VM_CPUS (2),
+# BLENDER_VM_MEMORY (4GiB), BLENDER_VM_DISK (20GiB), BLENDER_VM_IDLE_DELETE (7d).
+set -euo pipefail
+
+NAME=${BLENDER_VM_NAME:-blender}
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROVISION=$HERE/provision.sh
+
+die() { echo "blender-vm: $*" >&2; exit 1; }
+say() { echo "blender-vm: $*" >&2; }
+
+# Prints Running, Stopped, ... or nothing when the VM does not exist.
+state() { vm list 2>/dev/null | awk -F'\t' -v n="$NAME" '$1 == n { print $2 }'; }
+
+wait_agent() {
+  for _ in $(seq 1 40); do
+    vm exec "$NAME" -- true >/dev/null 2>&1 && return 0
+    sleep 3
+  done
+  die "the guest agent in '$NAME' did not come up"
+}
+
+ensure_running() { # ensure_running CREATE(0|1)
+  case "$(state)" in
+    Running) ;;
+    "")
+      [ "$1" = 1 ] || die "VM '$NAME' does not exist; run: $HERE/blender-vm up"
+      say "launching VM '$NAME'"
+      vm launch "$NAME" --image "${BLENDER_VM_IMAGE:-images:ubuntu/24.04}" \
+        --cpus "${BLENDER_VM_CPUS:-2}" --memory "${BLENDER_VM_MEMORY:-4GiB}" \
+        --disk "${BLENDER_VM_DISK:-20GiB}" --persistent \
+        --idle-delete "${BLENDER_VM_IDLE_DELETE:-7d}" >&2 ;;
+    *)
+      say "starting VM '$NAME'"
+      vm start "$NAME" >&2 ;;
+  esac
+  wait_agent
+}
+
+addon_listening() {
+  vm exec "$NAME" -- bash -c '(exec 3<>/dev/tcp/127.0.0.1/9876) 2>/dev/null' >/dev/null 2>&1
+}
+
+cmd_up() {
+  ensure_running 1
+  local rev guest_rev
+  rev=$(sha256sum "$PROVISION" | cut -c1-16)
+  guest_rev=$(vm exec "$NAME" -- cat /etc/blender-vm.rev 2>/dev/null || true)
+  if [ "$guest_rev" = "$rev" ] && addon_listening; then
+    say "'$NAME' is up to date and Blender is listening"
+    return
+  fi
+  say "provisioning '$NAME' (Blender restarts; unsaved work in it is lost)"
+  vm pipe "$NAME" -- env BLENDER_VM_REV="$rev" bash -s < "$PROVISION"
+}
+
+cmd_mcp() {
+  # Claude Code waits for the MCP handshake, so do no provisioning here. The
+  # server connects to Blender per tool call, so Blender may still be booting.
+  ensure_running 0
+  exec vm pipe "$NAME" -- /usr/local/bin/blender-mcp-stdio
+}
+
+cmd_status() {
+  local s; s=$(state)
+  [ -n "$s" ] || { echo "VM '$NAME': does not exist"; return 1; }
+  echo "VM '$NAME': $s"
+  [ "$s" = Running ] || return 0
+  echo "blender-gui.service: $(vm exec "$NAME" -- systemctl is-active blender-gui.service 2>/dev/null || true)"
+  if addon_listening; then echo "MCP add-on: listening on 127.0.0.1:9876"
+  else echo "MCP add-on: not listening"; fi
+  echo "provisioned rev: $(vm exec "$NAME" -- cat /etc/blender-vm.rev 2>/dev/null || echo none)" \
+    "(local $(sha256sum "$PROVISION" | cut -c1-16))"
+}
+
+cmd_push() {
+  [ $# -gt 0 ] || die "usage: blender-vm push PATH..."
+  local p
+  for p in "$@"; do
+    [ -e "$p" ] || die "no such file: $p"
+    tar -C "$(dirname "$p")" -cf - --exclude=.claude-sandbox "$(basename "$p")" |
+      vm pipe "$NAME" -- tar -C /root/work -xf -
+    echo "/root/work/$(basename "$p")"
+  done
+}
+
+cmd_pull() {
+  [ $# -ge 1 ] || die "usage: blender-vm pull GUEST_PATH [LOCAL_DIR]"
+  local src=$1 dest=${2:-}
+  case "$src" in /*) ;; *) src=/root/work/$src ;; esac
+  if [ -z "$dest" ]; then dest=$(mktemp -d "${PWD}/blender-out.XXXX"); fi
+  mkdir -p "$dest"
+  vm pipe "$NAME" -- tar -C "$(dirname "$src")" -cf - "$(basename "$src")" |
+    tar -C "$dest" --no-same-owner -xf -
+  echo "$dest/$(basename "$src")"
+}
+
+# Writes this script's absolute path into the project's MCP config, so the
+# entry works wherever the skill is installed (project or global) and whatever
+# directory the harness starts the server from. Other servers are kept.
+cmd_install_mcp() {
+  local harness=claude dir file vm_name=
+  case "${1:-}" in claude|codex|opencode) harness=$1; shift ;; esac
+  [ $# -le 1 ] || die "usage: blender-vm install-mcp [claude|codex|opencode] [DIR]"
+  dir=${1:-.}
+  [ -d "$dir" ] || die "no such directory: $dir"
+  dir=$(cd "$dir" && pwd)
+  case "$harness" in
+    claude) file=$dir/.mcp.json ;;
+    codex) mkdir -p "$dir/.codex"; file=$dir/.codex/config.toml ;;
+    opencode) file=$dir/opencode.json ;;
+  esac
+  [ "$NAME" = blender ] || vm_name=$NAME
+  python3 - "$harness" "$file" "$HERE/blender-vm" "$vm_name" <<'PY'
+import json, os, re, sys
+harness, path, cmd, vm_name = sys.argv[1:]
+env = {"BLENDER_VM_NAME": vm_name} if vm_name else {}
+if harness == "codex":
+    text = open(path).read() if os.path.exists(path) else ""
+    # Drop an earlier [mcp_servers.blender] table and its subtables.
+    text = re.sub(r"(?ms)^\[mcp_servers\.blender(\.[^\]]*)?\]\n.*?(?=^\[|\Z)", "", text)
+    entry = f'[mcp_servers.blender]\ncommand = {json.dumps(cmd)}\nargs = ["mcp"]\n'
+    entry += "startup_timeout_sec = 60\n"  # a stopped VM takes ~15 s to start
+    if env:
+        entry += f"env = {{ BLENDER_VM_NAME = {json.dumps(vm_name)} }}\n"
+    text = text.rstrip("\n")
+    with open(path, "w") as f:
+        f.write((text + "\n\n" if text else "") + entry)
+else:
+    data = json.load(open(path)) if os.path.exists(path) else {}
+    if harness == "claude":
+        entry = {"type": "stdio", "command": cmd, "args": ["mcp"]}
+        if env:
+            entry["env"] = env
+        data.setdefault("mcpServers", {})["blender"] = entry
+    else:
+        data.setdefault("$schema", "https://opencode.ai/config.json")
+        entry = {"type": "local", "command": [cmd, "mcp"], "enabled": True, "timeout": 60000}
+        if env:
+            entry["environment"] = env
+        data.setdefault("mcp", {})["blender"] = entry
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+print(path)
+PY
+}
+
+case "${1:-}" in
+  up) cmd_up ;;
+  install-mcp) shift; cmd_install_mcp "$@" ;;
+  mcp) cmd_mcp ;;
+  status) cmd_status ;;
+  view) exec vm view "$NAME" ;;
+  push) shift; cmd_push "$@" ;;
+  pull) shift; cmd_pull "$@" ;;
+  stop) vm stop "$NAME" ;;
+  destroy) vm delete "$NAME" ;;
+  *) sed -n '2,18s/^# \{0,1\}//p' "$0"; [ -n "${1:-}" ] && exit 2 || exit 0 ;;
+esac
