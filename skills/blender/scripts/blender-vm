@@ -7,15 +7,17 @@
 #   blender-vm view             show the VM's screen on the virtual display
 #   blender-vm push PATH...     copy files/dirs into the guest's /root/work
 #   blender-vm pull GUEST [DIR] copy a guest path out into DIR (default: a new dir)
-#   blender-vm stop             power off, keeping the disk
 #   blender-vm destroy          delete the VM and its disk
 #   blender-vm install-mcp [HARNESS] [DIR]
 #                               register the MCP server in project DIR (default .)
 #                               for HARNESS claude (default), codex or opencode
 #
+# The VM is ephemeral: stopping it, the guest shutting down, 6 h idle or the
+# sandbox exiting deletes it and its disk. `up` builds a fresh one.
+#
 # Environment: BLENDER_VM_NAME (default blender), and for `up` on first launch
 # BLENDER_VM_IMAGE (images:ubuntu/24.04), BLENDER_VM_CPUS (2),
-# BLENDER_VM_MEMORY (4GiB), BLENDER_VM_DISK (20GiB), BLENDER_VM_IDLE_DELETE (7d).
+# BLENDER_VM_MEMORY (4GiB), BLENDER_VM_DISK (20GiB).
 set -euo pipefail
 
 NAME=${BLENDER_VM_NAME:-blender}
@@ -27,6 +29,7 @@ say() { echo "blender-vm: $*" >&2; }
 
 # Prints Running, Stopped, ... or nothing when the VM does not exist.
 state() { vm list 2>/dev/null | awk -F'\t' -v n="$NAME" '$1 == n { print $2 }'; }
+persistent() { vm list 2>/dev/null | awk -F'\t' -v n="$NAME" '$1 == n && $NF == "persistent" { f=1 } END { exit !f }'; }
 
 wait_agent() {
   for _ in $(seq 1 40); do
@@ -37,6 +40,11 @@ wait_agent() {
 }
 
 ensure_running() { # ensure_running CREATE(0|1)
+  # This skill uses only ephemeral VMs. A persistent one under this name is
+  # left over from an older version; leave it to the user.
+  persistent && die "VM '$NAME' is persistent; this skill uses only ephemeral VMs." \
+    "Ask the user whether to copy anything out of it and delete it (vm delete $NAME)," \
+    "or set BLENDER_VM_NAME to use another name"
   case "$(state)" in
     Running) ;;
     "")
@@ -44,8 +52,7 @@ ensure_running() { # ensure_running CREATE(0|1)
       say "launching VM '$NAME'"
       vm launch "$NAME" --image "${BLENDER_VM_IMAGE:-images:ubuntu/24.04}" \
         --cpus "${BLENDER_VM_CPUS:-2}" --memory "${BLENDER_VM_MEMORY:-4GiB}" \
-        --disk "${BLENDER_VM_DISK:-20GiB}" --persistent \
-        --idle-delete "${BLENDER_VM_IDLE_DELETE:-7d}" >&2 ;;
+        --disk "${BLENDER_VM_DISK:-20GiB}" >&2 ;;
     *)
       say "starting VM '$NAME'"
       vm start "$NAME" >&2 ;;
@@ -170,7 +177,6 @@ case "${1:-}" in
   view) exec vm view "$NAME" ;;
   push) shift; cmd_push "$@" ;;
   pull) shift; cmd_pull "$@" ;;
-  stop) vm stop "$NAME" ;;
   destroy) vm delete "$NAME" ;;
-  *) sed -n '2,18s/^# \{0,1\}//p' "$0"; [ -n "${1:-}" ] && exit 2 || exit 0 ;;
+  *) sed -n '2,20s/^# \{0,1\}//p' "$0"; [ -n "${1:-}" ] && exit 2 || exit 0 ;;
 esac

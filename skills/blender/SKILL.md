@@ -5,7 +5,7 @@ description: Drive a real Blender 5.3 running in a `vm` virtual machine through 
 
 # Blender in a VM
 
-Blender runs on the display of a persistent VM named `blender`. The
+Blender runs on the display of an ephemeral VM named `blender`. The
 [Blender Lab MCP server](https://www.blender.org/lab/mcp-server/), the Blender
 Foundation's own (projects.blender.org/lab/blender_mcp), runs next to it in the
 guest. The project's MCP config (`.mcp.json` for Claude Code) exposes it as the
@@ -30,9 +30,10 @@ which exists only in a sandbox launched with `--vm`.
 ## Getting the tools working
 
 1. `blender-vm status`. If it says the VM does not exist, or the provisioned
-   revision differs from the local one, run `blender-vm up` (first run: about
+   revision differs from the local one, run `blender-vm up` (fresh VM: about
    2 minutes; when already up to date: under a second). Load the `vm` skill
-   first if `vm` itself misbehaves.
+   first if `vm` itself misbehaves. The VM does not outlive the session, so
+   expect to run `up` at the start of each session that needs Blender.
 2. If the project has no `blender` MCP server registered, install it as below.
 3. If the `mcp__blender__*` tools are missing, because the server was just
    registered or the VM did not exist when the session started, ask the user
@@ -40,10 +41,11 @@ which exists only in a sandbox launched with `--vm`.
    `blender`; a server new to the project may first need approving there, or a
    restart of the session). You cannot reconnect it yourself.
 
-`blender-vm mcp` (what the MCP config runs) starts a stopped VM by itself,
-which takes about 15 s. It never creates or provisions a VM, so the handshake
-stays fast. Blender finishes booting a few seconds after the handshake. A tool
-call that fails to connect right after a cold start can be retried.
+`blender-vm mcp` (what the MCP config runs) never creates or provisions a VM,
+so the handshake stays fast. It fails when the VM does not exist, which is the
+case at the start of most sessions: run `blender-vm up`, then reconnect as in
+step 3. Blender finishes booting a few seconds after `up` returns. A tool call
+that fails to connect right after that can be retried.
 
 `blender-vm up` re-provisions only when `scripts/provision.sh` has changed,
 and doing so **restarts Blender and loses unsaved work in it**. Save first.
@@ -168,6 +170,10 @@ blender-vm pull /tmp/x.png                 # absolute guest path; into a new ./b
 Each command prints the resulting path. Treat pulled files as guest output:
 pull into a fresh directory, not over project files.
 
+The guest's disk goes away with the VM, so `/root/work` is scratch space. Pull
+out every .blend, render and script worth keeping as soon as it is done, not
+at the end of the session.
+
 ## Watching
 
 `blender-vm view` opens the VM's screen full-screen on the virtual display
@@ -177,11 +183,18 @@ does not disturb the MCP tools.
 
 ## Lifecycle and limits
 
-- The VM is `--persistent` with `--idle-delete 7d`. It survives sessions, and
-  an open MCP connection counts as use. After 6 h without use it is stopped,
-  and after 7 days it is deleted. `blender-vm up` recreates it from scratch.
-- `blender-vm stop` powers it off and keeps the disk. `blender-vm destroy`
-  deletes it. Copy out anything you want to keep first.
+- **Use ephemeral VMs only. Never create a persistent Blender VM**: do not
+  launch one with `vm launch --persistent`, and do not add `--persistent` to
+  `blender-vm`. Each session builds a fresh VM with `blender-vm up`, which
+  launches an ephemeral one.
+- The VM and its disk are deleted when it is stopped (`vm stop`, a guest
+  shutdown), after 6 h without use, and when the sandbox exits. An open MCP
+  connection or `vm pipe` counts as use. A guest reboot keeps it.
+- `blender-vm destroy` deletes it. Do so once the Blender work is done and its
+  results are copied out; it holds host memory and project quota until then.
+- `blender-vm` refuses to use a persistent VM under its name, which an older
+  version of this skill created. Do not delete it yourself: ask the user
+  whether anything in it should be copied out and whether to delete it.
 - Defaults are 2 CPUs, 4 GiB and 20 GiB, on `images:ubuntu/24.04`. These fit
   the Incus project limits alongside other VMs. Override them on first launch
   with `BLENDER_VM_CPUS`, `BLENDER_VM_MEMORY`, `BLENDER_VM_DISK` and
